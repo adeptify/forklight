@@ -1,17 +1,17 @@
 <!--
-THESIS: One Goal owns one working canvas. Refuse the global flat board that makes hierarchy look like telemetry.
-OWN-WORLD: A quiet local workbench in bone, graphite, muted teal, and restrained status color; controls feel precise, not decorative.
-STORY: Describe an outcome, let Main explain the right work shape, choose a Goal workspace, then follow its current phase and Task movement without losing context.
-FIRST VIEWPORT: A compact outcome entry leads into a Goal rail and one focused board; one-off work and history remain nearby but secondary, with the next decision always visible.
-FORM: Focused Goal workspace with a left context rail, fourth grounded structure, staged as one stable operating surface; seed 31d3080b.
-FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, and DESIGN.md
+THESIS: ForkLight opens on the user's work: what they want, what is moving, and what needs them next.
+OWN-WORLD: A light GoalBoard-family workbench on a cool near-white field, white paper, graphite ink, and action blue. Surfaces stay flat; status color always has text.
+STORY: Follow Goal, Plan, and Task as one visible tree, open the work that matters, and confirm decisions only from the one Decision Center.
+FIRST VIEWPORT: A compact product bar with Work and Decision Center; the user's real work tree beside one readable result file. Configuration stays in quiet System access.
+FORM: Compact product bar, resizable work tree, one result file, one Decision Center, auxiliary System.
+FINISH: Coherent desktop and mobile panes, preserved reading context, and DESIGN.md written from this built world.
 -->
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="color-scheme" content="light dark">
+<meta name="color-scheme" content="light">
 <meta name="referrer" content="no-referrer">
 <title>ForkLight</title>
 <link rel="stylesheet" href="app.css">
@@ -19,69 +19,87 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
 <body>
 <a class="skip" href="#main" data-i18n="skip">跳到主要内容</a>
 <div class="shell">
-  <aside class="sidebar" aria-label="Primary">
+  <header class="product-bar">
     <div class="brand">
-      <div class="brand-mark" aria-hidden="true">FL</div>
+      <div class="brand-mark" aria-hidden="true">
+        <svg class="brand-mark-icon" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+          <path d="M3 3.5h4.2v9H3.8V6.8H3V3.5zm5.8 0H13v2.2H9.8v1.6H13v2.2H9.8V12.5H8.8V3.5z" fill="currentColor"/>
+        </svg>
+      </div>
       <div class="brand-text">
         <div class="brand-name">ForkLight</div>
-        <div class="brand-sub" data-i18n="brandSub">控制中心</div>
+        <div class="brand-sub" data-i18n="brandSub">执行工作台</div>
       </div>
     </div>
 
-    <div class="nav-group-label" data-i18n="navConfigure">配置</div>
-    <nav id="fl-tabs" class="nav" aria-label="Sections">
-      <button type="button" data-tab="model" class="nav-item">
-        <span class="nav-icon" aria-hidden="true">1</span>
-        <span class="nav-label" data-i18n="navModels">模型</span>
-      </button>
-      <button type="button" data-tab="worker" class="nav-item">
-        <span class="nav-icon" aria-hidden="true">2</span>
-        <span class="nav-label" data-i18n="navWorkers">Worker</span>
-      </button>
-      <button type="button" data-tab="mains" class="nav-item">
-        <span class="nav-icon" aria-hidden="true">3</span>
-        <span class="nav-label" data-i18n="navMain">Main</span>
-      </button>
-      <button type="button" data-tab="delivery" class="nav-item">
-        <span class="nav-icon" aria-hidden="true">4</span>
-        <span class="nav-label" data-i18n="navDelivery">Delivery</span>
-      </button>
-
-      <div class="nav-group-label" data-i18n="navOperate">运行</div>
-      <button type="button" data-tab="work" class="nav-item active">
-        <span class="nav-icon" aria-hidden="true">&#9638;</span>
-        <span class="nav-label" data-i18n="navWork">工作</span>
-      </button>
-      <button type="button" data-tab="competitions" class="nav-item">
-        <span class="nav-icon" aria-hidden="true">&#9733;</span>
-        <span class="nav-label" data-i18n="navCompete">竞赛</span>
-      </button>
-      <button type="button" data-tab="stats" class="nav-item">
-        <span class="nav-icon" aria-hidden="true">&#9641;</span>
-        <span class="nav-label" data-i18n="navInsights">洞察</span>
-      </button>
+    <nav id="fl-tabs" class="nav" aria-label="Primary">
+      <div class="nav-scroll">
+        <button type="button" data-tab="work" class="nav-item active">
+          <span class="nav-icon" aria-hidden="true">
+            <svg viewBox="0 0 16 16" width="14" height="14"><path d="M2.5 3.5h11v2h-11zm0 3.5h7v2h-7zm0 3.5h11v2h-11z" fill="currentColor"/></svg>
+          </span>
+          <span class="nav-label" data-i18n="navWork">工作</span>
+        </button>
+        <button type="button" data-tab="decisions" class="nav-item">
+          <span class="nav-icon" aria-hidden="true">
+            <svg viewBox="0 0 16 16" width="14" height="14"><path d="M3 3.5h10v2H3zm0 3.5h7v2H3zm0 3.5h10v2H3z" fill="currentColor"/></svg>
+          </span>
+          <span class="nav-label" data-i18n="navDecisions">决定中心</span>
+        </button>
+      </div>
+      <details id="fl-system-menu" class="system-menu">
+        <summary class="nav-item system-summary">
+          <span class="nav-icon" aria-hidden="true">
+            <svg viewBox="0 0 16 16" width="14" height="14"><path d="M3 4h10v1.4H3zm0 3.3h10v1.4H3zm0 3.3h10V12H3z" fill="currentColor"/></svg>
+          </span>
+          <span class="nav-label" data-i18n="navSystem">系统</span>
+        </summary>
+        <div class="system-menu-list" role="group" aria-label="System">
+          <button type="button" data-tab="model" class="nav-item">
+            <span class="nav-label" data-i18n="navModels">模型</span>
+          </button>
+          <button type="button" data-tab="worker" class="nav-item">
+            <span class="nav-label" data-i18n="navWorkers">Worker</span>
+          </button>
+          <button type="button" data-tab="mains" class="nav-item">
+            <span class="nav-label" data-i18n="navMain">Main</span>
+          </button>
+          <button type="button" data-tab="delivery" class="nav-item">
+            <span class="nav-label" data-i18n="navDelivery">Delivery</span>
+          </button>
+          <button type="button" data-tab="limits" class="nav-item">
+            <span class="nav-label" data-i18n="navLimits">限额</span>
+          </button>
+          <button type="button" data-tab="competitions" class="nav-item">
+            <span class="nav-label" data-i18n="navCompete">竞赛</span>
+          </button>
+          <button type="button" data-tab="stats" class="nav-item">
+            <span class="nav-label" data-i18n="navInsights">洞察</span>
+          </button>
+          <div class="system-tray" data-fl-role="system-tray">
+            <div class="theme-switch" role="group" aria-label="Theme">
+              <span class="theme-label" data-i18n="theme">主题</span>
+              <button type="button" class="theme-btn" data-theme-set="light" id="fl-theme-light">Light</button>
+              <button type="button" class="theme-btn" data-theme-set="dark" id="fl-theme-dark">Dark</button>
+            </div>
+            <div class="lang-switch" role="group" aria-label="Language">
+              <span class="lang-label" data-i18n="lang">语言</span>
+              <button type="button" class="lang-btn" data-lang="zh" id="fl-lang-zh">中文</button>
+              <button type="button" class="lang-btn" data-lang="en" id="fl-lang-en">EN</button>
+            </div>
+            <div id="fl-status-bar" class="conn-pill" aria-live="polite"></div>
+          </div>
+        </div>
+      </details>
     </nav>
-
-    <div class="sidebar-foot">
-      <div class="theme-switch" role="group" aria-label="Theme">
-        <span class="theme-label" data-i18n="theme">主题</span>
-        <button type="button" class="theme-btn" data-theme-set="light" id="fl-theme-light">Light</button>
-        <button type="button" class="theme-btn" data-theme-set="dark" id="fl-theme-dark">Dark</button>
-      </div>
-      <div class="lang-switch" role="group" aria-label="Language">
-        <span class="lang-label" data-i18n="lang">语言</span>
-        <button type="button" class="lang-btn" data-lang="zh" id="fl-lang-zh">中文</button>
-        <button type="button" class="lang-btn" data-lang="en" id="fl-lang-en">EN</button>
-      </div>
-      <div id="fl-status-bar" class="conn-pill" aria-live="polite"></div>
-    </div>
-  </aside>
+  </header>
 
   <div class="workspace">
     <header class="topbar">
+      <button type="button" id="fl-mobile-back" class="btn sm mobile-back" hidden data-fl-role="mobile-back" data-i18n="mobileBack">返回</button>
       <div class="topbar-copy">
         <h1 id="fl-page-title" class="page-title">工作</h1>
-        <p id="fl-page-sub" class="page-sub">查看 Goal、独立 Plan 或一次性 Task 工作区，以及其中的工作</p>
+        <p id="fl-page-sub" class="page-sub">看清想达成什么、现在进展到哪、接下来需要你做什么</p>
       </div>
       <div id="fl-top-meta" class="top-meta"></div>
     </header>

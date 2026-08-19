@@ -1,0 +1,137 @@
+version: 2
+name: M5-A3 clean bundle authoritative Daemon-stop cleanup
+project: /Users/yijunwang/code/forklight
+taskClass: m5-clean-bundle-owned-process-cleanup
+taskFamily: forklight-product-graduation
+workerProfileId: grok-4-6-xhigh
+deliveryProfileId: forklight-self-upgrade
+executionPreference: auto
+routingDecision:
+  taskFamily: forklight-product-graduation
+  shortlist:
+    - provider: xai
+      model: grok-4.6
+      runtime: grok-build
+      effort: xhigh
+      workerProfileId: grok-4-6-xhigh
+    - provider: openai
+      model: gpt-5.6-luna
+      runtime: codex-cli
+      effort: max
+      workerProfileId: codex-luna-max
+  selectedWorker:
+    provider: xai
+    model: grok-4.6
+    runtime: grok-build
+    effort: xhigh
+    workerProfileId: grok-4-6-xhigh
+  selectedBecause:
+    code: user-specified
+    note: 一骏 authorizes continued Grok CLI 4.6 Xhigh native Goal execution; A2 supplied current successful native-Goal evidence and this is the sole bounded A3 product blocker.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+reviewRequirement:
+  requiredJudges: 2
+  reason: This exact-PID lifecycle code may otherwise signal an unrelated process after PID reuse. Two different-view read-only Judges inspect ownership authority and fallback safety before Main Integration.
+contract:
+  outcome: Let the installed clean-bundle lifecycle trust an authoritative public Daemon-stop result and never signal a possibly reused numeric PID afterward, while retaining the exact owned-PID fallback when stop is absent or failed.
+  presentation:
+    summary: 已经确认旧 Daemon 退出后，不再误碰后来复用同一 PID 的其他进程。
+    language: zh-CN
+  context:
+    - Read AGENTS.md, specs/m5-product-graduation/work-items/clean-clone-delivery/spec.md and goals/forklight-main-led-execution/evidence/m5-a3-clean-bundle-cleanup-stop.md completely before editing. The updated A3 Spec is the sole accepted requirements source.
+    - Two fresh bundle destinations repeated cleanup-failed and published nothing. An install-only diagnostic then proved exact Hub exit and authoritative public daemon stop complete normally with the old PID gone.
+    - stopDaemon returns `Daemon stopped` only after the captured old PID and socket are both gone. stopOwnedProcesses currently invokes it and then unconditionally probes/signals the stored numeric PID again.
+    - After authoritative stop the number no longer proves process ownership and may identify an unrelated new process. The second signal is both redundant and unsafe.
+    - Preserve all existing source work. Do not run a new full bundle, touch real ForkLight Home, commit, push, reset, reclaim or edit Goal evidence.
+  inScope:
+    - Distinguish authoritative installed Daemon-stop success from missing/not-running/failed stop using the existing bounded command result.
+    - After authoritative stop, mark Daemon cleanup complete and do not probe or signal the old numeric PID again.
+    - When authoritative success is absent, retain the current exact recorded-PID fallback and cleanup-failed result if the owned process cannot be removed.
+    - Add focused deterministic tests for immediate PID reuse after authoritative stop and for retained-owned-PID fallback.
+  outOfScope:
+    - Public Daemon stop timeout, Hub lifecycle, process-name scanning, locks, leases, PID ownership protocols, retry/replay, new settings/schema, bundle evidence schema, A3 real Task, Hub UI or unrelated cleanup refactor.
+    - Hiding a cleanup failure, treating exit code alone as authoritative when output says not running, or signalling any process not still proven to be the recorded owned child.
+  executionSteps:
+    - Trace stopOwnedProcesses, the installed CLI stop JSON shape and existing fixture hooks/tests only.
+    - Define the smallest private helper/branch that recognizes the existing authoritative `Daemon stopped` truth without broad string matching or new public schema.
+    - Make authoritative success skip the later numeric PID signal; keep fallback behavior unchanged otherwise.
+    - Add one PID-reuse non-signal regression and one fallback signal/failure regression, then run every accepted command once the slice is complete.
+  deliverables:
+    - Exact two-path Candidate in the clean-run builder and focused test.
+    - Handoff naming the authoritative shape, fallback behavior, test proof and any remaining uncertainty; no separate file.
+  modules:
+    - name: Owned process cleanup
+      responsibility: Stop only the exact Hub/Daemon started by clean bundle and interpret existing stop authority once.
+      consumes: [recorded PIDs, isolated Home/prefix, installed daemon stop process result]
+      produces: [hubGone and daemonGone without a post-authority stale-PID signal]
+      boundaries: [no process-name scan, retry, timeout change, public schema or unrelated signal]
+    - name: Focused lifecycle tests
+      responsibility: Prove reused PID non-signal and retained owned-process fallback.
+      consumes: [fixture command and process-control hooks]
+      produces: [deterministic behavioral regressions]
+      boundaries: [no real current Home, Provider, Hub UI or full bundle replay]
+  callChain:
+    - Clean bundle records the exact installed Hub and Daemon PIDs.
+    - Cleanup terminates the exact Hub, then invokes installed `daemon stop` against the isolated Home.
+    - Parsed authoritative success proves the old Daemon PID and socket are gone, so cleanup stops using that number.
+    - Otherwise cleanup checks/signals only the still-recorded exact owned PID and reports failure if it remains.
+  scenarios:
+    - name: PID reused after authoritative stop
+      given: Installed daemon stop proves the old PID/socket gone, and processControl now reports that numeric PID alive because another process reused it.
+      when: Clean-bundle cleanup finishes.
+      then: The reused PID is never signalled and Daemon cleanup is complete.
+    - name: Owned Daemon remains after failed stop
+      given: Installed daemon stop is missing, not authoritative or failed, and the recorded exact Daemon PID is still the owned process.
+      when: Cleanup runs.
+      then: The exact fallback signal path remains active and failure is reported if that process cannot be removed.
+  risks:
+    - Treating any exit-zero text as authority could leave a draining process. Require the existing successful stop projection that means old PID plus socket are gone.
+    - Removing all PID fallback would weaken cleanup. Skip it only after authoritative stop; preserve it otherwise.
+  changeBudget:
+    maxFiles: 2
+    maxDiffLines: 180
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 60000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxWorkerValidationRepairs: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, plans]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/clean-run/build-clean-run-bundle.ts
+    - tests/clean-run-bundle.test.ts
+acceptance:
+  criteria:
+    - An authoritative installed Daemon-stop result completes cleanup without any second probe or signal to the old numeric PID.
+    - Missing/not-running/failed stop truth preserves the exact recorded-PID fallback and truthful cleanup failure.
+    - No public timeout, process scan, retry, lock/lease, schema, Hub/UI or non-focused path change exists.
+    - Grok 4.6 Xhigh uses native Goal, ForkLight independently runs exact commands, two different-view Judges review the exact Revision and Main alone decides serial Integration.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/clean-run-bundle.test.ts
+    - git diff --check

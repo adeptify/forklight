@@ -1,0 +1,3659 @@
+diff --git a/src/core/main-delivery.ts b/src/core/main-delivery.ts
+new file mode 100644
+index 0000000..9111af6
+--- /dev/null
++++ b/src/core/main-delivery.ts
+@@ -0,0 +1,1253 @@
++/**
++ * Shared Main delivery prepare/decide service.
++ *
++ * Composes existing Task wait, Review Graph, Main review, and Integration
++ * authorities, then projects one bounded checkpoint. Never invents a Main
++ * decision, never integrates without explicit exact accept, and never treats
++ * an observation timeout as durable Task/Judge/Integration failure.
++ */
++import { readFile } from "node:fs/promises";
++import type { StateStore } from "../state/store.js";
++import {
++  latestMainReview,
++  latestVerificationEvent,
++  resolveLatestRevision,
++  summarizeRevision,
++} from "./candidate-revision.js";
++import type { PreflightReceipt } from "./integration.js";
++import { buildMainDecisionPacketForTask } from "./main-decision-packet.js";
++import { MAIN_REVIEW_REASON_MAX_LENGTH } from "./main-review.js";
++import {
++  evaluateReviewRequirementForTask,
++  getReviewGraphStatus,
++  PENDING_REVIEW_BLOCKS_INTEGRATION,
++  REQUIRED_REVIEW_GRAPH_INSUFFICIENT_USABLE,
++  REQUIRED_REVIEW_GRAPH_MISSING,
++  REQUIRED_REVIEW_GRAPH_STALE,
++  REQUIRED_REVIEW_GRAPH_UNDERSIZED,
++  STALE_MAIN_ACCEPT_AFTER_REVIEW,
++} from "./review-graph.js";
++import { buildTaskDecisionView } from "./task-decision-view.js";
++import { isTerminalTaskStatus } from "./task-progress.js";
++import type {
++  IntegrationOperationView,
++  IntegrationReceiptRecord,
++  MainDeliveryBlocker,
++  MainDeliveryBlockerCode,
++  MainDeliveryCall,
++  MainDeliveryCheckpoint,
++  MainDeliveryJudgeView,
++  MainDeliveryNextActionCode,
++  MainDeliveryObservationOutcome,
++  MainReviewDecision,
++  MainReviewDecisionKind,
++  ReviewGraphView,
++  TaskRecord,
++} from "./types.js";
++
++export const MAIN_DELIVERY_CHECKPOINT_KIND = "main-delivery-checkpoint" as const;
++export const MAIN_DELIVERY_REASON_MAX_LENGTH = MAIN_REVIEW_REASON_MAX_LENGTH;
++export const MAIN_DELIVERY_TIMEOUT_MIN_MS = 1;
++export const MAIN_DELIVERY_TIMEOUT_MAX_MS = 3_600_000;
++export const MAIN_DELIVERY_DIFF_MAX_BYTES = 1_000_000;
++export const MAIN_DELIVERY_DEFAULT_POLL_MS = 50;
++
++const CREDENTIAL_PATTERN =
++  /\b(sk-[A-Za-z0-9_-]{8,}|API[_-]?KEY|Bearer\s+[A-Za-z0-9_\-.]{8,}|password\s*[:=])/i;
++const DIGEST_PATTERN = /^[a-f0-9]{64}$/;
++
++export interface PrepareMainDeliveryInput {
++  taskFile?: string;
++  taskId?: string;
++  reviewerProfileIds: readonly string[];
++  reason: string;
++  timeoutMs: number;
++  confirm: true;
++  includeDiffMaxBytes?: number;
++}
++
++export interface DecideMainDeliveryInput {
++  taskId: string;
++  decision: MainReviewDecisionKind;
++  revisionId: string;
++  digest: string;
++  reason: string;
++  timeoutMs: number;
++  confirm: true;
++}
++
++export interface MainDeliveryIntegrationRef {
++  operationId: string;
++  receiptId: string;
++}
++
++export interface MainDeliveryHost {
++  store: StateStore;
++  submitFile(taskFile: string): Promise<TaskRecord>;
++  inspectTaskFile?(taskFile: string): Promise<{ requiredJudges: 0 | 1 | 2 }>;
++  createReviewGraph(input: {
++    taskId: string;
++    reviewerWorkerProfileIds: string[];
++    reason: string;
++    confirm: true;
++  }): Promise<{ graph: ReviewGraphView; reviewerTaskIds: string[]; created: boolean }>;
++  recordMainReview(
++    taskId: string,
++    decision: MainReviewDecisionKind,
++    reason: string,
++    confirm: true,
++  ): MainReviewDecision;
++  preflightIntegration(taskId: string): Promise<PreflightReceipt>;
++  startIntegration(taskId: string, receiptId: string): IntegrationOperationView;
++  waitIntegration(operationId: string, timeoutMs: number): Promise<IntegrationOperationView>;
++  findIntegration(taskId: string): MainDeliveryIntegrationRef | undefined;
++  findLatestReceipt(
++    taskId: string,
++  ): (IntegrationReceiptRecord & { consumed?: boolean }) | undefined;
++  sleep(milliseconds: number): Promise<void>;
++  now(): number;
++  pollMs: number;
++  readDiff(task: TaskRecord): Promise<string | undefined>;
++}
++
++function assertNonnegativeInteger(value: number, label: string): void {
++  if (!Number.isSafeInteger(value) || value < 0) {
++    throw new Error(`${label} must be a nonnegative integer`);
++  }
++}
++
++function normalizeReason(raw: unknown, label: string): string {
++  if (typeof raw !== "string") throw new Error(`${label} must be a string`);
++  const reason = raw.trim();
++  if (reason.length < 1 || reason.length > MAIN_DELIVERY_REASON_MAX_LENGTH) {
++    throw new Error(`${label} must be 1-${MAIN_DELIVERY_REASON_MAX_LENGTH} characters`);
++  }
++  if (CREDENTIAL_PATTERN.test(reason)) {
++    throw new Error(`${label} must not contain credentials`);
++  }
++  return reason;
++}
++
++function normalizeTimeoutMs(raw: unknown): number {
++  if (typeof raw !== "number" || !Number.isSafeInteger(raw)) {
++    throw new Error("timeoutMs must be a positive integer");
++  }
++  if (raw < MAIN_DELIVERY_TIMEOUT_MIN_MS || raw > MAIN_DELIVERY_TIMEOUT_MAX_MS) {
++    throw new Error(
++      `timeoutMs must be an integer from ${MAIN_DELIVERY_TIMEOUT_MIN_MS} to ${MAIN_DELIVERY_TIMEOUT_MAX_MS}`,
++    );
++  }
++  return raw;
++}
++
++function normalizeProfileIds(raw: unknown): string[] {
++  if (raw === undefined) return [];
++  if (!Array.isArray(raw)) {
++    throw new Error("reviewerProfileIds must be an array of profile ids");
++  }
++  if (raw.length > 3) {
++    throw new Error("reviewerProfileIds admits at most 3 profile ids");
++  }
++  const ids = raw.map((entry, index) => {
++    if (typeof entry !== "string" || entry.trim().length === 0) {
++      throw new Error(`reviewerProfileIds[${index}] must be a non-empty profile id`);
++    }
++    return entry.trim();
++  });
++  const seen = new Set<string>();
++  for (const id of ids) {
++    if (seen.has(id)) {
++      throw new Error(`reviewerProfileIds must not contain duplicate id "${id}"`);
++    }
++    seen.add(id);
++  }
++  return ids;
++}
++
++export function validatePrepareInput(input: PrepareMainDeliveryInput): {
++  taskFile?: string;
++  taskId?: string;
++  reviewerProfileIds: string[];
++  reason: string;
++  timeoutMs: number;
++  includeDiffMaxBytes?: number;
++} {
++  if (input.confirm !== true) {
++    throw new Error("delivery prepare requires confirm: true");
++  }
++  const hasFile = typeof input.taskFile === "string" && input.taskFile.trim().length > 0;
++  const hasId = typeof input.taskId === "string" && input.taskId.trim().length > 0;
++  if (hasFile === hasId) {
++    throw new Error("delivery prepare requires exactly one of taskFile or taskId");
++  }
++  const includeDiffMaxBytes = input.includeDiffMaxBytes;
++  if (includeDiffMaxBytes !== undefined) {
++    assertNonnegativeInteger(includeDiffMaxBytes, "includeDiffMaxBytes");
++    if (includeDiffMaxBytes > MAIN_DELIVERY_DIFF_MAX_BYTES) {
++      throw new Error(`includeDiffMaxBytes must be at most ${MAIN_DELIVERY_DIFF_MAX_BYTES}`);
++    }
++  }
++  return {
++    ...(hasFile ? { taskFile: input.taskFile!.trim() } : { taskId: input.taskId!.trim() }),
++    reviewerProfileIds: normalizeProfileIds(input.reviewerProfileIds),
++    reason: normalizeReason(input.reason, "reason"),
++    timeoutMs: normalizeTimeoutMs(input.timeoutMs),
++    ...(includeDiffMaxBytes === undefined ? {} : { includeDiffMaxBytes }),
++  };
++}
++
++export function validateDecideInput(input: DecideMainDeliveryInput): {
++  taskId: string;
++  decision: MainReviewDecisionKind;
++  revisionId: string;
++  digest: string;
++  reason: string;
++  timeoutMs: number;
++} {
++  if (input.confirm !== true) {
++    throw new Error("delivery decide requires confirm: true");
++  }
++  if (typeof input.taskId !== "string" || input.taskId.trim().length === 0) {
++    throw new Error("delivery decide requires taskId");
++  }
++  if (input.decision !== "accept" && input.decision !== "revise" && input.decision !== "reject") {
++    throw new Error("delivery decide decision must be accept, revise, or reject");
++  }
++  if (typeof input.revisionId !== "string" || input.revisionId.trim().length === 0) {
++    throw new Error("delivery decide requires revision");
++  }
++  if (typeof input.digest !== "string" || !DIGEST_PATTERN.test(input.digest.trim())) {
++    throw new Error("delivery decide digest must be a 64-character sha256 hex digest");
++  }
++  return {
++    taskId: input.taskId.trim(),
++    decision: input.decision,
++    revisionId: input.revisionId.trim(),
++    digest: input.digest.trim(),
++    reason: normalizeReason(input.reason, "reason"),
++    timeoutMs: normalizeTimeoutMs(input.timeoutMs),
++  };
++}
++
++export function requiredJudgesFromTask(task: TaskRecord): 0 | 1 | 2 {
++  const declared = task.spec.reviewRequirement?.requiredJudges;
++  return declared === 1 || declared === 2 ? declared : 0;
++}
++
++export function findLatestIntegrationReceipt(
++  store: StateStore,
++  taskId: string,
++): (IntegrationReceiptRecord & { consumed?: boolean }) | undefined {
++  let latestId: string | undefined;
++  for (const event of store.listEvents(taskId)) {
++    if (event.type !== "integration.preflight.completed") continue;
++    const receiptId = (event.payload as { receiptId?: unknown } | undefined)?.receiptId;
++    if (typeof receiptId === "string") latestId = receiptId;
++  }
++  return latestId === undefined ? undefined : store.getIntegrationReceipt(latestId);
++}
++
++export function findLatestIntegrationOperation(
++  store: StateStore,
++  taskId: string,
++): MainDeliveryIntegrationRef | undefined {
++  const results = store.listIntegrationResults(taskId);
++  const first = results[0];
++  if (first !== undefined) {
++    return { operationId: first.id, receiptId: first.receiptId };
++  }
++  let found: MainDeliveryIntegrationRef | undefined;
++  for (const event of store.listEvents(taskId)) {
++    if (event.type !== "integration.operation.started") continue;
++    const payload = event.payload as { operationId?: unknown; receiptId?: unknown } | undefined;
++    if (typeof payload?.operationId === "string" && typeof payload.receiptId === "string") {
++      found = { operationId: payload.operationId, receiptId: payload.receiptId };
++    }
++  }
++  return found;
++}
++
++export function countMainReviews(store: StateStore, taskId: string): number {
++  return store.listEvents(taskId).filter((event) => event.type === "main-review.completed").length;
++}
++
++export function countIntegrationOperations(store: StateStore, taskId: string): number {
++  return store.listEvents(taskId).filter((event) => event.type === "integration.operation.started").length;
++}
++
++export function countPreflightReceipts(store: StateStore, taskId: string): number {
++  return store.listEvents(taskId).filter((event) => event.type === "integration.preflight.completed").length;
++}
++
++function remainingTimeoutMs(host: MainDeliveryHost, startedAt: number, timeoutMs: number): number {
++  return Math.max(0, timeoutMs - Math.max(0, host.now() - startedAt));
++}
++
++async function observeUntil(
++  host: MainDeliveryHost,
++  startedAt: number,
++  timeoutMs: number,
++  done: () => boolean,
++): Promise<"ready" | "timeout"> {
++  if (done()) return "ready";
++  while (true) {
++    const remaining = remainingTimeoutMs(host, startedAt, timeoutMs);
++    if (remaining <= 0) return "timeout";
++    await host.sleep(Math.min(Math.max(1, host.pollMs), remaining));
++    if (done()) return "ready";
++    if (remainingTimeoutMs(host, startedAt, timeoutMs) <= 0) return "timeout";
++  }
++}
++
++function isWorkerPrepareDone(store: StateStore, taskId: string): boolean {
++  const task = store.getTask(taskId);
++  const decision = buildTaskDecisionView({
++    task,
++    attempts: store.listAttempts(taskId),
++    events: store.listEvents(taskId),
++    integrationResults: store.listIntegrationResults(taskId),
++  });
++  if (decision.validationRepair?.inProgress === true) return false;
++  return isTerminalTaskStatus(task.status);
++}
++
++function areJudgesTerminal(store: StateStore, taskId: string): boolean {
++  const graph = getReviewGraphStatus(store, taskId);
++  if (graph === undefined) return false;
++  return graph.assignments.every(
++    (assignment) => assignment.status === "completed" || assignment.status === "failed",
++  );
++}
++
++function isActionableVerifiedCandidate(store: StateStore, taskId: string): boolean {
++  const task = store.getTask(taskId);
++  if (task.status !== "succeeded") return false;
++  const events = store.listEvents(taskId);
++  const verification = latestVerificationEvent(events);
++  const payload = verification?.payload as { passed?: unknown } | undefined;
++  if (payload?.passed !== true) return false;
++  return resolveLatestRevision(events) !== undefined;
++}
++
++function blocker(code: MainDeliveryBlockerCode, detail?: string): MainDeliveryBlocker {
++  return detail === undefined ? { code } : { code, detail };
++}
++
++function blockerFromReviewReason(reason: string): MainDeliveryBlocker {
++  if (reason === REQUIRED_REVIEW_GRAPH_MISSING) {
++    return blocker("required-review-missing", reason);
++  }
++  if (
++    reason === REQUIRED_REVIEW_GRAPH_UNDERSIZED
++    || reason === REQUIRED_REVIEW_GRAPH_INSUFFICIENT_USABLE
++  ) {
++    return blocker("required-review-undersized", reason);
++  }
++  if (reason === REQUIRED_REVIEW_GRAPH_STALE) {
++    return blocker("required-review-stale", reason);
++  }
++  if (reason === PENDING_REVIEW_BLOCKS_INTEGRATION) {
++    return blocker("required-review-pending", reason);
++  }
++  if (reason === STALE_MAIN_ACCEPT_AFTER_REVIEW) {
++    return blocker("stale-main-accept", reason);
++  }
++  return blocker("review-schema", reason);
++}
++
++function blockersFromPreflightReasons(reasons: readonly string[]): MainDeliveryBlocker[] {
++  return reasons.map((reason) => {
++    if (/source/i.test(reason) || /baseline/i.test(reason) || /digest/i.test(reason)
++      || /patch/i.test(reason) || /drift/i.test(reason)) {
++      return blocker("source-incompatible", reason);
++    }
++    if (/review/i.test(reason) || /judge/i.test(reason)) {
++      return blockerFromReviewReason(reason);
++    }
++    return blocker("integration-failed", reason);
++  });
++}
++
++function projectJudges(graph: ReviewGraphView | undefined): MainDeliveryJudgeView[] {
++  if (graph === undefined) return [];
++  return [...graph.assignments]
++    .sort((left, right) => left.ordinal - right.ordinal)
++    .map((assignment) => {
++      const result = assignment.result;
++      const row: MainDeliveryJudgeView = {
++        ordinal: assignment.ordinal,
++        reviewerWorkerProfileId: assignment.reviewerWorkerProfileId,
++        reviewerTaskId: assignment.reviewerTaskId,
++        status: assignment.status,
++        resultUsable: assignment.resultUsable,
++      };
++      if (result !== undefined) {
++        row.proposedDisposition = result.proposedDisposition;
++        row.summary = result.summary;
++        row.findings = result.findings.map((finding) => ({ ...finding }));
++      }
++      if (assignment.failureCode !== undefined) row.failureCode = assignment.failureCode;
++      return row;
++    });
++}
++
++function unusableJudgeBlockers(judges: readonly MainDeliveryJudgeView[]): MainDeliveryBlocker[] {
++  return judges
++    .filter((judge) => judge.status === "completed" || judge.status === "failed")
++    .filter((judge) => !judge.resultUsable)
++    .map((judge) => blocker(
++      "unusable-judge",
++      judge.failureCode === undefined
++        ? `judge ${judge.ordinal} produced unusable evidence`
++        : `judge ${judge.ordinal}: ${judge.failureCode}`,
++    ));
++}
++
++function boundDiff(text: string, maxBytes: number): {
++  included: true;
++  utf8Bytes: number;
++  truncated: boolean;
++  text: string;
++} {
++  const encoded = new TextEncoder().encode(text);
++  if (encoded.byteLength <= maxBytes) {
++    return {
++      included: true,
++      utf8Bytes: encoded.byteLength,
++      truncated: false,
++      text,
++    };
++  }
++  let end = Math.min(encoded.byteLength, maxBytes);
++  const sliced = encoded.slice(0, end);
++  while (end > 0 && (sliced[end - 1]! & 0b1100_0000) === 0b1000_0000) end -= 1;
++  if (end > 0 && sliced[end - 1]! >= 0x80) end -= 1;
++  const clipped = new TextDecoder().decode(sliced.slice(0, end));
++  return {
++    included: true,
++    utf8Bytes: new TextEncoder().encode(clipped).byteLength,
++    truncated: true,
++    text: clipped,
++  };
++}
++
++export async function defaultReadDiff(task: TaskRecord): Promise<string | undefined> {
++  try {
++    return await readFile(task.paths.diff, "utf8");
++  } catch {
++    return undefined;
++  }
++}
++
++interface ProjectOptions {
++  call: MainDeliveryCall;
++  timeoutMs: number;
++  elapsedMs: number;
++  observation: MainDeliveryObservationOutcome;
++  extraBlockers?: readonly MainDeliveryBlocker[];
++  nextActionOverride?: { nextAction: string; nextActionCode: MainDeliveryNextActionCode };
++  includeDiffMaxBytes?: number;
++  diffText?: string;
++  preflight?: MainDeliveryCheckpoint["preflight"];
++  integration?: MainDeliveryCheckpoint["integration"];
++}
++
++export function buildMainDeliveryCheckpoint(
++  store: StateStore,
++  taskId: string,
++  options: ProjectOptions,
++): MainDeliveryCheckpoint {
++  const task = store.getTask(taskId);
++  const events = store.listEvents(taskId);
++  const attempts = store.listAttempts(taskId);
++  const integrationResults = store.listIntegrationResults(taskId);
++  const decision = buildTaskDecisionView({
++    task,
++    attempts,
++    events,
++    integrationResults,
++  });
++  const packet = buildMainDecisionPacketForTask(store, taskId, decision);
++  const revision = resolveLatestRevision(events);
++  const graph = getReviewGraphStatus(store, taskId);
++  const judges = projectJudges(graph);
++  const requiredJudges = requiredJudgesFromTask(task);
++  const reviewDecision = latestMainReview(events);
++  const blockers: MainDeliveryBlocker[] = [];
++  if (options.extraBlockers !== undefined) blockers.push(...options.extraBlockers);
++  if (options.observation !== "timeout") {
++    for (const reason of packet.blockers) {
++      const mapped = blockerFromReviewReason(reason);
++      if (!blockers.some((existing) => existing.code === mapped.code && existing.detail === mapped.detail)) {
++        blockers.push(mapped);
++      }
++    }
++    for (const judgeBlocker of unusableJudgeBlockers(judges)) {
++      if (!blockers.some((existing) => existing.detail === judgeBlocker.detail)) {
++        blockers.push(judgeBlocker);
++      }
++    }
++  }
++
++  let nextAction = packet.nextAction;
++  let nextActionCode: MainDeliveryNextActionCode = packet.nextActionCode;
++  if (options.nextActionOverride !== undefined) {
++    nextAction = options.nextActionOverride.nextAction;
++    nextActionCode = options.nextActionOverride.nextActionCode;
++  } else if (options.observation === "timeout") {
++    if (options.call === "decide") {
++      nextActionCode = "resume-decide";
++      nextAction = "Observation timed out. Re-enter delivery decide with the same exact identity; underlying work continues";
++    } else {
++      nextActionCode = "resume-prepare";
++      nextAction = "Observation timed out. Re-enter delivery prepare for this Task id; underlying work continues";
++    }
++  } else if (options.call === "prepare" && options.observation === "ready") {
++    nextActionCode = "record-main-review";
++    nextAction = "Reviewed Candidate is ready. Main must call delivery decide with the exact revision and digest; ForkLight does not accept";
++  }
++
++  const checkpoint: MainDeliveryCheckpoint = {
++    schemaVersion: 1,
++    kind: MAIN_DELIVERY_CHECKPOINT_KIND,
++    call: options.call,
++    observation: {
++      outcome: options.observation,
++      timeoutMs: options.timeoutMs,
++      elapsedMs: options.elapsedMs,
++    },
++    task: {
++      id: task.id,
++      status: task.status,
++      stage: decision.stage,
++    },
++    verification: { ...packet.verification },
++    review: {
++      requiredJudges,
++      judges,
++      ...(graph === undefined ? {} : {
++        graphId: graph.id,
++        status: graph.status,
++        aggregationState: graph.aggregation.state,
++      }),
++    },
++    blockers,
++    stop: { ...packet.stop },
++    workspaceDisposition: packet.workspaceDisposition,
++    nextAction,
++    nextActionCode,
++  };
++
++  if (revision !== undefined) {
++    const summary = summarizeRevision(revision);
++    checkpoint.candidate = {
++      revisionId: revision.id,
++      digest: revision.patchDigest,
++      digestPrefix: summary.digestPrefix,
++      filesChanged: revision.filesChanged,
++      changedLines: revision.changedLines,
++      affectedPathCount: revision.affectedPaths.length,
++      verificationPassed: revision.verificationPassed,
++    };
++  }
++  if (options.includeDiffMaxBytes !== undefined && options.diffText !== undefined) {
++    checkpoint.diff = boundDiff(options.diffText, options.includeDiffMaxBytes);
++  }
++  if (reviewDecision !== undefined) {
++    checkpoint.mainDecision = {
++      decision: reviewDecision.decision,
++      ...(reviewDecision.candidateRevisionId === undefined
++        ? {}
++        : { boundRevisionId: reviewDecision.candidateRevisionId }),
++      ...(reviewDecision.acceptedPatchDigest === undefined
++        ? {}
++        : { boundDigest: reviewDecision.acceptedPatchDigest }),
++    };
++  }
++  if (options.preflight !== undefined) checkpoint.preflight = options.preflight;
++  if (options.integration !== undefined) checkpoint.integration = options.integration;
++  return checkpoint;
++}
++
++function elapsedSince(host: MainDeliveryHost, startedAt: number): number {
++  return Math.max(0, host.now() - startedAt);
++}
++
++async function projectCurrent(
++  host: MainDeliveryHost,
++  taskId: string,
++  options: Omit<ProjectOptions, "elapsedMs" | "diffText"> & { startedAt: number },
++): Promise<MainDeliveryCheckpoint> {
++  const task = host.store.getTask(taskId);
++  const diffText = options.includeDiffMaxBytes === undefined
++    ? undefined
++    : await host.readDiff(task);
++  return buildMainDeliveryCheckpoint(host.store, taskId, {
++    call: options.call,
++    timeoutMs: options.timeoutMs,
++    elapsedMs: elapsedSince(host, options.startedAt),
++    observation: options.observation,
++    ...(options.extraBlockers === undefined ? {} : { extraBlockers: options.extraBlockers }),
++    ...(options.nextActionOverride === undefined
++      ? {}
++      : { nextActionOverride: options.nextActionOverride }),
++    ...(options.includeDiffMaxBytes === undefined
++      ? {}
++      : { includeDiffMaxBytes: options.includeDiffMaxBytes }),
++    ...(diffText === undefined ? {} : { diffText }),
++    ...(options.preflight === undefined ? {} : { preflight: options.preflight }),
++    ...(options.integration === undefined ? {} : { integration: options.integration }),
++  });
++}
++
++function compactIntegration(
++  view: IntegrationOperationView,
++): MainDeliveryCheckpoint["integration"] {
++  return {
++    operationId: view.operationId,
++    status: view.status,
++    ...(view.result === undefined ? {} : { resultStatus: view.result.status }),
++  };
++}
++
++function compactPreflight(
++  receipt: IntegrationReceiptRecord | PreflightReceipt,
++): MainDeliveryCheckpoint["preflight"] {
++  return {
++    receiptId: receipt.id,
++    passed: receipt.rejectionReasons.length === 0,
++    rejectionCount: receipt.rejectionReasons.length,
++  };
++}
++
++export async function prepareMainDelivery(
++  host: MainDeliveryHost,
++  rawInput: PrepareMainDeliveryInput,
++): Promise<MainDeliveryCheckpoint> {
++  const input = validatePrepareInput(rawInput);
++  const startedAt = host.now();
++
++  let taskId: string;
++  if (input.taskFile !== undefined) {
++    if (host.inspectTaskFile !== undefined) {
++      const preview = await host.inspectTaskFile(input.taskFile);
++      if (input.reviewerProfileIds.length !== preview.requiredJudges) {
++        throw new Error(
++          `delivery prepare reviewerProfileIds length ${input.reviewerProfileIds.length} `
++          + `must match Task requiredJudges ${preview.requiredJudges}`,
++        );
++      }
++    }
++    const submitted = await host.submitFile(input.taskFile);
++    taskId = submitted.id;
++  } else {
++    const existing = host.store.getTask(input.taskId!);
++    taskId = existing.id;
++    const required = requiredJudgesFromTask(existing);
++    if (input.reviewerProfileIds.length !== required) {
++      return projectCurrent(host, taskId, {
++        call: "prepare",
++        startedAt,
++        timeoutMs: input.timeoutMs,
++        observation: "blocked",
++        extraBlockers: [blocker(
++          "judge-count-mismatch",
++          `reviewerProfileIds length ${input.reviewerProfileIds.length} does not match requiredJudges ${required}`,
++        )],
++        ...(input.includeDiffMaxBytes === undefined
++          ? {}
++          : { includeDiffMaxBytes: input.includeDiffMaxBytes }),
++      });
++    }
++  }
++
++  const workerWait = await observeUntil(
++    host,
++    startedAt,
++    input.timeoutMs,
++    () => isWorkerPrepareDone(host.store, taskId),
++  );
++  if (workerWait === "timeout") {
++    return projectCurrent(host, taskId, {
++      call: "prepare",
++      startedAt,
++      timeoutMs: input.timeoutMs,
++      observation: "timeout",
++      ...(input.includeDiffMaxBytes === undefined
++        ? {}
++        : { includeDiffMaxBytes: input.includeDiffMaxBytes }),
++    });
++  }
++
++  if (!isActionableVerifiedCandidate(host.store, taskId)) {
++    const task = host.store.getTask(taskId);
++    const events = host.store.listEvents(taskId);
++    const verification = latestVerificationEvent(events);
++    const passed = (verification?.payload as { passed?: unknown } | undefined)?.passed === true;
++    const extraBlockers: MainDeliveryBlocker[] = [];
++    if (task.status === "failed" || task.status === "interrupted" || !passed) {
++      extraBlockers.push(blocker(
++        "verification-failed",
++        "Task did not produce a verified Candidate",
++      ));
++    } else {
++      extraBlockers.push(blocker("missing-candidate", "No exact Candidate Revision is available"));
++    }
++    return projectCurrent(host, taskId, {
++      call: "prepare",
++      startedAt,
++      timeoutMs: input.timeoutMs,
++      observation: task.status === "failed" || task.status === "interrupted" ? "failed" : "blocked",
++      extraBlockers,
++      ...(input.includeDiffMaxBytes === undefined
++        ? {}
++        : { includeDiffMaxBytes: input.includeDiffMaxBytes }),
++    });
++  }
++
++  const required = requiredJudgesFromTask(host.store.getTask(taskId));
++  if (input.reviewerProfileIds.length !== required) {
++    return projectCurrent(host, taskId, {
++      call: "prepare",
++      startedAt,
++      timeoutMs: input.timeoutMs,
++      observation: "blocked",
++      extraBlockers: [blocker(
++        "judge-count-mismatch",
++        `reviewerProfileIds length ${input.reviewerProfileIds.length} does not match requiredJudges ${required}`,
++      )],
++      ...(input.includeDiffMaxBytes === undefined
++        ? {}
++        : { includeDiffMaxBytes: input.includeDiffMaxBytes }),
++    });
++  }
++
++  if (required > 0) {
++    const existingGraph = getReviewGraphStatus(host.store, taskId);
++    if (existingGraph !== undefined) {
++      const existingReason = existingGraph.assignments[0]?.reason;
++      const existingOrder = [...existingGraph.assignments]
++        .sort((left, right) => left.ordinal - right.ordinal)
++        .map((assignment) => assignment.reviewerWorkerProfileId);
++      const sameOrder = existingOrder.length === input.reviewerProfileIds.length
++        && existingOrder.every((id, index) => id === input.reviewerProfileIds[index]);
++      if (!sameOrder) {
++        return projectCurrent(host, taskId, {
++          call: "prepare",
++          startedAt,
++          timeoutMs: input.timeoutMs,
++          observation: "blocked",
++          extraBlockers: [blocker(
++            "reviewer-set-mismatch",
++            "Reviewer Profile order does not match the frozen Review Graph",
++          )],
++          ...(input.includeDiffMaxBytes === undefined
++            ? {}
++            : { includeDiffMaxBytes: input.includeDiffMaxBytes }),
++        });
++      }
++      if (existingReason !== undefined && existingReason !== input.reason) {
++        return projectCurrent(host, taskId, {
++          call: "prepare",
++          startedAt,
++          timeoutMs: input.timeoutMs,
++          observation: "blocked",
++          extraBlockers: [blocker(
++            "reason-mismatch",
++            "prepare reason does not match the existing Review Graph reason",
++          )],
++          ...(input.includeDiffMaxBytes === undefined
++            ? {}
++            : { includeDiffMaxBytes: input.includeDiffMaxBytes }),
++        });
++      }
++    }
++    try {
++      await host.createReviewGraph({
++        taskId,
++        reviewerWorkerProfileIds: [...input.reviewerProfileIds],
++        reason: input.reason,
++        confirm: true,
++      });
++    } catch (error) {
++      const message = error instanceof Error ? error.message : String(error);
++      return projectCurrent(host, taskId, {
++        call: "prepare",
++        startedAt,
++        timeoutMs: input.timeoutMs,
++        observation: "blocked",
++        extraBlockers: [blocker("reviewer-set-mismatch", message)],
++        ...(input.includeDiffMaxBytes === undefined
++          ? {}
++          : { includeDiffMaxBytes: input.includeDiffMaxBytes }),
++      });
++    }
++
++    const judgeWait = await observeUntil(
++      host,
++      startedAt,
++      input.timeoutMs,
++      () => areJudgesTerminal(host.store, taskId),
++    );
++    if (judgeWait === "timeout") {
++      return projectCurrent(host, taskId, {
++        call: "prepare",
++        startedAt,
++        timeoutMs: input.timeoutMs,
++        observation: "timeout",
++        ...(input.includeDiffMaxBytes === undefined
++          ? {}
++          : { includeDiffMaxBytes: input.includeDiffMaxBytes }),
++      });
++    }
++  }
++
++  const judges = projectJudges(getReviewGraphStatus(host.store, taskId));
++  const unusable = unusableJudgeBlockers(judges);
++  return projectCurrent(host, taskId, {
++    call: "prepare",
++    startedAt,
++    timeoutMs: input.timeoutMs,
++    observation: unusable.length > 0 ? "blocked" : "ready",
++    extraBlockers: unusable,
++    ...(input.includeDiffMaxBytes === undefined
++      ? {}
++      : { includeDiffMaxBytes: input.includeDiffMaxBytes }),
++  });
++}
++
++function sameBoundDecision(
++  existing: MainReviewDecision,
++  input: { decision: MainReviewDecisionKind; reason: string; revisionId: string; digest: string },
++): { same: boolean; blocker?: MainDeliveryBlocker } {
++  if (existing.decision !== input.decision) {
++    return { same: false, blocker: blocker("decision-mismatch", "existing Main decision differs") };
++  }
++  if (existing.reason !== input.reason) {
++    return { same: false, blocker: blocker("reason-mismatch", "existing Main decision reason differs") };
++  }
++  if (
++    existing.candidateRevisionId !== undefined
++    && existing.candidateRevisionId !== input.revisionId
++  ) {
++    return { same: false, blocker: blocker("stale-identity", "existing Main decision revision differs") };
++  }
++  if (
++    existing.acceptedPatchDigest !== undefined
++    && existing.acceptedPatchDigest !== input.digest
++  ) {
++    return { same: false, blocker: blocker("stale-identity", "existing Main decision digest differs") };
++  }
++  return { same: true };
++}
++
++function integrationObservation(
++  view: IntegrationOperationView | undefined,
++): {
++  observation: MainDeliveryObservationOutcome;
++  extraBlockers: MainDeliveryBlocker[];
++  integration?: MainDeliveryCheckpoint["integration"];
++} {
++  if (view === undefined) {
++    return { observation: "blocked", extraBlockers: [] };
++  }
++  const integration = compactIntegration(view);
++  if (view.result !== undefined) {
++    if (view.result.status === "applied") {
++      return { observation: "ready", extraBlockers: [], integration };
++    }
++    return {
++      observation: "failed",
++      extraBlockers: [blocker(
++        "integration-failed",
++        view.result.error ?? view.result.status,
++      )],
++      integration,
++    };
++  }
++  if (view.status === "running") {
++    return { observation: "timeout", extraBlockers: [], integration };
++  }
++  if (view.status === "outcome-unknown") {
++    return { observation: "timeout", extraBlockers: [], integration };
++  }
++  if (view.status === "failed") {
++    return {
++      observation: "failed",
++      extraBlockers: [blocker("integration-failed", "Integration failed")],
++      integration,
++    };
++  }
++  return { observation: "ready", extraBlockers: [], integration };
++}
++
++export async function decideMainDelivery(
++  host: MainDeliveryHost,
++  rawInput: DecideMainDeliveryInput,
++): Promise<MainDeliveryCheckpoint> {
++  const input = validateDecideInput(rawInput);
++  const startedAt = host.now();
++  const store = host.store;
++  store.getTask(input.taskId);
++  const events = store.listEvents(input.taskId);
++  const revision = resolveLatestRevision(events);
++  const verification = latestVerificationEvent(events);
++  const passed = (verification?.payload as { passed?: unknown } | undefined)?.passed === true;
++
++  if (revision === undefined) {
++    return projectCurrent(host, input.taskId, {
++      call: "decide",
++      startedAt,
++      timeoutMs: input.timeoutMs,
++      observation: "blocked",
++      extraBlockers: [blocker("missing-candidate", "No exact Candidate Revision is available")],
++    });
++  }
++  if (revision.id !== input.revisionId || revision.patchDigest !== input.digest) {
++    return projectCurrent(host, input.taskId, {
++      call: "decide",
++      startedAt,
++      timeoutMs: input.timeoutMs,
++      observation: "blocked",
++      extraBlockers: [blocker(
++        "stale-identity",
++        "Task/Revision/digest does not match the current verified Candidate",
++      )],
++    });
++  }
++  if (!passed) {
++    return projectCurrent(host, input.taskId, {
++      call: "decide",
++      startedAt,
++      timeoutMs: input.timeoutMs,
++      observation: "blocked",
++      extraBlockers: [blocker("verification-failed", "Current verification did not pass")],
++    });
++  }
++
++  const required = requiredJudgesFromTask(store.getTask(input.taskId));
++  if (required > 0) {
++    const gate = evaluateReviewRequirementForTask(store, input.taskId);
++    const graph = getReviewGraphStatus(store, input.taskId);
++    const judges = projectJudges(graph);
++    if (graph === undefined || !areJudgesTerminal(store, input.taskId)) {
++      return projectCurrent(host, input.taskId, {
++        call: "decide",
++        startedAt,
++        timeoutMs: input.timeoutMs,
++        observation: "blocked",
++        extraBlockers: [blocker("not-fully-reviewed", "Required judges are not terminal")],
++      });
++    }
++    const unusable = unusableJudgeBlockers(judges);
++    if (unusable.length > 0) {
++      return projectCurrent(host, input.taskId, {
++        call: "decide",
++        startedAt,
++        timeoutMs: input.timeoutMs,
++        observation: "blocked",
++        extraBlockers: unusable,
++      });
++    }
++    if (
++      gate.status === "missing"
++      || gate.status === "undersized"
++      || gate.status === "stale"
++      || gate.status === "pending"
++    ) {
++      return projectCurrent(host, input.taskId, {
++        call: "decide",
++        startedAt,
++        timeoutMs: input.timeoutMs,
++        observation: "blocked",
++        extraBlockers: gate.rejectionReasons.map(blockerFromReviewReason),
++      });
++    }
++  }
++
++  const existingReview = latestMainReview(events);
++  if (existingReview !== undefined) {
++    const comparison = sameBoundDecision(existingReview, input);
++    if (!comparison.same && comparison.blocker !== undefined) {
++      return projectCurrent(host, input.taskId, {
++        call: "decide",
++        startedAt,
++        timeoutMs: input.timeoutMs,
++        observation: "blocked",
++        extraBlockers: [comparison.blocker],
++      });
++    }
++  } else {
++    host.recordMainReview(input.taskId, input.decision, input.reason, true);
++  }
++
++  if (input.decision !== "accept") {
++    return projectCurrent(host, input.taskId, {
++      call: "decide",
++      startedAt,
++      timeoutMs: input.timeoutMs,
++      observation: "ready",
++    });
++  }
++
++  const existingOperation = host.findIntegration(input.taskId);
++  if (existingOperation !== undefined) {
++    const remaining = remainingTimeoutMs(host, startedAt, input.timeoutMs);
++    if (remaining <= 0) {
++      const result = store.getIntegrationResult(existingOperation.operationId);
++      const receipt = host.findLatestReceipt(input.taskId);
++      if (result !== undefined) {
++        const observed = integrationObservation({
++          operationId: existingOperation.operationId,
++          taskId: result.taskId,
++          receiptId: result.receiptId,
++          status: result.status === "applied" ? "completed" : "failed",
++          stages: result.stages ?? [],
++          result,
++        });
++        return projectCurrent(host, input.taskId, {
++          call: "decide",
++          startedAt,
++          timeoutMs: input.timeoutMs,
++          observation: observed.observation,
++          extraBlockers: observed.extraBlockers,
++          ...(receipt === undefined ? {} : { preflight: compactPreflight(receipt) }),
++          ...(observed.integration === undefined ? {} : { integration: observed.integration }),
++        });
++      }
++      return projectCurrent(host, input.taskId, {
++        call: "decide",
++        startedAt,
++        timeoutMs: input.timeoutMs,
++        observation: "timeout",
++        ...(receipt === undefined ? {} : { preflight: compactPreflight(receipt) }),
++        integration: {
++          operationId: existingOperation.operationId,
++          status: "running",
++        },
++      });
++    }
++    const waited = await host.waitIntegration(existingOperation.operationId, remaining);
++    const observed = integrationObservation(waited);
++    const receipt = host.findLatestReceipt(input.taskId);
++    return projectCurrent(host, input.taskId, {
++      call: "decide",
++      startedAt,
++      timeoutMs: input.timeoutMs,
++      observation: observed.observation,
++      extraBlockers: observed.extraBlockers,
++      ...(receipt === undefined ? {} : { preflight: compactPreflight(receipt) }),
++      ...(observed.integration === undefined ? {} : { integration: observed.integration }),
++    });
++  }
++
++  const existingReceipt = host.findLatestReceipt(input.taskId);
++  if (existingReceipt !== undefined && existingReceipt.rejectionReasons.length > 0) {
++    return projectCurrent(host, input.taskId, {
++      call: "decide",
++      startedAt,
++      timeoutMs: input.timeoutMs,
++      observation: "blocked",
++      extraBlockers: blockersFromPreflightReasons(existingReceipt.rejectionReasons),
++      preflight: compactPreflight(existingReceipt),
++    });
++  }
++
++  let receiptId: string;
++  let preflightView: MainDeliveryCheckpoint["preflight"];
++  if (existingReceipt !== undefined && existingReceipt.consumed !== true) {
++    receiptId = existingReceipt.id;
++    preflightView = compactPreflight(existingReceipt);
++  } else if (existingReceipt !== undefined && existingReceipt.consumed === true) {
++    const raced = host.findIntegration(input.taskId);
++    if (raced !== undefined) {
++      const remaining = remainingTimeoutMs(host, startedAt, input.timeoutMs);
++      if (remaining <= 0) {
++        return projectCurrent(host, input.taskId, {
++          call: "decide",
++          startedAt,
++          timeoutMs: input.timeoutMs,
++          observation: "timeout",
++          preflight: compactPreflight(existingReceipt),
++          integration: { operationId: raced.operationId, status: "running" },
++        });
++      }
++      const waited = await host.waitIntegration(raced.operationId, remaining);
++      const observed = integrationObservation(waited);
++      return projectCurrent(host, input.taskId, {
++        call: "decide",
++        startedAt,
++        timeoutMs: input.timeoutMs,
++        observation: observed.observation,
++        extraBlockers: observed.extraBlockers,
++        preflight: compactPreflight(existingReceipt),
++        ...(observed.integration === undefined ? {} : { integration: observed.integration }),
++      });
++    }
++    const fresh = await host.preflightIntegration(input.taskId);
++    preflightView = compactPreflight(fresh);
++    if (fresh.rejectionReasons.length > 0) {
++      return projectCurrent(host, input.taskId, {
++        call: "decide",
++        startedAt,
++        timeoutMs: input.timeoutMs,
++        observation: "blocked",
++        extraBlockers: blockersFromPreflightReasons(fresh.rejectionReasons),
++        preflight: preflightView,
++      });
++    }
++    receiptId = fresh.id;
++  } else {
++    const fresh = await host.preflightIntegration(input.taskId);
++    preflightView = compactPreflight(fresh);
++    if (fresh.rejectionReasons.length > 0) {
++      return projectCurrent(host, input.taskId, {
++        call: "decide",
++        startedAt,
++        timeoutMs: input.timeoutMs,
++        observation: "blocked",
++        extraBlockers: blockersFromPreflightReasons(fresh.rejectionReasons),
++        preflight: preflightView,
++      });
++    }
++    receiptId = fresh.id;
++  }
++
++  let started: IntegrationOperationView;
++  try {
++    started = host.startIntegration(input.taskId, receiptId);
++  } catch (error) {
++    const raced = host.findIntegration(input.taskId);
++    if (raced === undefined) {
++      const message = error instanceof Error ? error.message : String(error);
++      return projectCurrent(host, input.taskId, {
++        call: "decide",
++        startedAt,
++        timeoutMs: input.timeoutMs,
++        observation: "blocked",
++        extraBlockers: [blocker("integration-failed", message)],
++        preflight: preflightView,
++      });
++    }
++    started = {
++      operationId: raced.operationId,
++      taskId: input.taskId,
++      receiptId: raced.receiptId,
++      status: "running",
++      stages: [],
++    };
++  }
++
++  const remaining = remainingTimeoutMs(host, startedAt, input.timeoutMs);
++  if (remaining <= 0) {
++    return projectCurrent(host, input.taskId, {
++      call: "decide",
++      startedAt,
++      timeoutMs: input.timeoutMs,
++      observation: "timeout",
++      preflight: preflightView,
++      integration: compactIntegration(started),
++    });
++  }
++  const waited = await host.waitIntegration(started.operationId, remaining);
++  const observed = integrationObservation(waited);
++  return projectCurrent(host, input.taskId, {
++    call: "decide",
++    startedAt,
++    timeoutMs: input.timeoutMs,
++    observation: observed.observation,
++    extraBlockers: observed.extraBlockers,
++    preflight: preflightView,
++    ...(observed.integration === undefined ? {} : { integration: observed.integration }),
++  });
++}
++
++export function formatMainDeliveryCheckpointHuman(checkpoint: MainDeliveryCheckpoint): string {
++  const lines: string[] = [];
++  lines.push(`delivery: ${checkpoint.call} ${checkpoint.observation.outcome}`);
++  lines.push(`task: ${checkpoint.task.id} status=${checkpoint.task.status} stage=${checkpoint.task.stage}`);
++  lines.push(
++    `observation: outcome=${checkpoint.observation.outcome}`
++    + ` timeoutMs=${checkpoint.observation.timeoutMs}`
++    + ` elapsedMs=${checkpoint.observation.elapsedMs}`,
++  );
++  if (checkpoint.candidate !== undefined) {
++    lines.push(
++      `candidate: revision=${checkpoint.candidate.revisionId}`
++      + ` digest=${checkpoint.candidate.digest}`
++      + ` files=${checkpoint.candidate.filesChanged}`
++      + ` lines=${checkpoint.candidate.changedLines}`,
++    );
++  }
++  const verification = checkpoint.verification;
++  if (!verification.present) {
++    lines.push("verification: absent");
++  } else {
++    lines.push(
++      `verification: passed=${String(verification.passed ?? "unknown")}`
++      + ` commands=${String(verification.commandCount ?? 0)}`
++      + ` failed=${String(verification.failedCommandCount ?? 0)}`,
++    );
++  }
++  const required = checkpoint.review.requiredJudges ?? 0;
++  lines.push(
++    `review: required=${required}`
++    + (checkpoint.review.graphId === undefined ? "" : ` graph=${checkpoint.review.graphId}`)
++    + (checkpoint.review.status === undefined ? "" : ` status=${checkpoint.review.status}`)
++    + ` judges=${checkpoint.review.judges.length}`,
++  );
++  for (const judge of checkpoint.review.judges) {
++    const disposition = judge.proposedDisposition ?? (judge.resultUsable ? "usable" : "unusable");
++    const summary = judge.summary === undefined ? "" : ` — ${judge.summary}`;
++    const failure = judge.failureCode === undefined ? "" : ` failure=${judge.failureCode}`;
++    lines.push(
++      `  judge ${judge.ordinal}: profile=${judge.reviewerWorkerProfileId}`
++      + ` status=${judge.status} usable=${String(judge.resultUsable)}`
++      + ` disposition=${disposition}${failure}${summary}`,
++    );
++    if (judge.findings !== undefined) {
++      lines.push(`    findings: ${judge.findings.length}`);
++    }
++  }
++  if (checkpoint.mainDecision !== undefined) {
++    lines.push(`mainDecision: ${checkpoint.mainDecision.decision}`);
++  }
++  if (checkpoint.preflight !== undefined) {
++    lines.push(
++      `preflight: receipt=${checkpoint.preflight.receiptId}`
++      + ` passed=${String(checkpoint.preflight.passed)}`
++      + ` rejections=${checkpoint.preflight.rejectionCount}`,
++    );
++  }
++  if (checkpoint.integration !== undefined) {
++    lines.push(
++      `integration: operation=${checkpoint.integration.operationId}`
++      + ` status=${checkpoint.integration.status}`
++      + (checkpoint.integration.resultStatus === undefined
++        ? ""
++        : ` result=${checkpoint.integration.resultStatus}`),
++    );
++  }
++  lines.push(`blockers: ${checkpoint.blockers.length}`);
++  for (const item of checkpoint.blockers) {
++    lines.push(
++      item.detail === undefined ? `  - ${item.code}` : `  - ${item.code}: ${item.detail}`,
++    );
++  }
++  if (checkpoint.stop.code !== "none") {
++    lines.push(
++      checkpoint.stop.detail === undefined
++        ? `stop: ${checkpoint.stop.code}`
++        : `stop: ${checkpoint.stop.code} (${checkpoint.stop.detail})`,
++    );
++  }
++  lines.push(`workspaceDisposition: ${checkpoint.workspaceDisposition}`);
++  lines.push(`next: ${checkpoint.nextActionCode}`);
++  lines.push(`nextAction: ${checkpoint.nextAction}`);
++  if (checkpoint.diff?.included === true) {
++    lines.push(
++      `diff: included utf8Bytes=${checkpoint.diff.utf8Bytes} truncated=${String(checkpoint.diff.truncated)}`,
++    );
++  }
++  return `${lines.join("\n")}\n`;
++}
+diff --git a/src/core/types.ts b/src/core/types.ts
+index 3a9f822..abad58c 100644
+--- a/src/core/types.ts
++++ b/src/core/types.ts
+@@ -2454,6 +2454,122 @@ export interface MainDecisionPacket {
+   };
+ }
+ 
++// --- Main delivery checkpoints (compose existing records; not a new entity) ---
++
++export type MainDeliveryCall = "prepare" | "decide";
++
++export type MainDeliveryObservationOutcome = "ready" | "timeout" | "blocked" | "failed";
++
++export type MainDeliveryNextActionCode =
++  | MainDecisionNextActionCode
++  | "resume-prepare"
++  | "resume-decide";
++
++/** Closed blocker codes for the delivery checkpoint. Detail may quote an
++ *  existing review/preflight reason; it never carries logs or prompts. */
++export type MainDeliveryBlockerCode =
++  | "verification-failed"
++  | "unusable-judge"
++  | "reviewer-set-mismatch"
++  | "stale-identity"
++  | "review-schema"
++  | "source-incompatible"
++  | "integration-failed"
++  | "missing-candidate"
++  | "confirmation-required"
++  | "invalid-input"
++  | "judge-count-mismatch"
++  | "decision-mismatch"
++  | "reason-mismatch"
++  | "not-fully-reviewed"
++  | "required-review-missing"
++  | "required-review-undersized"
++  | "required-review-stale"
++  | "required-review-pending"
++  | "stale-main-accept";
++
++export interface MainDeliveryJudgeView {
++  ordinal: number;
++  reviewerWorkerProfileId: string;
++  reviewerTaskId: string;
++  status: ReviewAssignmentStatus;
++  resultUsable: boolean;
++  proposedDisposition?: ReviewDisposition;
++  summary?: string;
++  findings?: ReviewFindingView[];
++  failureCode?: ReviewResultFailureCode;
++}
++
++export interface MainDeliveryBlocker {
++  code: MainDeliveryBlockerCode;
++  detail?: string;
++}
++
++/** Privacy-safe Main delivery checkpoint. One bounded projection for prepare
++ *  and decide. Never embeds TaskDecisionView, Integration objects, raw logs,
++ *  prompts, success stdout, or a full event stream. */
++export interface MainDeliveryCheckpoint {
++  schemaVersion: 1;
++  kind: "main-delivery-checkpoint";
++  call: MainDeliveryCall;
++  observation: {
++    outcome: MainDeliveryObservationOutcome;
++    timeoutMs: number;
++    elapsedMs: number;
++  };
++  task: {
++    id: string;
++    status: TaskStatus;
++    stage: DecisionStage;
++  };
++  candidate?: {
++    revisionId: string;
++    digest: string;
++    digestPrefix: string;
++    filesChanged: number;
++    changedLines: number;
++    affectedPathCount: number;
++    verificationPassed: boolean;
++  };
++  diff?: {
++    included: boolean;
++    utf8Bytes: number;
++    truncated: boolean;
++    text?: string;
++  };
++  verification: MainDecisionPacket["verification"];
++  review: {
++    requiredJudges?: 0 | 1 | 2;
++    graphId?: string;
++    status?: ReviewGraphStatus;
++    aggregationState?: ReviewAggregationState;
++    judges: MainDeliveryJudgeView[];
++  };
++  mainDecision?: {
++    decision: MainReviewDecisionKind;
++    boundRevisionId?: string;
++    boundDigest?: string;
++  };
++  preflight?: {
++    receiptId: string;
++    passed: boolean;
++    rejectionCount: number;
++  };
++  integration?: {
++    operationId: string;
++    status: IntegrationOperationView["status"];
++    resultStatus?: IntegrationResultRecord["status"];
++  };
++  blockers: MainDeliveryBlocker[];
++  stop: {
++    code: MainDecisionStopCode;
++    detail?: string;
++  };
++  workspaceDisposition: MainDecisionWorkspaceDisposition;
++  nextAction: string;
++  nextActionCode: MainDeliveryNextActionCode;
++}
++
+ // --- Main-direct execution decision ---
+ 
+ /** Closed vocabulary for why Main handled work directly. */
+diff --git a/src/daemon/coordinator.ts b/src/daemon/coordinator.ts
+index 6bbdbd4..1394243 100644
+--- a/src/daemon/coordinator.ts
++++ b/src/daemon/coordinator.ts
+@@ -58,6 +58,17 @@ import {
+ } from "../core/attempt-authorization.js";
+ import type { DaemonShutdownIntent } from "./protocol.js";
+ import { latestMainReview, recordMainReview } from "../core/main-review.js";
++import {
++  decideMainDelivery,
++  defaultReadDiff,
++  findLatestIntegrationOperation,
++  findLatestIntegrationReceipt,
++  prepareMainDelivery,
++  type DecideMainDeliveryInput,
++  type MainDeliveryHost,
++  type PrepareMainDeliveryInput,
++} from "../core/main-delivery.js";
++import type { MainDeliveryCheckpoint } from "../core/types.js";
+ import {
+   projectMainFailureAttribution,
+   recordMainFailureAttribution,
+@@ -4059,6 +4070,54 @@ export class DaemonCoordinator {
+     return getReviewGraphStatus(this.store, taskId);
+   }
+ 
++  private deliveryHost(): MainDeliveryHost {
++    return {
++      store: this.store,
++      submitFile: (taskFile) => this.submitFile(taskFile),
++      inspectTaskFile: async (taskFile) => {
++        const prepared = await prepareTaskAdmission(taskFile, this.settings.get());
++        const required = prepared.spec.reviewRequirement?.requiredJudges;
++        return { requiredJudges: required === 1 || required === 2 ? required : 0 };
++      },
++      createReviewGraph: (input) => this.createReviewGraph({
++        taskId: input.taskId,
++        reviewerWorkerProfileIds: input.reviewerWorkerProfileIds,
++        reason: input.reason,
++        confirm: true,
++      }),
++      recordMainReview: (taskId, decision, reason, confirm) =>
++        this.mainReview(taskId, decision, reason, confirm),
++      preflightIntegration: (taskId) => this.integrationPreflight(taskId),
++      startIntegration: (taskId, receiptId) => this.startIntegration(taskId, receiptId),
++      waitIntegration: (operationId, timeoutMs) => this.waitIntegration(operationId, timeoutMs),
++      findIntegration: (taskId) => {
++        for (const context of this.integrationOperations.values()) {
++          if (context.taskId === taskId) {
++            return { operationId: context.operationId, receiptId: context.receiptId };
++          }
++        }
++        return findLatestIntegrationOperation(this.store, taskId);
++      },
++      findLatestReceipt: (taskId) => findLatestIntegrationReceipt(this.store, taskId),
++      sleep: (milliseconds) => sleep(milliseconds),
++      now: () => Date.now(),
++      pollMs: this.settings.get().console.refreshIntervalMs,
++      readDiff: (task) => defaultReadDiff(task),
++    };
++  }
++
++  /** One resumable prepare: submit-or-observe, exact Review Graph, wait to
++   *  decision-ready. Never records Main review or Integration. */
++  async deliveryPrepare(input: PrepareMainDeliveryInput): Promise<MainDeliveryCheckpoint> {
++    return prepareMainDelivery(this.deliveryHost(), input);
++  }
++
++  /** One resumable decide: exact-bind Main decision; accept-only preflight
++   *  and one Integration. Reuses durable records on exact re-entry. */
++  async deliveryDecide(input: DecideMainDeliveryInput): Promise<MainDeliveryCheckpoint> {
++    return decideMainDelivery(this.deliveryHost(), input);
++  }
++
+   /** Explicit Main-confirmed one-shot same-Judge schema-only summary repair.
+    *  Does not increment Goal review rounds, assignment count, or Judge count. */
+   async repairReviewResult(input: {
+diff --git a/src/daemon/protocol.ts b/src/daemon/protocol.ts
+index 4b351fd..849e6a9 100644
+--- a/src/daemon/protocol.ts
++++ b/src/daemon/protocol.ts
+@@ -69,6 +69,8 @@ export type DaemonMethod =
+   | "review_graph_create"
+   | "review_graph_repair_result"
+   | "review_graph_status"
++  | "delivery_prepare"
++  | "delivery_decide"
+   | "goal_submit_file"
+   | "goal_validate"
+   | "goal_status"
+diff --git a/src/daemon/server.ts b/src/daemon/server.ts
+index 2d3cc99..10728d2 100644
+--- a/src/daemon/server.ts
++++ b/src/daemon/server.ts
+@@ -1173,6 +1173,45 @@ export class ForkLightDaemon {
+           confirm: true,
+         });
+       }
++      case "delivery_prepare": {
++        if (params.confirm !== true) {
++          throw new Error("delivery_prepare requires explicit confirm: true");
++        }
++        const reviewerProfileIds = Array.isArray(params.reviewerProfileIds)
++          ? params.reviewerProfileIds
++          : Array.isArray(params.reviewerWorkerProfileIds)
++            ? params.reviewerWorkerProfileIds
++            : [];
++        return this.coordinator.deliveryPrepare({
++          ...(typeof params.taskFile === "string" ? { taskFile: params.taskFile } : {}),
++          ...(typeof params.taskId === "string" ? { taskId: params.taskId } : {}),
++          reviewerProfileIds: reviewerProfileIds as string[],
++          reason: requiredString(params.reason, "reason"),
++          timeoutMs: params.timeoutMs as number,
++          confirm: true,
++          ...(params.includeDiffMaxBytes === undefined
++            ? {}
++            : { includeDiffMaxBytes: params.includeDiffMaxBytes as number }),
++        });
++      }
++      case "delivery_decide": {
++        if (params.confirm !== true) {
++          throw new Error("delivery_decide requires explicit confirm: true");
++        }
++        const decision = requiredString(params.decision, "decision");
++        if (decision !== "accept" && decision !== "revise" && decision !== "reject") {
++          throw new Error("decision must be accept, revise, or reject");
++        }
++        return this.coordinator.deliveryDecide({
++          taskId: requiredString(params.taskId, "taskId"),
++          decision,
++          revisionId: requiredString(params.revisionId ?? params.revision, "revisionId"),
++          digest: requiredString(params.digest, "digest"),
++          reason: requiredString(params.reason, "reason"),
++          timeoutMs: params.timeoutMs as number,
++          confirm: true,
++        });
++      }
+       default:
+         throw new Error(`Unknown daemon method: ${String(request.method)}`);
+     }
+diff --git a/src/daemon/client.ts b/src/daemon/client.ts
+index 8354d66..39a2b5b 100644
+--- a/src/daemon/client.ts
++++ b/src/daemon/client.ts
+@@ -116,6 +116,7 @@ export function daemonRequestTimeoutMs(
+   // remains the source of truth. Callers may request a longer transport window
+   // when they know the work size.
+   const requested = method === "integration_wait" || method === "checkpoint_wait"
++    || method === "delivery_prepare" || method === "delivery_decide"
+     ? params.timeoutMs
+     : method === "remediation_verify" || method === "candidate_reverify" || method === "storage_reclaim"
+         || method === "storage_audit" || method === "storage_preview"
+diff --git a/src/cli.ts b/src/cli.ts
+index 4b94188..59c802c 100755
+--- a/src/cli.ts
++++ b/src/cli.ts
+@@ -127,11 +127,15 @@ import {
+   buildProgressCursor,
+   humanCompactInspectionLines,
+   humanWaitLines,
++  parseDeliveryDecideOptions,
++  parseDeliveryPrepareOptions,
+   parseInspectSummaryOptions,
+   parseWaitOptions,
+   waitForTask,
+   type TaskProgressSnapshot,
+ } from "./cli/supervision.js";
++import { formatMainDeliveryCheckpointHuman } from "./core/main-delivery.js";
++import type { MainDeliveryCheckpoint } from "./core/types.js";
+ import {
+   DEFAULT_QUIET_AFTER_MS,
+   isTerminalTaskStatus,
+@@ -262,6 +266,10 @@ Usage:
+   forklight review-graph status <task-id> [--json]
+   forklight inspect <task-id> [--summary] [--events <nonnegative integer>] [--json]
+       # prefer --summary for main-thread supervision; full inspect is for deep audit
++  forklight delivery prepare (--task-file <path>|--task <id>) [--reviewer-profiles <id1,id2>] --reason <text> --timeout-ms <ms> --confirm [--include-diff-max-bytes <n>] [--json]
++      # one resumable prepare: submit-or-observe, exact Review Graph, wait to Main decision
++  forklight delivery decide <task-id> --decision <accept|revise|reject> --revision <id> --digest <sha256> --reason <text> --timeout-ms <ms> --confirm [--json]
++      # exact Main decision; accept runs one fresh preflight and one Integration
+   forklight list [--json]
+   forklight stats [--json] [--provider <name>] [--model <name>] [--since <ISO>] [--until <ISO>] [--deep-audit]
+       # default JSON is aggregate-only; --deep-audit requires --json for full failure evidence
+@@ -2895,6 +2903,89 @@ async function main(): Promise<void> {
+     throw new Error(`Unknown upgrade subcommand: ${subcommand}. Use: status.`);
+   }
+ 
++  if (command === "delivery") {
++    const subcommand = required(positional, "delivery subcommand (prepare or decide)");
++    if (subcommand === "prepare") {
++      const parsed = parseDeliveryPrepareOptions(rest);
++      let preparedTaskId: string | undefined = parsed.taskId;
++      const { output } = await withCliExchangeReceipt({
++        operation: "forklight_delivery_prepare",
++        home: forklightHome(),
++        args: {
++          ...(parsed.taskFile === undefined ? {} : { taskFile: parsed.taskFile }),
++          ...(parsed.taskId === undefined ? {} : { taskId: parsed.taskId }),
++          reviewerProfileIds: parsed.reviewerProfileIds,
++          reasonLength: parsed.reason.trim().length,
++          timeoutMs: parsed.timeoutMs,
++          confirm: true,
++          ...(parsed.includeDiffMaxBytes === undefined
++            ? {}
++            : { includeDiffMaxBytes: parsed.includeDiffMaxBytes }),
++          json: parsed.json,
++        },
++        taskId: () => preparedTaskId,
++        invoke: async () => {
++          await ensureDaemon();
++          const checkpoint = await daemonRequest<MainDeliveryCheckpoint>("delivery_prepare", {
++            ...(parsed.taskFile === undefined ? {} : { taskFile: parsed.taskFile }),
++            ...(parsed.taskId === undefined ? {} : { taskId: parsed.taskId }),
++            reviewerProfileIds: parsed.reviewerProfileIds,
++            reason: parsed.reason,
++            timeoutMs: parsed.timeoutMs,
++            confirm: true,
++            ...(parsed.includeDiffMaxBytes === undefined
++              ? {}
++              : { includeDiffMaxBytes: parsed.includeDiffMaxBytes }),
++          });
++          preparedTaskId = checkpoint.task.id;
++          return checkpoint;
++        },
++        renderOutput: (checkpoint) => parsed.json
++          ? `${JSON.stringify(checkpoint, null, 2)}\n`
++          : formatMainDeliveryCheckpointHuman(checkpoint),
++      });
++      process.stdout.write(output);
++      return;
++    }
++    if (subcommand === "decide") {
++      const taskId = required(rest[0], "task id");
++      const parsed = parseDeliveryDecideOptions(rest.slice(1), taskId);
++      const { output } = await withCliExchangeReceipt({
++        operation: "forklight_delivery_decide",
++        home: forklightHome(),
++        args: {
++          taskId: parsed.taskId,
++          decision: parsed.decision,
++          revisionId: parsed.revisionId,
++          digest: parsed.digest,
++          reasonLength: parsed.reason.trim().length,
++          timeoutMs: parsed.timeoutMs,
++          confirm: true,
++          json: parsed.json,
++        },
++        taskId: parsed.taskId,
++        invoke: async () => {
++          await ensureDaemon();
++          return daemonRequest<MainDeliveryCheckpoint>("delivery_decide", {
++            taskId: parsed.taskId,
++            decision: parsed.decision,
++            revisionId: parsed.revisionId,
++            digest: parsed.digest,
++            reason: parsed.reason,
++            timeoutMs: parsed.timeoutMs,
++            confirm: true,
++          });
++        },
++        renderOutput: (checkpoint) => parsed.json
++          ? `${JSON.stringify(checkpoint, null, 2)}\n`
++          : formatMainDeliveryCheckpointHuman(checkpoint),
++      });
++      process.stdout.write(output);
++      return;
++    }
++    throw new Error("delivery subcommand must be prepare or decide");
++  }
++
+   if (command === "integration") {
+     const subcommand = required(positional, "integration subcommand (preflight, apply, status, wait, or history)");
+     if (subcommand === "preflight") {
+diff --git a/src/cli/supervision.ts b/src/cli/supervision.ts
+index 2333842..b3750df 100644
+--- a/src/cli/supervision.ts
++++ b/src/cli/supervision.ts
+@@ -185,6 +185,182 @@ function takeValue(arguments_: string[], index: number, flag: string): string {
+   return value;
+ }
+ 
++export interface ParsedDeliveryPrepareOptions {
++  taskFile?: string;
++  taskId?: string;
++  reviewerProfileIds: string[];
++  reason: string;
++  timeoutMs: number;
++  confirm: true;
++  includeDiffMaxBytes?: number;
++  json: boolean;
++}
++
++export interface ParsedDeliveryDecideOptions {
++  taskId: string;
++  decision: "accept" | "revise" | "reject";
++  revisionId: string;
++  digest: string;
++  reason: string;
++  timeoutMs: number;
++  confirm: true;
++  json: boolean;
++}
++
++function parseDeliveryInteger(raw: string, label: string, allowZero: boolean): number {
++  if (!(allowZero ? /^(?:0|[1-9]\d*)$/ : /^[1-9]\d*$/).test(raw)) {
++    throw new Error(`${label} must be a ${allowZero ? "nonnegative" : "positive"} integer`);
++  }
++  const value = Number(raw);
++  if (!Number.isSafeInteger(value) || (allowZero ? value < 0 : value <= 0)) {
++    throw new Error(`${label} must be a ${allowZero ? "nonnegative" : "positive"} integer`);
++  }
++  return value;
++}
++
++function takeDeliveryValue(arguments_: string[], index: number, flag: string): string {
++  const value = arguments_[index + 1];
++  if (value === undefined || value.startsWith("--")) throw new Error(`Missing value for ${flag}`);
++  return value;
++}
++
++function parseReviewerProfileList(raw: string): string[] {
++  return raw.split(",").map((part) => part.trim()).filter((part) => part.length > 0);
++}
++
++export function parseDeliveryPrepareOptions(arguments_: string[]): ParsedDeliveryPrepareOptions {
++  let taskFile: string | undefined;
++  let taskId: string | undefined;
++  const reviewerProfileIds: string[] = [];
++  let reason: string | undefined;
++  let timeoutMs: number | undefined;
++  let includeDiffMaxBytes: number | undefined;
++  let confirm = false;
++  let json = false;
++  const seen = new Set<string>();
++
++  for (let index = 0; index < arguments_.length; index += 1) {
++    const flag = arguments_[index]!;
++    if (flag === "--json") {
++      if (seen.has(flag)) throw new Error("Duplicate delivery prepare option: --json");
++      seen.add(flag);
++      json = true;
++      continue;
++    }
++    if (flag === "--confirm") {
++      if (seen.has(flag)) throw new Error("Duplicate delivery prepare option: --confirm");
++      seen.add(flag);
++      confirm = true;
++      continue;
++    }
++    if (flag === "--reviewer-profile") {
++      const value = takeDeliveryValue(arguments_, index, flag);
++      index += 1;
++      reviewerProfileIds.push(value.trim());
++      continue;
++    }
++    if (![
++      "--task-file", "--task", "--reviewer-profiles", "--reason",
++      "--timeout-ms", "--include-diff-max-bytes",
++    ].includes(flag)) {
++      throw new Error(`Unknown delivery prepare option: ${flag}`);
++    }
++    if (flag !== "--reviewer-profiles" && seen.has(flag)) {
++      throw new Error(`Duplicate delivery prepare option: ${flag}`);
++    }
++    seen.add(flag);
++    const value = takeDeliveryValue(arguments_, index, flag);
++    index += 1;
++    if (flag === "--task-file") taskFile = value;
++    else if (flag === "--task") taskId = value;
++    else if (flag === "--reviewer-profiles") {
++      reviewerProfileIds.push(...parseReviewerProfileList(value));
++    } else if (flag === "--reason") reason = value;
++    else if (flag === "--timeout-ms") timeoutMs = parseDeliveryInteger(value, "--timeout-ms", false);
++    else includeDiffMaxBytes = parseDeliveryInteger(value, "--include-diff-max-bytes", true);
++  }
++  if (!confirm) throw new Error("delivery prepare requires --confirm");
++  if ((taskFile === undefined) === (taskId === undefined)) {
++    throw new Error("delivery prepare requires exactly one of --task-file or --task");
++  }
++  if (reason === undefined) throw new Error("delivery prepare requires --reason");
++  if (timeoutMs === undefined) throw new Error("delivery prepare requires --timeout-ms");
++  return {
++    ...(taskFile === undefined ? { taskId: taskId! } : { taskFile }),
++    reviewerProfileIds,
++    reason,
++    timeoutMs,
++    confirm: true,
++    ...(includeDiffMaxBytes === undefined ? {} : { includeDiffMaxBytes }),
++    json,
++  };
++}
++
++export function parseDeliveryDecideOptions(
++  arguments_: string[],
++  taskId: string,
++): ParsedDeliveryDecideOptions {
++  let decision: "accept" | "revise" | "reject" | undefined;
++  let revisionId: string | undefined;
++  let digest: string | undefined;
++  let reason: string | undefined;
++  let timeoutMs: number | undefined;
++  let confirm = false;
++  let json = false;
++  const seen = new Set<string>();
++
++  for (let index = 0; index < arguments_.length; index += 1) {
++    const flag = arguments_[index]!;
++    if (flag === "--json") {
++      if (seen.has(flag)) throw new Error("Duplicate delivery decide option: --json");
++      seen.add(flag);
++      json = true;
++      continue;
++    }
++    if (flag === "--confirm") {
++      if (seen.has(flag)) throw new Error("Duplicate delivery decide option: --confirm");
++      seen.add(flag);
++      confirm = true;
++      continue;
++    }
++    if (![
++      "--decision", "--revision", "--digest", "--reason", "--timeout-ms",
++    ].includes(flag)) {
++      throw new Error(`Unknown delivery decide option: ${flag}`);
++    }
++    if (seen.has(flag)) throw new Error(`Duplicate delivery decide option: ${flag}`);
++    seen.add(flag);
++    const value = takeDeliveryValue(arguments_, index, flag);
++    index += 1;
++    if (flag === "--decision") {
++      if (value !== "accept" && value !== "revise" && value !== "reject") {
++        throw new Error("delivery decide --decision must be accept, revise, or reject");
++      }
++      decision = value;
++    } else if (flag === "--revision") revisionId = value;
++    else if (flag === "--digest") digest = value;
++    else if (flag === "--reason") reason = value;
++    else timeoutMs = parseDeliveryInteger(value, "--timeout-ms", false);
++  }
++  if (!confirm) throw new Error("delivery decide requires --confirm");
++  if (taskId.trim().length === 0) throw new Error("delivery decide requires a task id");
++  if (decision === undefined) throw new Error("delivery decide requires --decision");
++  if (revisionId === undefined) throw new Error("delivery decide requires --revision");
++  if (digest === undefined) throw new Error("delivery decide requires --digest");
++  if (reason === undefined) throw new Error("delivery decide requires --reason");
++  if (timeoutMs === undefined) throw new Error("delivery decide requires --timeout-ms");
++  return {
++    taskId,
++    decision,
++    revisionId,
++    digest,
++    reason,
++    timeoutMs,
++    confirm: true,
++    json,
++  };
++}
++
+ export function parseWaitOptions(arguments_: string[], defaultPollMs: number): ParsedWaitOptions {
+   assertInteger(defaultPollMs, "effective console.refreshIntervalMs", false);
+   let timeoutMs: number | undefined;
+diff --git a/src/cli/exchange-receipts.ts b/src/cli/exchange-receipts.ts
+index b13a55c..de82927 100644
+--- a/src/cli/exchange-receipts.ts
++++ b/src/cli/exchange-receipts.ts
+@@ -34,7 +34,9 @@ export type TaskScopedCliOperation =
+   | "forklight_resolve"
+   | "forklight_reopen"
+   | "forklight_storage_reclaim"
+-  | "forklight_storage_retain";
++  | "forklight_storage_retain"
++  | "forklight_delivery_prepare"
++  | "forklight_delivery_decide";
+ 
+ export type { TaskIdSource };
+ 
+diff --git a/src/mcp/server.ts b/src/mcp/server.ts
+index d485d3c..646898f 100644
+--- a/src/mcp/server.ts
++++ b/src/mcp/server.ts
+@@ -2256,6 +2256,125 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
+     },
+   );
+ 
++  server.registerTool(
++    "forklight_delivery_prepare",
++    {
++      title: "Prepare a reviewed Candidate for Main decision",
++      description:
++        "One resumable prepare: submit a Task file or observe an existing Task, wait for independent verification, create or reuse the exact confirmed Review Graph, wait for every required Judge, and return one compact decision-ready checkpoint. Never records a Main decision, never integrates, and never repairs or replaces a Judge. Observation timeout ends only this wait.",
++      inputSchema: z.object({
++        taskFile: z.string().min(1).optional(),
++        taskId: z.string().min(1).optional(),
++        reviewerProfileIds: z.array(z.string().min(1).max(64)).max(3).default([]),
++        reason: z.string().trim().min(1).max(1000),
++        timeoutMs: z.number().int().positive().max(3_600_000),
++        confirm: z.literal(true),
++        includeDiffMaxBytes: z.number().int().min(0).max(1_000_000).optional(),
++      }).strict().refine(
++        (value) => (value.taskFile !== undefined) !== (value.taskId !== undefined),
++        { message: "Provide exactly one of taskFile or taskId" },
++      ),
++      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
++    },
++    async ({ taskFile, taskId, reviewerProfileIds, reason, timeoutMs, includeDiffMaxBytes }) => {
++      let resolvedTaskId: string | undefined = taskId;
++      return withMcpExchangeReceipt({
++        operation: "forklight_delivery_prepare",
++        home,
++        args: {
++          ...(taskFile === undefined ? {} : { taskFile }),
++          ...(taskId === undefined ? {} : { taskId }),
++          reviewerProfileIds,
++          reasonLength: reason.length,
++          timeoutMs,
++          confirm: true,
++          ...(includeDiffMaxBytes === undefined ? {} : { includeDiffMaxBytes }),
++        },
++        taskId: () => resolvedTaskId,
++        invoke: async () => {
++          await ensureDaemon(home);
++          const checkpoint = await daemonRequest<Record<string, unknown>>(
++            "delivery_prepare",
++            {
++              ...(taskFile === undefined ? {} : { taskFile }),
++              ...(taskId === undefined ? {} : { taskId }),
++              reviewerProfileIds,
++              reason,
++              timeoutMs,
++              confirm: true,
++              ...(includeDiffMaxBytes === undefined ? {} : { includeDiffMaxBytes }),
++            },
++            home,
++          );
++          if (typeof checkpoint.task === "object" && checkpoint.task !== null) {
++            const id = (checkpoint.task as { id?: unknown }).id;
++            if (typeof id === "string") resolvedTaskId = id;
++          }
++          const next = String(checkpoint.nextActionCode ?? "");
++          return textAndData(
++            checkpoint,
++            `Delivery prepare ${String(checkpoint.observation === undefined ? "" : (checkpoint.observation as { outcome?: unknown }).outcome)} for Task ${resolvedTaskId ?? "unknown"}; next ${next}. ForkLight does not accept or integrate.`,
++          );
++        },
++      });
++    },
++  );
++
++  server.registerTool(
++    "forklight_delivery_decide",
++    {
++      title: "Record Main's exact delivery decision",
++      description:
++        "Exact-bind Main accept, revise, or reject to the current verified and fully reviewed Candidate. Revise and reject persist only that decision. Accept runs one fresh preflight and one Integration and observes it to terminal. Exact re-entry reuses the durable review, receipt, and operation. Never invents a decision.",
++      inputSchema: z.object({
++        taskId: z.string().min(1),
++        decision: z.enum(["accept", "revise", "reject"]),
++        revisionId: z.string().min(1),
++        digest: z.string().regex(/^[a-f0-9]{64}$/u),
++        reason: z.string().trim().min(1).max(1000),
++        timeoutMs: z.number().int().positive().max(3_600_000),
++        confirm: z.literal(true),
++      }).strict(),
++      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
++    },
++    async ({ taskId, decision, revisionId, digest, reason, timeoutMs }) => {
++      return withMcpExchangeReceipt({
++        operation: "forklight_delivery_decide",
++        home,
++        args: {
++          taskId,
++          decision,
++          revisionId,
++          digest,
++          reasonLength: reason.length,
++          timeoutMs,
++          confirm: true,
++        },
++        taskId,
++        invoke: async () => {
++          await ensureDaemon(home);
++          const checkpoint = await daemonRequest<Record<string, unknown>>(
++            "delivery_decide",
++            {
++              taskId,
++              decision,
++              revisionId,
++              digest,
++              reason,
++              timeoutMs,
++              confirm: true,
++            },
++            home,
++          );
++          return textAndData(
++            checkpoint,
++            `Delivery decide ${decision} for Task ${taskId}; observation ${String((checkpoint.observation as { outcome?: unknown } | undefined)?.outcome ?? "")}; next ${String(checkpoint.nextActionCode ?? "")}.`,
++          );
++        },
++      });
++    },
++  );
++
+   server.registerTool(
+     "forklight_candidate_reverify",
+     {
+diff --git a/src/mcp/exchange-receipts.ts b/src/mcp/exchange-receipts.ts
+index ade4f1f..9e72dd8 100644
+--- a/src/mcp/exchange-receipts.ts
++++ b/src/mcp/exchange-receipts.ts
+@@ -30,7 +30,9 @@ type TaskScopedMcpOperation =
+   | "forklight_resolve"
+   | "forklight_reopen"
+   | "forklight_storage_reclaim"
+-  | "forklight_storage_retain";
++  | "forklight_storage_retain"
++  | "forklight_delivery_prepare"
++  | "forklight_delivery_decide";
+ 
+ interface WithMcpExchangeReceiptParams<T> {
+   readonly operation: TaskScopedMcpOperation;
+diff --git a/tests/main-delivery.test.ts b/tests/main-delivery.test.ts
+new file mode 100644
+index 0000000..8c1c69a
+--- /dev/null
++++ b/tests/main-delivery.test.ts
+@@ -0,0 +1,975 @@
++/**
++ * M4-E Main delivery checkpoints: shipped prepare/decide service.
++ *
++ * Drives prepareMainDelivery / decideMainDelivery (the same functions
++ * Coordinator, CLI, and MCP call). Store/event counts prove zero Main
++ * accept and zero Integration after prepare alone.
++ */
++import assert from "node:assert/strict";
++import { randomUUID } from "node:crypto";
++import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
++import { tmpdir } from "node:os";
++import path from "node:path";
++import test from "node:test";
++import { captureCandidateRevision } from "../src/core/candidate-revision.js";
++import { taskPaths } from "../src/core/config.js";
++import { applyIntegration, preflightIntegration } from "../src/core/integration.js";
++import {
++  countIntegrationOperations,
++  countMainReviews,
++  countPreflightReceipts,
++  decideMainDelivery,
++  formatMainDeliveryCheckpointHuman,
++  prepareMainDelivery,
++  type MainDeliveryHost,
++} from "../src/core/main-delivery.js";
++import { recordMainReview } from "../src/core/main-review.js";
++import {
++  createReviewGraph,
++  getReviewGraphStatus,
++} from "../src/core/review-graph.js";
++import { SettingsService, type IntegrationSettings } from "../src/core/settings.js";
++import type {
++  AttemptRecord,
++  IntegrationOperationView,
++  MainDeliveryCheckpoint,
++  TaskRecord,
++  VerificationResult,
++} from "../src/core/types.js";
++import { StateStore } from "../src/state/store.js";
++import { prepareWorkspace } from "../src/workspace/copy.js";
++import { createPathPolicy } from "../src/workspace/path-policy.js";
++import { writeWorkspacePatchReport } from "../src/workspace/patch.js";
++
++const INTEGRATION_DEFAULTS: IntegrationSettings = {
++  reviewedPatchMaxFiles: 5,
++  reviewedPatchMaxLines: 400,
++  reviewReceiptTtlMs: 900_000,
++  verificationTimeoutMs: 30_000,
++  backupRetentionCount: 3,
++  autoRollback: true,
++};
++
++interface Fixture {
++  store: StateStore;
++  settings: SettingsService;
++  task: TaskRecord;
++  revisionId: string;
++  digest: string;
++  home: string;
++  profileId: string;
++  secondProfileId: string;
++}
++
++async function buildSucceededCandidate(
++  requiredJudges: 0 | 1 | 2 = 2,
++): Promise<Fixture> {
++  const home = await mkdtemp(path.join(tmpdir(), "fl-main-delivery-"));
++  const sourceDir = path.join(home, "source");
++  await mkdir(path.join(sourceDir, "src"), { recursive: true });
++  await writeFile(path.join(sourceDir, "readme.md"), "# hello\n\nOriginal.\n");
++  await writeFile(path.join(sourceDir, "src/app.ts"), "export const n = 1;\n");
++
++  const store = new StateStore(home);
++  const settings = new SettingsService(store);
++  const snap = settings.get();
++  const profileId = snap.workerProfiles.defaultProfileId;
++  const second = snap.workerProfiles.profiles.find((profile) => profile.id !== profileId);
++  assert.ok(second, "default settings must expose a second Worker Profile");
++
++  const taskId = `candidate-${randomUUID()}`;
++  const paths = taskPaths(home, taskId);
++  const spec: TaskRecord["spec"] = {
++    version: 1,
++    name: "Delivery fixture",
++    project: sourceDir,
++    goal: "Ship a small change",
++    constraints: [],
++    provider: {
++      name: "deepseek",
++      model: "deepseek-v4-flash",
++      keychainService: "forklight.deepseek.api-key",
++    },
++    runtime: {
++      name: "claude-code",
++      executable: "claude",
++      effort: "low",
++      maxBudgetUsd: 0.1,
++    },
++    workspace: { exclude: [".git", "node_modules"] },
++    worker: { allowEdits: true, allowedCommands: [], focusPaths: ["src", "readme.md"] },
++    acceptance: { commands: ["true"] },
++    reviewRequirement: {
++      requiredJudges,
++      reason: requiredJudges === 0
++        ? "Explicit skip for a mechanical fixture"
++        : "Two independent views of this Candidate",
++    },
++  };
++  await prepareWorkspace(spec, paths);
++  await mkdir(path.join(paths.workspace, "src"), { recursive: true });
++  await writeFile(path.join(paths.workspace, "readme.md"), "# hello\n\nChanged.\n");
++  await writeFile(path.join(paths.workspace, "src/app.ts"), "export const n = 2;\n");
++  await writeWorkspacePatchReport(paths, createPathPolicy(spec));
++
++  const now = new Date().toISOString();
++  const task: TaskRecord = {
++    id: taskId,
++    name: spec.name,
++    status: "succeeded",
++    sourcePath: sourceDir,
++    taskFile: "forklight://test/main-delivery",
++    spec,
++    paths,
++    sessionId: "session-1",
++    currentAttemptId: "attempt-1",
++    createdAt: now,
++    updatedAt: now,
++  };
++  store.createTask(task);
++  const attempt: AttemptRecord = {
++    id: "attempt-1",
++    taskId,
++    ordinal: 1,
++    status: "succeeded",
++    sessionId: task.sessionId,
++    rawLogPath: path.join(paths.logs, "attempt-1.jsonl"),
++    startedAt: now,
++    finishedAt: now,
++    exitCode: 0,
++  };
++  store.createAttempt(attempt);
++  const verification: VerificationResult = {
++    passed: true,
++    behaviorPassed: true,
++    policyPassed: true,
++    sourceCompatible: true,
++    commands: [{
++      command: "true",
++      exitCode: 0,
++      stdout: "SECRET-STDOUT-MUST-NOT-LEAK",
++      stderr: "",
++      durationMs: 1,
++      timedOut: false,
++    }],
++    diffPath: paths.diff,
++    sourceUnchanged: true,
++  };
++  const verEvent = store.addEvent(
++    taskId,
++    attempt.id,
++    "verification.completed",
++    "Independent verification passed",
++    verification,
++  );
++  const revision = await captureCandidateRevision(
++    store,
++    store.getTask(taskId),
++    attempt,
++    verEvent.sequence,
++    true,
++    ["readme.md", "src/app.ts"],
++    2,
++    4,
++  );
++  return {
++    store,
++    settings,
++    task: store.getTask(taskId),
++    revisionId: revision.id,
++    digest: revision.patchDigest,
++    home,
++    profileId,
++    secondProfileId: second.id,
++  };
++}
++
++function validResultJson(revisionId: string, disposition: "accept" | "revise" = "accept"): string {
++  return JSON.stringify({
++    schemaVersion: 1,
++    reviewedRevisionId: revisionId,
++    proposedDisposition: disposition,
++    summary: "Scoped change looks ready for Main",
++    findings: [
++      {
++        severity: "info",
++        evidencePath: "src/app.ts",
++        affectedBehavior: "Counter increments differently",
++        recommendation: "Confirm callers tolerate the new value",
++      },
++    ],
++  });
++}
++
++async function finishReviewerWithResult(
++  store: StateStore,
++  reviewerTaskId: string,
++  resultText: string,
++  taskStatus: "succeeded" | "failed" = "succeeded",
++): Promise<void> {
++  const now = new Date().toISOString();
++  const task = store.getTask(reviewerTaskId);
++  const attemptId = `reviewer-attempt-${reviewerTaskId}`;
++  store.createAttempt({
++    id: attemptId,
++    taskId: reviewerTaskId,
++    ordinal: 1,
++    status: taskStatus === "succeeded" ? "succeeded" : "failed",
++    sessionId: task.sessionId,
++    rawLogPath: path.join(task.paths.logs, "attempt-1.jsonl"),
++    startedAt: now,
++    finishedAt: now,
++    exitCode: taskStatus === "succeeded" ? 0 : 1,
++    resultText,
++  });
++  store.setTaskStatus(reviewerTaskId, taskStatus, {
++    finishedAt: now,
++    currentAttemptId: attemptId,
++  });
++}
++
++function makeHost(
++  fx: Fixture,
++  options: {
++    now?: { value: number };
++    onSleep?: () => Promise<void>;
++    holdApply?: boolean;
++  } = {},
++): MainDeliveryHost {
++  const clock = options.now ?? { value: 0 };
++  const pending = new Map<string, {
++    taskId: string;
++    receiptId: string;
++    run: () => Promise<unknown>;
++    started?: Promise<unknown>;
++  }>();
++  return {
++    store: fx.store,
++    submitFile: async () => {
++      throw new Error("submitFile should not run for existing-task tests");
++    },
++    createReviewGraph: async (input) => createReviewGraph(fx.store, fx.settings.get(), {
++      candidateTaskId: input.taskId,
++      reviewerWorkerProfileIds: input.reviewerWorkerProfileIds,
++      reason: input.reason,
++      confirm: true,
++    }),
++    recordMainReview: (taskId, decision, reason, confirm) =>
++      recordMainReview(fx.store, taskId, { decision, reason, confirm }),
++    preflightIntegration: (taskId) =>
++      preflightIntegration(fx.store, taskId, INTEGRATION_DEFAULTS),
++    startIntegration: (taskId, receiptId) => {
++      const operationId = randomUUID();
++      fx.store.addEvent(
++        taskId,
++        undefined,
++        "integration.operation.started",
++        "Integration operation started",
++        { operationId, taskId, receiptId },
++      );
++      const run = () => applyIntegration(
++        fx.store,
++        taskId,
++        receiptId,
++        INTEGRATION_DEFAULTS,
++        operationId,
++      );
++      pending.set(operationId, options.holdApply === true
++        ? { taskId, receiptId, run }
++        : { taskId, receiptId, run, started: run() });
++      return {
++        operationId,
++        taskId,
++        receiptId,
++        status: "running",
++        stages: [],
++      };
++    },
++    waitIntegration: async (operationId) => {
++      const item = pending.get(operationId);
++      if (item !== undefined) {
++        if (options.holdApply === true && item.started === undefined) {
++          return {
++            operationId,
++            taskId: item.taskId,
++            receiptId: item.receiptId,
++            status: "running",
++            stages: [],
++          };
++        }
++        if (item.started === undefined) item.started = item.run();
++        await item.started;
++      }
++      const result = fx.store.getIntegrationResult(operationId);
++      if (result === undefined) {
++        return {
++          operationId,
++          taskId: fx.task.id,
++          receiptId: "",
++          status: "running",
++          stages: [],
++        };
++      }
++      const view: IntegrationOperationView = {
++        operationId,
++        taskId: result.taskId,
++        receiptId: result.receiptId,
++        status: result.status === "applied" ? "completed" : "failed",
++        stages: result.stages ?? [],
++        result,
++      };
++      return view;
++    },
++    findIntegration: (taskId) => {
++      const results = fx.store.listIntegrationResults(taskId);
++      const first = results[0];
++      if (first !== undefined) {
++        return { operationId: first.id, receiptId: first.receiptId };
++      }
++      for (const event of fx.store.listEvents(taskId)) {
++        if (event.type !== "integration.operation.started") continue;
++        const payload = event.payload as { operationId?: unknown; receiptId?: unknown };
++        if (typeof payload.operationId === "string" && typeof payload.receiptId === "string") {
++          return { operationId: payload.operationId, receiptId: payload.receiptId };
++        }
++      }
++      return undefined;
++    },
++    findLatestReceipt: (taskId) => {
++      let latestId: string | undefined;
++      for (const event of fx.store.listEvents(taskId)) {
++        if (event.type !== "integration.preflight.completed") continue;
++        const receiptId = (event.payload as { receiptId?: unknown })?.receiptId;
++        if (typeof receiptId === "string") latestId = receiptId;
++      }
++      return latestId === undefined ? undefined : fx.store.getIntegrationReceipt(latestId);
++    },
++    sleep: async (milliseconds) => {
++      clock.value += milliseconds;
++      if (options.onSleep !== undefined) await options.onSleep();
++    },
++    now: () => clock.value,
++    pollMs: 5,
++    readDiff: async (task) => {
++      const { readFile } = await import("node:fs/promises");
++      try {
++        return await readFile(task.paths.diff, "utf8");
++      } catch {
++        return undefined;
++      }
++    },
++  };
++}
++
++function profiles(fx: Fixture): string[] {
++  return [fx.profileId, fx.secondProfileId];
++}
++
++async function finishAllReviewers(fx: Fixture): Promise<void> {
++  const graph = getReviewGraphStatus(fx.store, fx.task.id);
++  assert.ok(graph);
++  for (const assignment of graph.assignments) {
++    await finishReviewerWithResult(
++      fx.store,
++      assignment.reviewerTaskId,
++      validResultJson(fx.revisionId),
++    );
++  }
++}
++
++function assertNoPrivacyLeak(checkpoint: MainDeliveryCheckpoint): void {
++  const text = JSON.stringify(checkpoint);
++  assert.equal(text.includes("SECRET-STDOUT-MUST-NOT-LEAK"), false);
++  assert.equal("events" in checkpoint, false);
++  assert.equal("decision" in checkpoint, false);
++  assert.equal("commands" in checkpoint.verification, false);
++  assert.match(JSON.stringify(checkpoint.verification), /"present":true/);
++}
++
++test("happy-path prepare then exact decide accept: one Task, graph, accept, receipt, Integration", async () => {
++  const fx = await buildSucceededCandidate(2);
++  try {
++    const host = makeHost(fx, {
++      onSleep: async () => {
++        const graph = getReviewGraphStatus(fx.store, fx.task.id);
++        if (graph === undefined) return;
++        if (graph.assignments.some((assignment) => assignment.status === "queued")) {
++          await finishAllReviewers(fx);
++        }
++      },
++    });
++    const prepared = await prepareMainDelivery(host, {
++      taskId: fx.task.id,
++      reviewerProfileIds: profiles(fx),
++      reason: "Need two independent views",
++      timeoutMs: 100,
++      confirm: true,
++    });
++    assert.equal(prepared.kind, "main-delivery-checkpoint");
++    assert.equal(prepared.call, "prepare");
++    assert.equal(prepared.observation.outcome, "ready");
++    assert.equal(prepared.task.id, fx.task.id);
++    assert.equal(prepared.candidate?.revisionId, fx.revisionId);
++    assert.equal(prepared.candidate?.digest, fx.digest);
++    assert.equal(prepared.review.requiredJudges, 2);
++    assert.equal(prepared.review.judges.length, 2);
++    assert.ok(prepared.review.judges.every((judge) => judge.resultUsable));
++    assert.ok(prepared.review.judges.every((judge) => judge.summary !== undefined));
++    assert.equal(prepared.mainDecision, undefined);
++    assert.equal(prepared.preflight, undefined);
++    assert.equal(prepared.integration, undefined);
++    assert.equal(prepared.nextActionCode, "record-main-review");
++    assert.equal(countMainReviews(fx.store, fx.task.id), 0);
++    assert.equal(countPreflightReceipts(fx.store, fx.task.id), 0);
++    assert.equal(countIntegrationOperations(fx.store, fx.task.id), 0);
++    assert.equal(prepared.diff, undefined);
++    assertNoPrivacyLeak(prepared);
++    const human = formatMainDeliveryCheckpointHuman(prepared);
++    assert.match(human, /judge 1:/);
++    assert.match(human, /judge 2:/);
++    assert.match(human, /next: record-main-review/);
++
++    const graphId = prepared.review.graphId;
++    assert.ok(graphId);
++
++    const decided = await decideMainDelivery(host, {
++      taskId: fx.task.id,
++      decision: "accept",
++      revisionId: fx.revisionId,
++      digest: fx.digest,
++      reason: "Exact Candidate is acceptable",
++      timeoutMs: 5_000,
++      confirm: true,
++    });
++    assert.equal(decided.call, "decide");
++    assert.equal(decided.observation.outcome, "ready");
++    assert.equal(decided.mainDecision?.decision, "accept");
++    assert.equal(decided.preflight?.passed, true);
++    assert.ok(decided.integration?.operationId);
++    assert.equal(decided.integration?.resultStatus, "applied");
++    assert.equal(countMainReviews(fx.store, fx.task.id), 1);
++    assert.equal(countPreflightReceipts(fx.store, fx.task.id), 1);
++    assert.equal(countIntegrationOperations(fx.store, fx.task.id), 1);
++    assert.equal(getReviewGraphStatus(fx.store, fx.task.id)?.id, graphId);
++    assertNoPrivacyLeak(decided);
++  } finally {
++    fx.store.close();
++  }
++});
++
++test("decide revise and reject persist the decision and never integrate", async () => {
++  const fx = await buildSucceededCandidate(0);
++  try {
++    const host = makeHost(fx);
++    const prepared = await prepareMainDelivery(host, {
++      taskId: fx.task.id,
++      reviewerProfileIds: [],
++      reason: "Explicit skip",
++      timeoutMs: 50,
++      confirm: true,
++    });
++    assert.equal(prepared.observation.outcome, "ready");
++    assert.equal(prepared.review.judges.length, 0);
++    assert.equal(countMainReviews(fx.store, fx.task.id), 0);
++
++    const revised = await decideMainDelivery(host, {
++      taskId: fx.task.id,
++      decision: "revise",
++      revisionId: fx.revisionId,
++      digest: fx.digest,
++      reason: "Need a narrower change",
++      timeoutMs: 50,
++      confirm: true,
++    });
++    assert.equal(revised.mainDecision?.decision, "revise");
++    assert.equal(revised.preflight, undefined);
++    assert.equal(revised.integration, undefined);
++    assert.equal(countMainReviews(fx.store, fx.task.id), 1);
++    assert.equal(countPreflightReceipts(fx.store, fx.task.id), 0);
++    assert.equal(countIntegrationOperations(fx.store, fx.task.id), 0);
++
++    const rejectedFx = await buildSucceededCandidate(0);
++    try {
++      const rejectHost = makeHost(rejectedFx);
++      await prepareMainDelivery(rejectHost, {
++        taskId: rejectedFx.task.id,
++        reviewerProfileIds: [],
++        reason: "Explicit skip",
++        timeoutMs: 50,
++        confirm: true,
++      });
++      const rejected = await decideMainDelivery(rejectHost, {
++        taskId: rejectedFx.task.id,
++        decision: "reject",
++        revisionId: rejectedFx.revisionId,
++        digest: rejectedFx.digest,
++        reason: "Out of contract",
++        timeoutMs: 50,
++        confirm: true,
++      });
++      assert.equal(rejected.mainDecision?.decision, "reject");
++      assert.equal(countIntegrationOperations(rejectedFx.store, rejectedFx.task.id), 0);
++    } finally {
++      rejectedFx.store.close();
++    }
++  } finally {
++    fx.store.close();
++  }
++});
++
++test("observation timeout does not fail durable work; exact re-entry reuses the graph", async () => {
++  const fx = await buildSucceededCandidate(2);
++  try {
++    const clock = { value: 0 };
++    let finish = false;
++    const host = makeHost(fx, {
++      now: clock,
++      onSleep: async () => {
++        if (finish) await finishAllReviewers(fx);
++      },
++    });
++    const timedOut = await prepareMainDelivery(host, {
++      taskId: fx.task.id,
++      reviewerProfileIds: profiles(fx),
++      reason: "Need two independent views",
++      timeoutMs: 15,
++      confirm: true,
++    });
++    assert.equal(timedOut.observation.outcome, "timeout");
++    assert.equal(timedOut.nextActionCode, "resume-prepare");
++    assert.notEqual(fx.store.getTask(fx.task.id).status, "failed");
++    assert.equal(timedOut.task.status, "succeeded");
++    const graphId = timedOut.review.graphId;
++    assert.ok(graphId);
++    assert.equal(countMainReviews(fx.store, fx.task.id), 0);
++
++    finish = true;
++    clock.value = 0;
++    const resumed = await prepareMainDelivery(host, {
++      taskId: fx.task.id,
++      reviewerProfileIds: profiles(fx),
++      reason: "Need two independent views",
++      timeoutMs: 50,
++      confirm: true,
++    });
++    assert.equal(resumed.observation.outcome, "ready");
++    assert.equal(resumed.review.graphId, graphId);
++    assert.equal(getReviewGraphStatus(fx.store, fx.task.id)?.id, graphId);
++  } finally {
++    fx.store.close();
++  }
++});
++
++test("changed reviewer order or reason fails closed without a second graph", async () => {
++  const fx = await buildSucceededCandidate(2);
++  try {
++    const host = makeHost(fx, {
++      onSleep: async () => {
++        const graph = getReviewGraphStatus(fx.store, fx.task.id);
++        if (graph?.assignments.some((assignment) => assignment.status === "queued")) {
++          await finishAllReviewers(fx);
++        }
++      },
++    });
++    const first = await prepareMainDelivery(host, {
++      taskId: fx.task.id,
++      reviewerProfileIds: profiles(fx),
++      reason: "Need two independent views",
++      timeoutMs: 100,
++      confirm: true,
++    });
++    assert.equal(first.observation.outcome, "ready");
++    const graphId = first.review.graphId;
++
++    const reordered = await prepareMainDelivery(host, {
++      taskId: fx.task.id,
++      reviewerProfileIds: [fx.secondProfileId, fx.profileId],
++      reason: "Need two independent views",
++      timeoutMs: 50,
++      confirm: true,
++    });
++    assert.equal(reordered.observation.outcome, "blocked");
++    assert.ok(reordered.blockers.some((item) => item.code === "reviewer-set-mismatch"));
++    assert.equal(getReviewGraphStatus(fx.store, fx.task.id)?.id, graphId);
++
++    const reasonChanged = await prepareMainDelivery(host, {
++      taskId: fx.task.id,
++      reviewerProfileIds: profiles(fx),
++      reason: "A different prepare reason",
++      timeoutMs: 50,
++      confirm: true,
++    });
++    assert.equal(reasonChanged.observation.outcome, "blocked");
++    assert.ok(reasonChanged.blockers.some((item) => item.code === "reason-mismatch"));
++    assert.equal(getReviewGraphStatus(fx.store, fx.task.id)?.id, graphId);
++  } finally {
++    fx.store.close();
++  }
++});
++
++test("stale identity and unusable Judge fail closed with no Main accept", async () => {
++  const fx = await buildSucceededCandidate(1);
++  try {
++    const host = makeHost(fx, {
++      onSleep: async () => {
++        const graph = getReviewGraphStatus(fx.store, fx.task.id);
++        const assignment = graph?.assignments[0];
++        if (assignment?.status === "queued") {
++          await finishReviewerWithResult(
++            fx.store,
++            assignment.reviewerTaskId,
++            "not-json",
++          );
++        }
++      },
++    });
++    const prepared = await prepareMainDelivery(host, {
++      taskId: fx.task.id,
++      reviewerProfileIds: [fx.profileId],
++      reason: "One judge",
++      timeoutMs: 100,
++      confirm: true,
++    });
++    assert.equal(prepared.observation.outcome, "blocked");
++    assert.ok(prepared.blockers.some((item) => item.code === "unusable-judge"));
++    assert.equal(countMainReviews(fx.store, fx.task.id), 0);
++
++    const stale = await decideMainDelivery(host, {
++      taskId: fx.task.id,
++      decision: "accept",
++      revisionId: fx.revisionId,
++      digest: "a".repeat(64),
++      reason: "Stale digest",
++      timeoutMs: 50,
++      confirm: true,
++    });
++    assert.equal(stale.observation.outcome, "blocked");
++    assert.ok(stale.blockers.some((item) => item.code === "stale-identity"));
++    assert.equal(countMainReviews(fx.store, fx.task.id), 0);
++    assert.equal(countIntegrationOperations(fx.store, fx.task.id), 0);
++  } finally {
++    fx.store.close();
++  }
++});
++
++test("changed decide decision or reason fails closed without a second mutation", async () => {
++  const fx = await buildSucceededCandidate(0);
++  try {
++    const host = makeHost(fx);
++    await prepareMainDelivery(host, {
++      taskId: fx.task.id,
++      reviewerProfileIds: [],
++      reason: "Explicit skip",
++      timeoutMs: 50,
++      confirm: true,
++    });
++    const first = await decideMainDelivery(host, {
++      taskId: fx.task.id,
++      decision: "revise",
++      revisionId: fx.revisionId,
++      digest: fx.digest,
++      reason: "Need a narrower change",
++      timeoutMs: 50,
++      confirm: true,
++    });
++    assert.equal(first.mainDecision?.decision, "revise");
++    const second = await decideMainDelivery(host, {
++      taskId: fx.task.id,
++      decision: "reject",
++      revisionId: fx.revisionId,
++      digest: fx.digest,
++      reason: "Need a narrower change",
++      timeoutMs: 50,
++      confirm: true,
++    });
++    assert.equal(second.observation.outcome, "blocked");
++    assert.ok(second.blockers.some((item) => item.code === "decision-mismatch"));
++    assert.equal(countMainReviews(fx.store, fx.task.id), 1);
++
++    const reasonChanged = await decideMainDelivery(host, {
++      taskId: fx.task.id,
++      decision: "revise",
++      revisionId: fx.revisionId,
++      digest: fx.digest,
++      reason: "A different decide reason",
++      timeoutMs: 50,
++      confirm: true,
++    });
++    assert.equal(reasonChanged.observation.outcome, "blocked");
++    assert.ok(reasonChanged.blockers.some((item) => item.code === "reason-mismatch"));
++    assert.equal(countMainReviews(fx.store, fx.task.id), 1);
++  } finally {
++    fx.store.close();
++  }
++});
++
++test("optional diff obeys the explicit byte bound and is omitted by default", async () => {
++  const fx = await buildSucceededCandidate(0);
++  try {
++    const host = makeHost(fx);
++    const without = await prepareMainDelivery(host, {
++      taskId: fx.task.id,
++      reviewerProfileIds: [],
++      reason: "Explicit skip",
++      timeoutMs: 50,
++      confirm: true,
++    });
++    assert.equal(without.diff, undefined);
++
++    const bounded = await prepareMainDelivery(host, {
++      taskId: fx.task.id,
++      reviewerProfileIds: [],
++      reason: "Explicit skip",
++      timeoutMs: 50,
++      confirm: true,
++      includeDiffMaxBytes: 12,
++    });
++    assert.ok(bounded.diff?.included);
++    assert.ok((bounded.diff?.utf8Bytes ?? 99) <= 12);
++    assert.equal(bounded.diff?.truncated, true);
++    assert.ok((bounded.diff?.text?.length ?? 99) <= 12);
++  } finally {
++    fx.store.close();
++  }
++});
++
++test("wrong reviewer count is a typed blocker and does not create a graph", async () => {
++  const fx = await buildSucceededCandidate(2);
++  try {
++    const host = makeHost(fx);
++    const checkpoint = await prepareMainDelivery(host, {
++      taskId: fx.task.id,
++      reviewerProfileIds: [fx.profileId],
++      reason: "Need two independent views",
++      timeoutMs: 50,
++      confirm: true,
++    });
++    assert.equal(checkpoint.observation.outcome, "blocked");
++    assert.ok(checkpoint.blockers.some((item) => item.code === "judge-count-mismatch"));
++    assert.equal(getReviewGraphStatus(fx.store, fx.task.id), undefined);
++    assert.equal(countMainReviews(fx.store, fx.task.id), 0);
++  } finally {
++    fx.store.close();
++  }
++});
++
++test("source-incompatible preflight is a typed blocker and starts no Integration", async () => {
++  const fx = await buildSucceededCandidate(0);
++  try {
++    const host = makeHost(fx);
++    await prepareMainDelivery(host, {
++      taskId: fx.task.id,
++      reviewerProfileIds: [],
++      reason: "Explicit skip",
++      timeoutMs: 50,
++      confirm: true,
++    });
++    await writeFile(path.join(fx.task.sourcePath, "src/app.ts"), "export const n = 99;\n");
++    const decided = await decideMainDelivery(host, {
++      taskId: fx.task.id,
++      decision: "accept",
++      revisionId: fx.revisionId,
++      digest: fx.digest,
++      reason: "Exact Candidate is acceptable",
++      timeoutMs: 5_000,
++      confirm: true,
++    });
++    assert.equal(decided.observation.outcome, "blocked");
++    assert.ok(decided.blockers.some((item) => item.code === "source-incompatible"));
++    assert.equal(decided.preflight?.passed, false);
++    assert.equal(decided.integration, undefined);
++    assert.equal(countMainReviews(fx.store, fx.task.id), 1);
++    assert.equal(countIntegrationOperations(fx.store, fx.task.id), 0);
++  } finally {
++    fx.store.close();
++  }
++});
++
++test("exact decide accept re-entry reuses the one receipt and Integration operation", async () => {
++  const fx = await buildSucceededCandidate(0);
++  try {
++    const host = makeHost(fx);
++    await prepareMainDelivery(host, {
++      taskId: fx.task.id,
++      reviewerProfileIds: [],
++      reason: "Explicit skip",
++      timeoutMs: 50,
++      confirm: true,
++    });
++    const first = await decideMainDelivery(host, {
++      taskId: fx.task.id,
++      decision: "accept",
++      revisionId: fx.revisionId,
++      digest: fx.digest,
++      reason: "Exact Candidate is acceptable",
++      timeoutMs: 5_000,
++      confirm: true,
++    });
++    assert.equal(first.observation.outcome, "ready");
++    const receiptId = first.preflight?.receiptId;
++    const operationId = first.integration?.operationId;
++    const second = await decideMainDelivery(host, {
++      taskId: fx.task.id,
++      decision: "accept",
++      revisionId: fx.revisionId,
++      digest: fx.digest,
++      reason: "Exact Candidate is acceptable",
++      timeoutMs: 5_000,
++      confirm: true,
++    });
++    assert.equal(second.preflight?.receiptId, receiptId);
++    assert.equal(second.integration?.operationId, operationId);
++    assert.equal(countMainReviews(fx.store, fx.task.id), 1);
++    assert.equal(countPreflightReceipts(fx.store, fx.task.id), 1);
++    assert.equal(countIntegrationOperations(fx.store, fx.task.id), 1);
++  } finally {
++    fx.store.close();
++  }
++});
++
++test("verification failure and running-Worker timeout stay observation-safe", async () => {
++  const failedFx = await buildSucceededCandidate(0);
++  try {
++    failedFx.store.setTaskStatus(failedFx.task.id, "failed");
++    const host = makeHost(failedFx);
++    const blocked = await prepareMainDelivery(host, {
++      taskId: failedFx.task.id,
++      reviewerProfileIds: [],
++      reason: "Explicit skip",
++      timeoutMs: 50,
++      confirm: true,
++    });
++    assert.equal(blocked.observation.outcome, "failed");
++    assert.ok(blocked.blockers.some((item) => item.code === "verification-failed"));
++    assert.equal(blocked.review.graphId, undefined);
++    assert.equal(countMainReviews(failedFx.store, failedFx.task.id), 0);
++    assert.equal(countIntegrationOperations(failedFx.store, failedFx.task.id), 0);
++  } finally {
++    failedFx.store.close();
++  }
++
++  const runningFx = await buildSucceededCandidate(0);
++  try {
++    runningFx.store.setTaskStatus(runningFx.task.id, "running");
++    const host = makeHost(runningFx);
++    const timedOut = await prepareMainDelivery(host, {
++      taskId: runningFx.task.id,
++      reviewerProfileIds: [],
++      reason: "Explicit skip",
++      timeoutMs: 12,
++      confirm: true,
++    });
++    assert.equal(timedOut.observation.outcome, "timeout");
++    assert.equal(timedOut.nextActionCode, "resume-prepare");
++    assert.equal(runningFx.store.getTask(runningFx.task.id).status, "running");
++    assert.equal(countMainReviews(runningFx.store, runningFx.task.id), 0);
++    runningFx.store.setTaskStatus(runningFx.task.id, "succeeded");
++    const resumed = await prepareMainDelivery(host, {
++      taskId: runningFx.task.id,
++      reviewerProfileIds: [],
++      reason: "Explicit skip",
++      timeoutMs: 50,
++      confirm: true,
++    });
++    assert.equal(resumed.observation.outcome, "ready");
++    assert.equal(resumed.task.id, runningFx.task.id);
++    assert.equal(countMainReviews(runningFx.store, runningFx.task.id), 0);
++    assert.equal(countIntegrationOperations(runningFx.store, runningFx.task.id), 0);
++  } finally {
++    runningFx.store.close();
++  }
++});
++
++test("Integration observation timeout reuses the one operation on exact re-entry", async () => {
++  const fx = await buildSucceededCandidate(0);
++  try {
++    const clock = { value: 0 };
++    const opts = { now: clock, holdApply: true };
++    const host = makeHost(fx, opts);
++    await prepareMainDelivery(host, {
++      taskId: fx.task.id,
++      reviewerProfileIds: [],
++      reason: "Explicit skip",
++      timeoutMs: 50,
++      confirm: true,
++    });
++    const timedOut = await decideMainDelivery(host, {
++      taskId: fx.task.id,
++      decision: "accept",
++      revisionId: fx.revisionId,
++      digest: fx.digest,
++      reason: "Exact Candidate is acceptable",
++      timeoutMs: 20,
++      confirm: true,
++    });
++    assert.equal(timedOut.observation.outcome, "timeout");
++    assert.equal(timedOut.nextActionCode, "resume-decide");
++    assert.ok(timedOut.integration?.operationId);
++    assert.notEqual(fx.store.getTask(fx.task.id).status, "failed");
++    assert.equal(countMainReviews(fx.store, fx.task.id), 1);
++    assert.equal(countIntegrationOperations(fx.store, fx.task.id), 1);
++    assert.equal(fx.store.listIntegrationResults(fx.task.id).length, 0);
++
++    opts.holdApply = false;
++    const resumed = await decideMainDelivery(host, {
++      taskId: fx.task.id,
++      decision: "accept",
++      revisionId: fx.revisionId,
++      digest: fx.digest,
++      reason: "Exact Candidate is acceptable",
++      timeoutMs: 5_000,
++      confirm: true,
++    });
++    assert.equal(resumed.observation.outcome, "ready");
++    assert.equal(resumed.integration?.operationId, timedOut.integration?.operationId);
++    assert.equal(resumed.integration?.resultStatus, "applied");
++    assert.equal(countMainReviews(fx.store, fx.task.id), 1);
++    assert.equal(countPreflightReceipts(fx.store, fx.task.id), 1);
++    assert.equal(countIntegrationOperations(fx.store, fx.task.id), 1);
++  } finally {
++    fx.store.close();
++  }
++});
++
++test("prepare with a Task file submits once; existing id is observation-only", async () => {
++  const fx = await buildSucceededCandidate(2);
++  try {
++    let submits = 0;
++    const host = makeHost(fx, {
++      onSleep: async () => {
++        const graph = getReviewGraphStatus(fx.store, fx.task.id);
++        if (graph?.assignments.some((assignment) => assignment.status === "queued")) {
++          await finishAllReviewers(fx);
++        }
++      },
++    });
++    host.submitFile = async () => {
++      submits += 1;
++      return fx.store.getTask(fx.task.id);
++    };
++    host.inspectTaskFile = async () => ({ requiredJudges: 2 });
++    const fromFile = await prepareMainDelivery(host, {
++      taskFile: "forklight://test/once.yaml",
++      reviewerProfileIds: profiles(fx),
++      reason: "Need two independent views",
++      timeoutMs: 100,
++      confirm: true,
++    });
++    assert.equal(fromFile.observation.outcome, "ready");
++    assert.equal(submits, 1);
++    assert.equal(countMainReviews(fx.store, fx.task.id), 0);
++    assert.equal(countIntegrationOperations(fx.store, fx.task.id), 0);
++    const fromId = await prepareMainDelivery(host, {
++      taskId: fx.task.id,
++      reviewerProfileIds: profiles(fx),
++      reason: "Need two independent views",
++      timeoutMs: 100,
++      confirm: true,
++    });
++    assert.equal(fromId.observation.outcome, "ready");
++    assert.equal(fromId.review.graphId, fromFile.review.graphId);
++    assert.equal(submits, 1);
++  } finally {
++    fx.store.close();
++  }
++});
+diff --git a/tests/cli-supervision.test.ts b/tests/cli-supervision.test.ts
+index 26de7e1..f02aff4 100644
+--- a/tests/cli-supervision.test.ts
++++ b/tests/cli-supervision.test.ts
+@@ -10,6 +10,8 @@ import {
+   buildStatusProgress,
+   humanCompactInspectionLines,
+   humanWaitLines,
++  parseDeliveryDecideOptions,
++  parseDeliveryPrepareOptions,
+   parseInspectSummaryOptions,
+   parseWaitOptions,
+   progressCursorKey,
+@@ -207,6 +209,66 @@ test("wait parsing honors overrides and derives omitted poll interval", () => {
+   );
+ });
+ 
++test("delivery prepare and decide parsing accepts the public flags and rejects extras", () => {
++  assert.deepEqual(
++    parseDeliveryPrepareOptions([
++      "--task", "task-1", "--reviewer-profiles", "a,b", "--reason", "Need review",
++      "--timeout-ms", "30", "--confirm", "--json",
++    ]),
++    {
++      taskId: "task-1",
++      reviewerProfileIds: ["a", "b"],
++      reason: "Need review",
++      timeoutMs: 30,
++      confirm: true,
++      json: true,
++    },
++  );
++  assert.deepEqual(
++    parseDeliveryPrepareOptions([
++      "--task-file", "work.yaml", "--reason", "Skip judges",
++      "--timeout-ms", "5", "--confirm", "--include-diff-max-bytes", "20",
++    ]),
++    {
++      taskFile: "work.yaml",
++      reviewerProfileIds: [],
++      reason: "Skip judges",
++      timeoutMs: 5,
++      confirm: true,
++      includeDiffMaxBytes: 20,
++      json: false,
++    },
++  );
++  assert.throws(
++    () => parseDeliveryPrepareOptions(["--task", "t", "--task-file", "f", "--reason", "r", "--timeout-ms", "1", "--confirm"]),
++    /exactly one/,
++  );
++  assert.throws(
++    () => parseDeliveryPrepareOptions(["--task", "t", "--reason", "r", "--timeout-ms", "1"]),
++    /--confirm/,
++  );
++  assert.deepEqual(
++    parseDeliveryDecideOptions([
++      "--decision", "accept", "--revision", "rev-1", "--digest", "abc",
++      "--reason", "ok", "--timeout-ms", "9", "--confirm",
++    ], "task-9"),
++    {
++      taskId: "task-9",
++      decision: "accept",
++      revisionId: "rev-1",
++      digest: "abc",
++      reason: "ok",
++      timeoutMs: 9,
++      confirm: true,
++      json: false,
++    },
++  );
++  assert.throws(
++    () => parseDeliveryDecideOptions(["--decision", "maybe", "--revision", "r", "--digest", "d", "--reason", "ok", "--timeout-ms", "1", "--confirm"], "t"),
++    /accept, revise, or reject/,
++  );
++});
++
+ test("supervision options reject missing, non-integer, zero, invalid, and ambiguous flags", () => {
+   for (const arguments_ of [
+     [], ["--timeout-ms", "0"], ["--timeout-ms", "1.5"],
+diff --git a/tests/cli-exchange-receipts.test.ts b/tests/cli-exchange-receipts.test.ts
+index 2d3d1c3..d8c898e 100644
+--- a/tests/cli-exchange-receipts.test.ts
++++ b/tests/cli-exchange-receipts.test.ts
+@@ -117,6 +117,37 @@ function makeReport(overrides: {
+     } };
+ }
+ 
++test("delivery prepare and decide each record one CLI exchange receipt", async () => {
++  const home = await mkdtemp(path.join(tmpdir(), "forklight-cli-delivery-"));
++  seedTask(home, "task-delivery");
++  const prepareOut = `delivery: prepare ready\ntask: task-delivery\n`;
++  await withCliExchangeReceipt({
++    operation: "forklight_delivery_prepare",
++    home,
++    args: { taskId: "task-delivery", reviewerProfileIds: [], reasonLength: 12, timeoutMs: 5, confirm: true },
++    taskId: "task-delivery",
++    invoke: async () => ({ kind: "main-delivery-checkpoint" }),
++    renderOutput: () => prepareOut,
++  });
++  const decideOut = `delivery: decide ready\ntask: task-delivery\n`;
++  await withCliExchangeReceipt({
++    operation: "forklight_delivery_decide",
++    home,
++    args: { taskId: "task-delivery", decision: "revise", reasonLength: 8, timeoutMs: 5, confirm: true },
++    taskId: "task-delivery",
++    invoke: async () => ({ kind: "main-delivery-checkpoint" }),
++    renderOutput: () => decideOut,
++  });
++  const receipts = listReceipts(home, "task-delivery");
++  assert.equal(receipts.length, 2);
++  assert.equal(receipts[0]!.operation, "forklight_delivery_prepare");
++  assert.equal(receipts[1]!.operation, "forklight_delivery_decide");
++  assert.equal(receipts[0]!.responseStructured, undefined);
++  assert.equal(receipts[1]!.responseStructured, undefined);
++  assertNoForbidden(receipts[0]!);
++  assertNoForbidden(receipts[1]!);
++});
++
+ // --- CLI one-surface success (no responseStructured) ---------------------
+ 
+ test("CLI success: one responseContent, no responseStructured, exact stdout bytes", async () => {
+diff --git a/tests/daemon.test.ts b/tests/daemon.test.ts
+index 1705ebb..211a415 100644
+--- a/tests/daemon.test.ts
++++ b/tests/daemon.test.ts
+@@ -121,6 +121,8 @@ test("identity matching protects state changes but lets a new build stop an old
+   assert.equal(requiresMatchingBuildIdentity("storage_preview"), false);
+   assert.equal(requiresMatchingBuildIdentity("storage_reclaim"), true);
+   assert.equal(requiresMatchingBuildIdentity("storage_retain"), true);
++  assert.equal(requiresMatchingBuildIdentity("delivery_prepare"), true);
++  assert.equal(requiresMatchingBuildIdentity("delivery_decide"), true);
+   assert.equal(requiresMatchingBuildIdentity("main_token_capture"), true);
+   assert.equal(requiresMatchingBuildIdentity("main_token_status"), false);
+   assert.equal(requiresMatchingBuildIdentity("main_token_assess"), true);
+@@ -229,6 +231,8 @@ test("shutdown intent is a closed stop/restart set with stop as the legacy defau
+ test("Integration wait socket deadline covers the requested wait interval", () => {
+   assert.equal(daemonRequestTimeoutMs("health", {}), 15_000);
+   assert.equal(daemonRequestTimeoutMs("integration_wait", { timeoutMs: 1 }), 15_000);
++  assert.equal(daemonRequestTimeoutMs("delivery_prepare", { timeoutMs: 1 }), 15_000);
++  assert.equal(daemonRequestTimeoutMs("delivery_decide", { timeoutMs: 60_000 }), 65_000);
+   assert.equal(
+     daemonRequestTimeoutMs("integration_wait", { timeoutMs: 60_000 }),
+     65_000,
+@@ -9968,3 +9972,120 @@ test("daemon main_token_value_report is read-only and agrees across two launches
+     await daemon.close();
+   }
+ });
++
++test("daemon delivery prepare and decide compose one reviewed accept without auto-judgment", async () => {
++  const home = await mkdtemp(path.join(tmpdir(), "fl-daemon-delivery-"));
++  const sourceDir = path.join(home, "source");
++  await mkdir(path.join(sourceDir, "src"), { recursive: true });
++  await writeFile(path.join(sourceDir, "readme.md"), "# hello\n\nOriginal.\n");
++  await writeFile(path.join(sourceDir, "src/app.ts"), "export const n = 1;\n");
++  const store = new StateStore(home);
++  const settings = new SettingsService(store);
++  const taskId = "delivery-daemon-1";
++  const paths = taskPaths(home, taskId);
++  const spec: TaskSpec = {
++    version: 1,
++    name: "Daemon delivery",
++    project: sourceDir,
++    goal: "Ship a small change",
++    constraints: [],
++    provider: {
++      name: "deepseek",
++      model: "deepseek-v4-flash",
++      keychainService: "forklight.deepseek.api-key",
++    },
++    runtime: { name: "claude-code", executable: "claude", effort: "low", maxBudgetUsd: 0.1 },
++    workspace: { exclude: [".git", "node_modules"] },
++    worker: { allowEdits: true, allowedCommands: [], focusPaths: ["src", "readme.md"] },
++    acceptance: { commands: ["true"] },
++    reviewRequirement: { requiredJudges: 0, reason: "Explicit skip for daemon fixture" },
++  };
++  await prepareWorkspace(spec, paths);
++  await mkdir(path.join(paths.workspace, "src"), { recursive: true });
++  await writeFile(path.join(paths.workspace, "readme.md"), "# hello\n\nChanged.\n");
++  await writeFile(path.join(paths.workspace, "src/app.ts"), "export const n = 2;\n");
++  await writeWorkspacePatchReport(paths, createPathPolicy(spec));
++  const now = new Date().toISOString();
++  store.createTask({
++    id: taskId,
++    name: spec.name,
++    status: "succeeded",
++    sourcePath: sourceDir,
++    taskFile: "forklight://test/daemon-delivery",
++    spec,
++    paths,
++    sessionId: "session-1",
++    currentAttemptId: "attempt-1",
++    createdAt: now,
++    updatedAt: now,
++  });
++  store.createAttempt({
++    id: "attempt-1",
++    taskId,
++    ordinal: 1,
++    status: "succeeded",
++    sessionId: "session-1",
++    rawLogPath: path.join(paths.logs, "attempt-1.jsonl"),
++    startedAt: now,
++    finishedAt: now,
++    exitCode: 0,
++  });
++  const verification: VerificationResult = {
++    passed: true,
++    behaviorPassed: true,
++    policyPassed: true,
++    sourceCompatible: true,
++    commands: [{ command: "true", exitCode: 0, stdout: "", stderr: "", durationMs: 1, timedOut: false }],
++    diffPath: paths.diff,
++    sourceUnchanged: true,
++  };
++  const verEvent = store.addEvent(taskId, "attempt-1", "verification.completed", "passed", verification);
++  const revision = await captureCandidateRevision(
++    store, store.getTask(taskId), store.getAttempt("attempt-1"), verEvent.sequence, true,
++    ["readme.md", "src/app.ts"], 2, 4,
++  );
++  const coordinator = new DaemonCoordinator(store, settings, 0);
++  const prepared = await coordinator.deliveryPrepare({
++    taskId,
++    reviewerProfileIds: [],
++    reason: "Explicit skip",
++    timeoutMs: 200,
++    confirm: true,
++  });
++  assert.equal(prepared.kind, "main-delivery-checkpoint");
++  assert.equal(prepared.observation.outcome, "ready");
++  assert.equal(prepared.mainDecision, undefined);
++  assert.equal(prepared.integration, undefined);
++  assert.equal(prepared.nextActionCode, "record-main-review");
++  assert.equal(
++    store.listEvents(taskId).filter((event) => event.type === "main-review.completed").length,
++    0,
++  );
++  assert.equal(
++    store.listEvents(taskId).filter((event) => event.type === "integration.operation.started").length,
++    0,
++  );
++
++  const decided = await coordinator.deliveryDecide({
++    taskId,
++    decision: "accept",
++    revisionId: revision.id,
++    digest: revision.patchDigest,
++    reason: "Exact Candidate is acceptable",
++    timeoutMs: 10_000,
++    confirm: true,
++  });
++  assert.equal(decided.observation.outcome, "ready");
++  assert.equal(decided.mainDecision?.decision, "accept");
++  assert.equal(decided.preflight?.passed, true);
++  assert.equal(decided.integration?.resultStatus, "applied");
++  assert.equal(
++    store.listEvents(taskId).filter((event) => event.type === "main-review.completed").length,
++    1,
++  );
++  assert.equal(
++    store.listEvents(taskId).filter((event) => event.type === "integration.operation.started").length,
++    1,
++  );
++  store.close();
++});
+diff --git a/tests/daemon-cli.test.ts b/tests/daemon-cli.test.ts
+index b40b841..30685cf 100644
+--- a/tests/daemon-cli.test.ts
++++ b/tests/daemon-cli.test.ts
+@@ -3019,3 +3019,150 @@ test("value-report CLI empty and seeded launches agree and stay read-only", asyn
+     await daemon.close();
+   }
+ });
++
++test("CLI delivery prepare and decide return the canonical checkpoint twice", async () => {
++  const home = await mkdtemp(path.join(tmpdir(), "fl-cli-delivery-"));
++  const sourceDir = path.join(home, "source");
++  await mkdir(path.join(sourceDir, "src"), { recursive: true });
++  await writeFile(path.join(sourceDir, "readme.md"), "# hello\n\nOriginal.\n");
++  await writeFile(path.join(sourceDir, "src/app.ts"), "export const n = 1;\n");
++  const store = new StateStore(home);
++  const taskId = "cli-delivery-1";
++  const paths = taskPaths(home, taskId);
++  const spec = {
++    version: 1,
++    name: "CLI delivery",
++    project: sourceDir,
++    goal: "Ship a small change",
++    constraints: [],
++    provider: {
++      name: "deepseek",
++      model: "deepseek-v4-flash",
++      keychainService: "forklight.deepseek.api-key",
++    },
++    runtime: { name: "claude-code", executable: "claude", effort: "low", maxBudgetUsd: 0.1 },
++    workspace: { exclude: [".git", "node_modules"] },
++    worker: { allowEdits: true, allowedCommands: [], focusPaths: ["src", "readme.md"] },
++    acceptance: { commands: ["true"] },
++    reviewRequirement: { requiredJudges: 0, reason: "Explicit skip for CLI fixture" },
++  } as TaskRecord["spec"];
++  await prepareWorkspace(spec, paths);
++  await mkdir(path.join(paths.workspace, "src"), { recursive: true });
++  await writeFile(path.join(paths.workspace, "readme.md"), "# hello\n\nChanged.\n");
++  await writeFile(path.join(paths.workspace, "src/app.ts"), "export const n = 2;\n");
++  await writeWorkspacePatchReport(paths, createPathPolicy(spec));
++  const now = new Date().toISOString();
++  store.createTask({
++    id: taskId,
++    name: spec.name,
++    status: "succeeded",
++    sourcePath: sourceDir,
++    taskFile: "forklight://test/cli-delivery",
++    spec,
++    paths,
++    sessionId: "session-1",
++    currentAttemptId: "attempt-1",
++    createdAt: now,
++    updatedAt: now,
++  });
++  store.createAttempt({
++    id: "attempt-1",
++    taskId,
++    ordinal: 1,
++    status: "succeeded",
++    sessionId: "session-1",
++    rawLogPath: path.join(paths.logs, "attempt-1.jsonl"),
++    startedAt: now,
++    finishedAt: now,
++    exitCode: 0,
++  });
++  const verEvent = store.addEvent(taskId, "attempt-1", "verification.completed", "passed", {
++    passed: true,
++    behaviorPassed: true,
++    policyPassed: true,
++    sourceCompatible: true,
++    commands: [{ command: "true", exitCode: 0, stdout: "", stderr: "", durationMs: 1, timedOut: false }],
++    diffPath: paths.diff,
++    sourceUnchanged: true,
++  });
++  const revision = await captureCandidateRevision(
++    store, store.getTask(taskId), store.getAttempt("attempt-1"), verEvent.sequence, true,
++    ["readme.md", "src/app.ts"], 2, 4,
++  );
++  store.close();
++
++  const daemon = new ForkLightDaemon(home, 0);
++  await daemon.start();
++  try {
++    const prepareArgs = [
++      "delivery", "prepare", "--task", taskId, "--reason", "Explicit skip",
++      "--timeout-ms", "2000", "--confirm", "--json",
++    ];
++    const first = await runCli(home, prepareArgs, 20_000);
++    assert.equal(first.code, 0, first.stderr);
++    const firstJson = JSON.parse(first.stdout) as {
++      kind?: string;
++      candidate?: { revisionId?: string; digest?: string };
++      nextActionCode?: string;
++      observation?: { outcome?: string };
++    };
++    assert.equal(firstJson.kind, "main-delivery-checkpoint");
++    assert.equal(firstJson.observation?.outcome, "ready");
++    assert.equal(firstJson.candidate?.revisionId, revision.id);
++    assert.equal(firstJson.candidate?.digest, revision.patchDigest);
++    assert.equal(firstJson.nextActionCode, "record-main-review");
++
++    const second = await runCli(home, prepareArgs, 20_000);
++    assert.equal(second.code, 0, second.stderr);
++    const secondJson = JSON.parse(second.stdout) as { candidate?: { revisionId?: string } };
++    assert.equal(secondJson.candidate?.revisionId, revision.id);
++
++    const human = await runCli(home, [
++      "delivery", "prepare", "--task", taskId, "--reason", "Explicit skip",
++      "--timeout-ms", "2000", "--confirm",
++    ], 20_000);
++    assert.equal(human.code, 0, human.stderr);
++    assert.match(human.stdout, /delivery: prepare ready/);
++    assert.match(human.stdout, /next: record-main-review/);
++
++    const decideArgs = [
++      "delivery", "decide", taskId, "--decision", "accept",
++      "--revision", revision.id, "--digest", revision.patchDigest,
++      "--reason", "Exact Candidate is acceptable", "--timeout-ms", "20000", "--confirm", "--json",
++    ];
++    const decide1 = await runCli(home, decideArgs, 30_000);
++    assert.equal(decide1.code, 0, decide1.stderr);
++    const decideJson = JSON.parse(decide1.stdout) as {
++      mainDecision?: { decision?: string };
++      integration?: { operationId?: string; status?: string; resultStatus?: string };
++      preflight?: { passed?: boolean };
++      nextActionCode?: string;
++    };
++    assert.equal(decideJson.mainDecision?.decision, "accept");
++    assert.equal(decideJson.preflight?.passed, true);
++    assert.ok(decideJson.integration?.operationId);
++    assert.equal(decideJson.integration?.resultStatus, "applied");
++
++    const decide2 = await runCli(home, decideArgs, 30_000);
++    assert.equal(decide2.code, 0, decide2.stderr);
++    const decide2Json = JSON.parse(decide2.stdout) as {
++      mainDecision?: { decision?: string };
++      integration?: { operationId?: string; resultStatus?: string };
++    };
++    assert.equal(decide2Json.mainDecision?.decision, "accept");
++    assert.equal(decide2Json.integration?.operationId, decideJson.integration?.operationId);
++    assert.equal(decide2Json.integration?.resultStatus, "applied");
++
++    const decideHuman = await runCli(home, [
++      "delivery", "decide", taskId, "--decision", "accept",
++      "--revision", revision.id, "--digest", revision.patchDigest,
++      "--reason", "Exact Candidate is acceptable", "--timeout-ms", "20000", "--confirm",
++    ], 30_000);
++    assert.equal(decideHuman.code, 0, decideHuman.stderr);
++    assert.match(decideHuman.stdout, /delivery: decide ready/);
++    assert.match(decideHuman.stdout, /mainDecision: accept/);
++    assert.match(decideHuman.stdout, /integration: operation=/);
++  } finally {
++    await daemon.close();
++  }
++});
+diff --git a/tests/mcp.test.ts b/tests/mcp.test.ts
+index eb0d90a..6c2f910 100644
+--- a/tests/mcp.test.ts
++++ b/tests/mcp.test.ts
+@@ -89,6 +89,8 @@ test("MCP exposes ForkLight tools and reaches the daemon", async () => {
+         "forklight_competition_status",
+         "forklight_correct",
+         "forklight_correction_eligibility",
++        "forklight_delivery_decide",
++        "forklight_delivery_prepare",
+         "forklight_direct_codex_capture",
+         "forklight_direct_codex_capture_task",
+         "forklight_direct_codex_inbox",
+@@ -4009,3 +4011,145 @@ test("MCP main-token value report is read-only and matches two launches", async
+     await daemon.close();
+   }
+ });
++
++test("MCP delivery prepare and decide share the canonical checkpoint schema", async () => {
++  const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-delivery-"));
++  const sourceDir = path.join(home, "source");
++  await mkdir(path.join(sourceDir, "src"), { recursive: true });
++  await writeFile(path.join(sourceDir, "readme.md"), "# hello\n\nOriginal.\n");
++  await writeFile(path.join(sourceDir, "src/app.ts"), "export const n = 1;\n");
++  const store = new StateStore(home);
++  const taskId = "mcp-delivery-1";
++  const paths = taskPaths(home, taskId);
++  const spec: TaskSpec = {
++    version: 1,
++    name: "MCP delivery",
++    project: sourceDir,
++    goal: "Ship a small change",
++    constraints: [],
++    provider: {
++      name: "deepseek",
++      model: "deepseek-v4-flash",
++      keychainService: "forklight.deepseek.api-key",
++    },
++    runtime: { name: "claude-code", executable: "claude", effort: "low", maxBudgetUsd: 0.1 },
++    workspace: { exclude: [".git", "node_modules"] },
++    worker: { allowEdits: true, allowedCommands: [], focusPaths: ["src", "readme.md"] },
++    acceptance: { commands: ["true"] },
++    reviewRequirement: { requiredJudges: 0, reason: "Explicit skip for MCP fixture" },
++  };
++  await prepareWorkspace(spec, paths);
++  await mkdir(path.join(paths.workspace, "src"), { recursive: true });
++  await writeFile(path.join(paths.workspace, "readme.md"), "# hello\n\nChanged.\n");
++  await writeFile(path.join(paths.workspace, "src/app.ts"), "export const n = 2;\n");
++  await writeWorkspacePatchReport(paths, createPathPolicy(spec));
++  const now = new Date().toISOString();
++  store.createTask({
++    id: taskId,
++    name: spec.name,
++    status: "succeeded",
++    sourcePath: sourceDir,
++    taskFile: "forklight://test/mcp-delivery",
++    spec,
++    paths,
++    sessionId: "session-1",
++    currentAttemptId: "attempt-1",
++    createdAt: now,
++    updatedAt: now,
++  });
++  store.createAttempt({
++    id: "attempt-1",
++    taskId,
++    ordinal: 1,
++    status: "succeeded",
++    sessionId: "session-1",
++    rawLogPath: path.join(paths.logs, "attempt-1.jsonl"),
++    startedAt: now,
++    finishedAt: now,
++    exitCode: 0,
++  });
++  const verification: VerificationResult = {
++    passed: true,
++    behaviorPassed: true,
++    policyPassed: true,
++    sourceCompatible: true,
++    commands: [{ command: "true", exitCode: 0, stdout: "", stderr: "", durationMs: 1, timedOut: false }],
++    diffPath: paths.diff,
++    sourceUnchanged: true,
++  };
++  const verEvent = store.addEvent(taskId, "attempt-1", "verification.completed", "passed", verification);
++  const revision = await captureCandidateRevision(
++    store, store.getTask(taskId), store.getAttempt("attempt-1"), verEvent.sequence, true,
++    ["readme.md", "src/app.ts"], 2, 4,
++  );
++  store.close();
++
++  const daemon = new ForkLightDaemon(home, 0);
++  await daemon.start();
++  const server = createForkLightMcpServer(home);
++  const client = new Client({ name: "forklight-test", version: "1.0.0" });
++  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
++  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
++  try {
++    const prepared = await client.callTool({
++      name: "forklight_delivery_prepare",
++      arguments: {
++        taskId,
++        reviewerProfileIds: [],
++        reason: "Explicit skip",
++        timeoutMs: 500,
++        confirm: true,
++      },
++    });
++    assert.equal(prepared.isError, undefined);
++    const preparedData = prepared.structuredContent as {
++      kind?: string;
++      observation?: { outcome?: string };
++      candidate?: { revisionId?: string; digest?: string };
++      nextActionCode?: string;
++      mainDecision?: unknown;
++      integration?: unknown;
++    };
++    assert.equal(preparedData.kind, "main-delivery-checkpoint");
++    assert.equal(preparedData.observation?.outcome, "ready");
++    assert.equal(preparedData.candidate?.revisionId, revision.id);
++    assert.equal(preparedData.candidate?.digest, revision.patchDigest);
++    assert.equal(preparedData.nextActionCode, "record-main-review");
++    assert.equal(preparedData.mainDecision, undefined);
++    assert.equal(preparedData.integration, undefined);
++
++    const decided = await client.callTool({
++      name: "forklight_delivery_decide",
++      arguments: {
++        taskId,
++        decision: "revise",
++        revisionId: revision.id,
++        digest: revision.patchDigest,
++        reason: "Need a narrower change",
++        timeoutMs: 500,
++        confirm: true,
++      },
++    });
++    assert.equal(decided.isError, undefined);
++    const decidedData = decided.structuredContent as {
++      kind?: string;
++      mainDecision?: { decision?: string };
++      integration?: unknown;
++    };
++    assert.equal(decidedData.kind, "main-delivery-checkpoint");
++    assert.equal(decidedData.mainDecision?.decision, "revise");
++    assert.equal(decidedData.integration, undefined);
++    const receiptStore = new StateStore(home);
++    const receipts = receiptStore.listExchangeReceipts(taskId);
++    assert.equal(receipts.filter((receipt) => receipt.operation === "forklight_delivery_prepare").length, 1);
++    assert.equal(receipts.filter((receipt) => receipt.operation === "forklight_delivery_decide").length, 1);
++    assert.equal(receipts.some((receipt) => receipt.operation === "forklight_wait"), false);
++    assert.equal(receipts.some((receipt) => receipt.operation === "forklight_review_graph_create"), false);
++    assert.equal(receipts.some((receipt) => receipt.operation === "forklight_main_review"), false);
++    receiptStore.close();
++  } finally {
++    await client.close();
++    await server.close();
++    await daemon.close();
++  }
++});
+diff --git a/README.md b/README.md
+index faffdc0..daf8493 100644
+--- a/README.md
++++ b/README.md
+@@ -43,7 +43,8 @@ ForkLight 是 **local-first、运行时与模型无关的执行中枢**：由一
+ 
+ 5. **CLI / Daemon / MCP**  
+    - 同一真相的多入口：本地 daemon、交换收据、MCP 工具面  
+-   - 健康与 readiness 检查
++   - 健康与 readiness 检查
++   - `delivery prepare` / `delivery decide`：一次准备到已审查 Candidate，一次明确决定并安全集成
+ 
+ 6. **路由、竞争与失败归因**  
+    - 模型路由建议（证据不充分时不永久拉黑）  
+@@ -127,7 +128,7 @@ ForkLight is a **local-first execution hub**: a capable **Main** decomposes work
+ 2. Multi-runtime workers (Claude Code, Codex CLI, Grok Build, …) with profiles and readiness.  
+ 3. Isolated workspaces, patches, fail-closed integration.  
+ 4. Bilingual Hub: outcome → state → I/O → reason → retained work → next action.  
+-5. Daemon + MCP + exchange receipts.  
++5. Daemon + MCP + exchange receipts. Two-call `delivery prepare` / `delivery decide` for reviewed delivery.
+ 6. Routing advice, exceptional competition, failure attribution before model blame.  
+ 7. Dogfood YAML examples and milestone contracts under `docs/`.
+ 
+diff --git a/docs/operations.md b/docs/operations.md
+index 8884330..d29f11f 100644
+--- a/docs/operations.md
++++ b/docs/operations.md
+@@ -201,6 +201,44 @@ forklight inspect <task-id>        # shows attempts, events, diff
+ forklight inspect <task-id> --summary   # compact inspect plus the Main decision packet
+ ```
+ 
++### 3b. Two-call reviewed delivery
++
++Ordinary reviewed delivery no longer requires Main to poll `wait`, create the
++Review Graph, and drive Integration as separate model turns. Two resumable
++commands compose the existing durable records and stop at the next genuine
++Main decision:
++
++```bash
++forklight delivery prepare (--task-file <path>|--task <id>) \
++  [--reviewer-profiles <id1,id2>] --reason <text> --timeout-ms <ms> --confirm \
++  [--include-diff-max-bytes <n>] [--json]
++
++forklight delivery decide <task-id> --decision <accept|revise|reject> \
++  --revision <id> --digest <sha256> --reason <text> --timeout-ms <ms> --confirm [--json]
++```
++
++`delivery prepare` submits at most one new Task (or observes an existing id
++without resuming the Worker), waits for independent verification, creates or
++reuses the exact confirmed Review Graph, waits for every required Judge, and
++returns one compact `main-delivery-checkpoint`. It never records a Main
++decision and never starts Integration.
++
++`delivery decide` binds Main's explicit `accept` / `revise` / `reject` to the
++exact Candidate Revision id and full digest from that checkpoint. `revise` and
++`reject` persist only that decision. `accept` runs one fresh preflight and one
++Integration, then observes that operation to terminal. Judge agreement is never
++acceptance.
++
++`--timeout-ms` ends only the caller's wait. The Worker, Review Graph, and
++Integration keep running. Re-enter the same command with the same Task id,
++Reviewer order, reason, and (for decide) exact identity. A changed identity,
++Reviewer order, decision, or reason fails closed and does not create a second
++graph, review, receipt, or operation.
++
++MCP exposes the same schema as `forklight_delivery_prepare` and
++`forklight_delivery_decide`. Existing `wait`, `review-graph`, `main-review`,
++and `integration` commands remain available.
++
+ The Worker produces a diff against the original baseline.
+ 
+ New Tasks may freeze an explicit `reviewRequirement` (`requiredJudges` 0, 1, or
+@@ -574,14 +612,19 @@ mutation bypass.
+ | Hub status (read-only) | `forklight hub status` | **No** — read-only, never claims, replaces, or signals |
+ | Integration preflight | `forklight integration preflight` | **No** |
+ | Integration status/wait/history | `forklight integration status` / `wait` / `history` | **No** — observation only; never starts a daemon |
++| Delivery prepare | `forklight delivery prepare` | Yes — may submit one Task and start required Judges |
++| Delivery decide | `forklight delivery decide` | Accept integrates; revise/reject do not |
+ | Health check | `forklight health` | **No** |
+ 
+ ## Actions that mutate the source project
+ 
+-Only one operation writes to the source project:
++Only Integration apply writes to the source project. That includes the
++granular command and `forklight delivery decide --decision accept`, which runs
++the same preflight/apply path after an explicit exact accept:
+ 
+ ```bash
+ forklight integration apply <task-id> --receipt <receipt-id> --confirm
++forklight delivery decide <task-id> --decision accept --revision <id> --digest <sha256> --reason <text> --timeout-ms <ms> --confirm
+ ```
+ 
+ Every other operation is read-only with respect to source files. Workers edit

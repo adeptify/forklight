@@ -1,0 +1,50 @@
+version: 2
+name: M2 final audit of Integration operation surface compatibility
+project: /Users/yijunwang/code/forklight
+taskClass: m2-source-only-recovery-surface-final-audit
+taskFamily: forklight-integration-recovery
+workerProfileId: deepseek-flash-1m
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 0
+  reason: Read-only compatibility audit changes no product file and reuses deterministic protocol tests.
+contract:
+  outcome: Verify status, wait, history, Goal reconciliation, legacy reads, observer disconnect, and activation handoff remain truthful after source-only recovery ships.
+  presentation: { summary: 最终核对 operation 查询、Goal 与 activation handoff 没有被续跑能力破坏。, language: zh-CN }
+  context:
+    - Read the accepted Coding and coding-integrated-audit-recovery specs completely; inspect the integrated source and return one exact blocker or pass.
+    - Reuse the delivered Candidate and prior audit evidence. Do not expand product scope or create a Candidate.
+    - Use ForkLight checkpoint MCP for every approved command.
+  inScope: [Public operation projection, original IDs, terminal idempotency, legacy history, disconnect semantics, activation handoff exclusion, focused tests, zero diff.]
+  outOfScope: [Edits, new API, Store migration, build/activation recovery, Integration, Hub, docs, commit, push, credentials, or coordination machinery.]
+  executionSteps: [Trace integrated surface consumers, inspect focused regressions, run commands, report a bounded verdict.]
+  deliverables: [One read-only compatibility verdict.]
+  modules:
+    - name: Operation surface
+      responsibility: Project one truthful original operation across recovery and terminal completion.
+      consumes: [Integrated stage/result truth and existing status/wait/history paths.]
+      produces: [Pass or exact blocker.]
+      boundaries: [No edit, new protocol, or observer authority.]
+  callChain: [Recovery persists original operation truth, existing readers project it, Goal reconciliation consumes the terminal result.]
+  scenarios:
+    - name: Existing surface remains exact
+      given: Recovered, terminal, legacy, disconnected, and activation operations coexist.
+      when: Existing readers and handoff paths run.
+      then: Each keeps its accepted semantics and IDs.
+  risks: [Do not relabel unsupported activation recovery as supported.]
+  changeBudget: { maxFiles: 1, maxDiffLines: 20 }
+advancedPolicy: { maxDurationMs: null, observedTokenCeiling: null, noProgressTimeoutMs: null, fileLimit: null, fileLimitMode: warn, changedLineLimit: null, changedLineLimitMode: warn, baseMaxAttempts: 1, maxExtraAttempts: 0, maxMainCorrections: 0, maxMainReverifications: 0, maxConcurrency: 1, completionMode: warn, changeBudgetMode: warn, maxAdaptationRounds: 0 }
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: false
+  allowedCommands: []
+  focusPaths: [src/core/integration-operation.ts, src/daemon/coordinator.ts, src/core/types.ts, tests/integration-operation.test.ts, tests/daemon.test.ts]
+acceptance:
+  criteria: [Existing operation readers, Goal reconciliation, disconnect behavior, legacy history, and activation handoff remain compatible and truthful.]
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/integration-operation.test.ts tests/daemon.test.ts
+    - git diff --check

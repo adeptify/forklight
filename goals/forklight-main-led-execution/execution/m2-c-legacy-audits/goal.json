@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "name": "M2-C legacy handoff post-Integration audits",
+  "objective": "Independently audit the already integrated legacy-handoff compatibility Candidate against the corrected accepted spec using a healthy non-Grok Runtime, then return Main to the real-home read-only storage audit and preview without modifying product files.",
+  "planFile": "./plan.json",
+  "policy": {
+    "maxDurationMs": null,
+    "noProgressTimeoutMs": null,
+    "maxCorrectionRounds": 0,
+    "maxReviewRounds": 1,
+    "maxNoNewEvidenceCycles": 2
+  },
+  "milestones": [
+    { "itemId": "durable-read-audit", "gate": "machine" },
+    { "itemId": "lifecycle-chain-audit", "gate": "machine" },
+    { "itemId": "mutation-boundary-audit", "gate": "machine" },
+    { "itemId": "transport-readiness-audit", "gate": "machine" }
+  ]
+}

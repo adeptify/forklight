@@ -1,0 +1,174 @@
+version: 2
+name: M2-B implement risk-declared review and Main decision packet
+project: /Users/yijunwang/code/forklight
+taskClass: m2-risk-declared-review-decision-packet
+taskFamily: forklight-quality-decision-chain
+workerProfileId: grok-4-6-xhigh
+deliveryProfileId: forklight-self-upgrade
+executionPreference: auto
+
+provider:
+  name: xai
+  model: grok-4.6
+  keychainService: forklight.xai.api-key
+runtime:
+  name: grok-build
+  executable: grok
+  effort: xhigh
+  maxBudgetUsd: null
+
+contract:
+  outcome: >-
+    ForkLight lets Main freeze an explicit 0, 1, or 2-Judge requirement before a new Task runs,
+    enforces that exact-revision review evidence before Integration, and exposes one privacy-safe
+    Main decision packet that composes existing quality, correction, reuse, review, decision, and
+    delivery truth into exactly one next action without executing it.
+  presentation:
+    summary: 冻结每个新 Task 的 Judge 深度，并把现有质量与裁决证据合成一个不自动行动的 Main 决策包。
+    language: zh-CN
+  context:
+    - The sole accepted Work Item spec is specs/m2-b-quality-decision-chain/spec.md; read it completely before editing.
+    - M2-A is integrated. This Task must keep grok-4-6-xhigh auto resolved as persistent-session and must not alter Runtime execution truth.
+    - ForkLight already has verification, bounded same-Session repair, Candidate Revision, Review Graph, handoff, Main Review, and safe Integration; compose and gate them instead of rebuilding them.
+    - This implementation Task was admitted before the new requiredJudges field exists, so Main will bootstrap its mandated two-Judge review explicitly. The first post-Integration high-risk M2-C Task will freeze requiredJudges 2 through the new parser.
+    - ForkLight serves one local developer. Do not add locks, leases, checksums, content addressing, version handshakes, or distributed coordination.
+    - Preserve all source work. Edit only the isolated Workspace. Never commit, push, change remotes, access credentials, edit Hub, or start Integration.
+  inScope:
+    - Add one immutable new-Task review requirement with requiredJudges 0, 1, or 2 and one bounded Main reason; legacy Tasks remain readable without invented policy.
+    - Enforce the requirement before Integration against the current exact Candidate Revision, terminal Review Graph assignment count, and a fresh following Main accept.
+    - Compose one bounded Main decision packet from existing execution, Worker claim, verification, validation repair/correction, Review Graph, Candidate reuse/handoff, Main Review, Integration, blocker, stop, and next-action truth.
+    - Expose the same canonical packet semantics through daemon/API, CLI compact inspect, and MCP compact inspect with concise human rendering.
+    - Preserve explicit Judge skip as requiredJudges 0 evidence and keep all read paths non-mutating.
+  outOfScope:
+    - Automatic risk inference, Judge creation or replacement, voting, majority decisions, automatic correction, retry, handoff, Competition, Main Review, or Integration.
+    - New Review Graph, Candidate, Work Item, scheduler, status system, or duplicated eligibility resolver.
+    - Storage lifecycle, routing, economics, Provider/Worker adapters, Hub/UI, distributed coordination, credentials, commit, or push.
+  executionSteps:
+    - Trace Task admission, Review Graph exact-revision projection, current Integration review gate, TaskDecisionView, handoff/correction read projections, daemon inspect, CLI compact inspect, and MCP summary before editing.
+    - Define the smallest immutable review-requirement schema and compatibility behavior, then thread it through Task parsing and safe preview.
+    - Build one canonical decision-packet composer from existing resolvers and use it in daemon, CLI, and MCP rather than duplicating decisions.
+    - Extend Integration preflight only enough to enforce a declared nonzero requirement and stale/fresh Main decision ordering.
+    - Add focused 0/1/2, legacy, missing/undersized/pending/stale graph, packet parity, privacy, and read-only tests; self-check the exact diff against the accepted spec.
+  deliverables:
+    - Immutable risk-declared review requirement with legacy compatibility.
+    - Exact-revision Integration review gate using existing Review Graph authority.
+    - One canonical privacy-safe Main decision packet and CLI/MCP/daemon projections.
+    - Focused regressions and only narrowly relevant operations documentation if necessary.
+  modules:
+    - name: Review requirement admission
+      responsibility: Validate and freeze requiredJudges 0, 1, or 2 plus a bounded Main reason for new Tasks while preserving legacy absence.
+      consumes:
+        - Task file, Worker/Profile resolution, and legacy Task records.
+      produces:
+        - Immutable review requirement or one fail-closed validation error.
+      boundaries:
+        - No inferred risk, automatic Judge creation, default policy invention, or legacy reinterpretation.
+    - name: Exact-revision review gate
+      responsibility: Compare the frozen requirement with the canonical current Candidate Revision, Review Graph terminal assignments, and fresh Main Review before Integration.
+      consumes:
+        - Candidate Revision, Review Graph view, latest verification, Main Review, and Integration preflight input.
+      produces:
+        - Passing gate or bounded missing, undersized, pending, stale, or fresh-decision rejection reasons.
+      boundaries:
+        - Existing exactness checks remain authoritative; Judge disposition never decides and no new consistency protocol is added.
+    - name: Main decision packet
+      responsibility: Compose existing durable quality and delivery facts into one bounded non-mutating packet with exactly one next Main action.
+      consumes:
+        - Execution truth, Worker claim, verification, repair/correction, review requirement and graph, reuse/handoff, Main Review, Integration, and stop evidence.
+      produces:
+        - One structured packet plus concise CLI/MCP/daemon presentation.
+      boundaries:
+        - No raw prompt, patch, log, artifact path, credential, automatic action, or duplicate eligibility engine.
+  callChain:
+    - Main submits this Integration-gated Goal milestone with Grok 4.6 Xhigh persistent-session execution and manually mandates two bootstrap Judges.
+    - Admission freezes existing execution truth and the pre-feature Task contract; Grok edits only its isolated Workspace and self-checks.
+    - ForkLight independently verifies and captures the exact source-only Candidate Revision.
+    - Main creates two independent read-only Judges, resolves their evidence, and records a fresh accept, revise, or reject.
+    - Safe Integration activates the new review/packet behavior before the read-only Goal dependents inspect it.
+    - The next high-risk new Task freezes requiredJudges 2 through the new admission path, proving the delivered product contract in real use.
+  scenarios:
+    - name: One required Judge
+      given: A new Task freezes requiredJudges 1 with a bounded reason and produces a verified Candidate.
+      when: No Review Graph exists or its one assignment is still pending.
+      then: The packet names the missing review evidence and Integration preflight refuses without creating a Judge.
+    - name: Two required Judges
+      given: A high-risk Task freezes requiredJudges 2 and only one usable Judge is terminal.
+      when: Main inspects or attempts Integration preflight.
+      then: The packet shows one missing independent opinion, Integration remains blocked, and no vote or automatic action occurs.
+    - name: Explicit mechanical skip and legacy
+      given: A new Task declares requiredJudges 0 with a reason while an old stored Task has no review requirement.
+      when: Their packets are read.
+      then: The new Task shows explicit skip evidence and the legacy Task remains readable without invented requirement or review claim.
+    - name: Partial result and stop
+      given: A Candidate has reusable paths, named gaps, and repeated no-progress or a boundary stop.
+      when: Main reads the packet.
+      then: It preserves completed output, gaps, attempts, workspace disposition, and exactly one handoff or stop decision without starting work.
+  risks:
+    - A packet could become a second decision engine; it must compose closed canonical resolver outputs and never authorize or mutate.
+    - New review enforcement could break legacy Integration; only explicit new-Task requirements add the missing-graph gate.
+    - CLI, MCP, and daemon semantics could drift; all must consume one core packet projection with parity tests.
+    - Acceptance builds recreate dist; generatedPaths must keep it outside Candidate and Integration evidence.
+  changeBudget:
+    maxFiles: 26
+    maxDiffLines: 3000
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .runtime
+    - .forklight
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/types.ts
+    - src/core/task.ts
+    - src/core/task-preview.ts
+    - src/core/task-decision-view.ts
+    - src/core/review-graph.ts
+    - src/core/candidate-handoff.ts
+    - src/core/integration.ts
+    - src/cli/supervision.ts
+    - src/cli.ts
+    - src/daemon
+    - src/mcp/server.ts
+    - tests
+    - docs
+acceptance:
+  criteria:
+    - New Tasks freeze requiredJudges 0, 1, or 2 plus a bounded reason; legacy Tasks remain readable without invented review policy.
+    - Integration preflight blocks missing, undersized, pending, stale, or not-followed-by-fresh-Main required Review Graph evidence.
+    - One canonical structured packet covers the accepted quality and decision stages with exactly one next action and no mutation.
+    - CLI compact inspect, MCP compact inspect, and daemon/API expose the same packet semantics without private or unbounded content.
+    - Worker claims stay unverified, Judge opinions remain evidence, and only Main Review authorizes Integration.
+    - The Candidate contains no Hub, storage lifecycle, routing, Worker adapter, generated dist, or unrelated change.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/task.test.ts tests/task-preview.test.ts tests/task-decision-view.test.ts tests/review-graph.test.ts tests/integration.test.ts tests/cli-supervision.test.ts tests/daemon.test.ts tests/mcp.test.ts
+    - git diff --check

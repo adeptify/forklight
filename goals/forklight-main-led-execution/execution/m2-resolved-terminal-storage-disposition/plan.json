@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "name": "M2 resolved terminal storage disposition supplement",
+  "objective": "Apply one bounded classifier-precedence correction, verify it and obtain two usable Judge views before serial Main Integration, then run three zero-change activated-source audits before an exact six-Task reclaim.",
+  "items": [
+    { "id": "resolved-terminal-precedence-fix", "task": "./01-implementation.yaml", "dependsOn": [] },
+    { "id": "resolved-candidate-regression-audit", "task": "./02-resolved-candidate-regression-audit.yaml", "dependsOn": ["resolved-terminal-precedence-fix"] },
+    { "id": "public-storage-surface-audit", "task": "./03-public-storage-surface-audit.yaml", "dependsOn": ["resolved-candidate-regression-audit"] },
+    { "id": "scope-and-safety-audit", "task": "./04-scope-and-safety-audit.yaml", "dependsOn": ["public-storage-surface-audit"] }
+  ]
+}

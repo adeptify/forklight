@@ -1,0 +1,83 @@
+version: 2
+name: M2 materialize exact final non-Coding Candidate
+project: /Users/yijunwang/code/forklight
+taskClass: m2-noncoding-exact-candidate-recovery
+taskFamily: forklight-operations-runbook
+workerProfileId: grok-4-6-xhigh
+deliveryProfileId: forklight-self-upgrade
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 1
+  reason: This documentation controls a real restart, review, Integration, and storage journey, so one fresh independent exact-Revision accuracy and usability view is required.
+contract:
+  outcome: >-
+    Materialize exact verified Revision 04e736e7-b595-44a4-96b1-b82d2dd6cb5b into this clean
+    isolated Workspace without any content change, prove its identity and accepted machine
+    surface, and return it for one fresh Judge review.
+  presentation: { summary: 原样物化最终三路径文档 Candidate，独立验证后交给一位新的 Judge。, language: zh-CN }
+  context:
+    - Read specs/m2-delivery-journeys/work-items/noncoding-exact-candidate-recovery/spec.md and specs/m2-delivery-journeys/work-items/noncoding-main-led-runbook/spec.md completely before acting.
+    - The exact read-only seed is goals/forklight-main-led-execution/execution/m2-noncoding-candidate-recovery/04e736e7-b595-44a4-96b1-b82d2dd6cb5b.patch with sha256 65deb60f3f4c6f5fe3730076e07a29cca52a0fb76019c18daf6a7d817554373a.
+    - Verify the full digest and git apply -p2 --check before applying the seed exactly once. If already applied after Runtime continuation, do not apply it twice.
+    - This is exact evidence recovery only. Do not correct, rewrite, polish, or add tests even if alternative wording seems preferable.
+    - Run truthfully as Grok 4.6 Xhigh auto to persistent-session. Never claim native-goal.
+    - ForkLight serves one local developer. Add no lock, lease, manifest, version handshake, distributed coordination, or duplicate consistency check.
+    - Never mutate the source project, ForkLight Home, Store, Integration, credentials, remotes, or another repository.
+  inScope:
+    - Verify the one seed identity and current baseline compatibility.
+    - Apply the exact patch once inside this isolated Workspace and inspect the resulting three-path diff.
+    - Run every approved acceptance command and report exact Candidate identity or a stop.
+  outOfScope:
+    - Any content, behavior, source, test, config, Goal, Spec, evidence, generated output, Runtime, Profile, routing, Hub, or policy change beyond the exact seed.
+    - Correction, handoff, source patching, Candidate filtering, Integration, commit, push, credentials, or real-home mutation.
+  executionSteps:
+    - Verify the seed's full digest; stop without edits if it differs.
+    - Run git apply -p2 --check and apply the seed exactly once; stop on source-base mismatch.
+    - Confirm only README.md, docs/main-led-delivery.md, and docs/operations.md changed and make no manual edits.
+    - Run all acceptance commands, inspect the exact diff, and return bounded identity evidence.
+  deliverables:
+    - One exact three-path Candidate with no content delta from Revision 04e736e7.
+    - Worker self-check and independent verifier evidence, or one precise stop reason.
+  modules:
+    - name: Exact documentation Candidate adoption
+      responsibility: Recreate one verified prior Candidate on a clean current-source baseline.
+      consumes: [Frozen patch, full digest, current baseline, and three allowed paths.]
+      produces: [Byte-identical ForkLight Candidate or a source/digest mismatch stop.]
+      boundaries: [No writing work, general hash protocol, Store rewrite, or source mutation.]
+  callChain:
+    - Main binds the Task to the exact prior Revision, digest, three paths, accepted spec, and source base.
+    - Grok 4.6 Xhigh honestly runs as a persistent resumable Session and applies only the read-only seed in its isolated Workspace.
+    - ForkLight independently verifies and captures one exact Candidate Revision.
+    - One fresh read-only Judge inspects that exact Revision; Main alone decides and may safely integrate.
+  scenarios:
+    - name: Exact recovery
+      given: The seed digest and source base match.
+      when: The Worker applies the seed once and verifier runs.
+      then: The new Candidate is byte-identical to the frozen final Candidate and changes only three paths.
+    - name: Identity or source mismatch
+      given: The seed, source base, or produced Candidate differs.
+      when: A check runs.
+      then: Work stops without compensation, correction, extra review, reroute, or Integration.
+  risks: [A wrong seed or source drift could review the wrong documentation; the single full-digest and apply check prevent that concrete unsafe Integration.]
+  changeBudget: { maxFiles: 3, maxDiffLines: 148 }
+advancedPolicy: { maxDurationMs: null, observedTokenCeiling: null, noProgressTimeoutMs: null, workerStopGraceMs: 60000, fileLimit: null, fileLimitMode: warn, changedLineLimit: null, changedLineLimitMode: warn, baseMaxAttempts: 1, maxExtraAttempts: 0, maxMainCorrections: 0, maxMainReverifications: 0, maxConcurrency: 1, completionMode: warn, changeBudgetMode: warn, maxAdaptationRounds: 0 }
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths: [goals/forklight-main-led-execution/execution/m2-noncoding-candidate-recovery/04e736e7-b595-44a4-96b1-b82d2dd6cb5b.patch, specs/m2-delivery-journeys/work-items/noncoding-exact-candidate-recovery/spec.md, specs/m2-delivery-journeys/work-items/noncoding-main-led-runbook/spec.md, README.md, docs/main-led-delivery.md, docs/operations.md]
+acceptance:
+  criteria:
+    - The exact seed is applied once to a clean compatible baseline and the resulting Candidate digest equals the frozen final Revision digest.
+    - Candidate changes exactly the three accepted documentation paths, with 145 insertions, 3 deletions, 148 changed lines, and contains no seed, generated, Goal, Spec, evidence, or unrelated change.
+    - Build, current CLI help, discovery links, and diff validation pass with no content correction.
+  commands:
+    - test "$(shasum -a 256 goals/forklight-main-led-execution/execution/m2-noncoding-candidate-recovery/04e736e7-b595-44a4-96b1-b82d2dd6cb5b.patch | awk '{print $1}')" = "65deb60f3f4c6f5fe3730076e07a29cca52a0fb76019c18daf6a7d817554373a"
+    - npm run build
+    - node dist/src/cli.js --help
+    - >-
+      node -e "const fs=require('node:fs'); const readme=fs.readFileSync('README.md','utf8'); const operations=fs.readFileSync('docs/operations.md','utf8'); if(!fs.existsSync('docs/main-led-delivery.md') || !readme.includes('docs/main-led-delivery.md') || !operations.includes('main-led-delivery')) process.exit(1)"
+    - git diff --check

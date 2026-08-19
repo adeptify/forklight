@@ -1,0 +1,71 @@
+version: 2
+name: M2-C keep storage read observations open through real scans
+project: /Users/yijunwang/code/forklight
+taskClass: m2-c-storage-read-transport-observation
+taskFamily: forklight-storage-lifecycle
+workerProfileId: grok-4-6-xhigh
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 2
+  reason: The shared transport gate precedes destructive preview decisions across CLI and MCP, so two independent views must verify no replay and short-method containment.
+contract:
+  outcome: Make storage audit and exact preview use the existing long daemon observation mapping so current real-Home scans return normally without changing storage truth or deletion behavior.
+  presentation: { summary: 让真实存储审计与预览不再被固定15秒观察窗口提前截断。, language: zh-CN }
+  context:
+    - Read the unique accepted Work Item spec completely before editing.
+    - A fresh serial exact preview timed out at the generic 15-second client window before any deletion. The Daemon later returned valid reclaimable/main-resolved-terminal truth; a warm no-timeout measurement still took 12,631 ms.
+    - Current source deliberately maps storage_audit and storage_preview to 15 seconds while storage_reclaim and other long operations already use one established long observation branch.
+    - Reclaim of six exact historical Tasks is user-authorized but remains paused until activated CLI preview and audit return normally.
+    - Do not inspect or mutate the real ForkLight Home. ForkLight verification is source/test only; Main owns live proof and reclaim after Integration.
+  inScope: [Shared daemon client timeout mapping for storage_audit and storage_preview, focused timeout regression tests, preservation of existing long and short method behavior.]
+  outOfScope: [Storage classification or deletion, Store, daemon server/coordinator, protocol, public CLI/MCP schema or setting, retries, replay, cancellation, asynchronous operations, Runtime, Hub/UI, real Home mutation, commit, push, reset, or reclaim.]
+  executionSteps:
+    - Trace daemonRequestTimeoutMs and existing focused tests against the accepted Spec.
+    - Apply the smallest mapping change for storage_audit and storage_preview in the existing long observation branch.
+    - Update only the focused timeout assertions; preserve storage_retain, health and every existing long method.
+    - Inspect the final two-path diff and return a concise handoff; ForkLight independently runs all commands.
+  deliverables: [Exact two-path Candidate, deterministic timeout mapping proof, no-replay and containment handoff.]
+  modules:
+    - name: Shared daemon observation mapping
+      responsibility: Select a transport wait that can observe long read-only storage scans without treating elapsed time as operation truth.
+      consumes: [Daemon method, internal requestTimeoutMs, existing long observation mapping.]
+      produces: [Long storage audit/preview observation with existing slack and minimum.]
+      boundaries: [No server mutation, dispatch replay, cancellation, new setting or operation state.]
+    - name: Focused timeout regression
+      responsibility: Prove storage read methods widen while storage retain/health and existing long methods remain exact.
+      consumes: [daemonRequestTimeoutMs.]
+      produces: [Deterministic pure assertions without wall-clock sleeps or real Home access.]
+      boundaries: [No broad daemon test rewrite.]
+  callChain: [CLI or MCP calls daemonRequest, exact-build handshake stays unchanged, shared resolver supplies long read observation, Daemon scans once and returns current truth, client renders the unchanged result.]
+  scenarios:
+    - name: Large storage preview remains observable
+      given: Current local scan can cross the generic 15-second transport window.
+      when: CLI or MCP requests audit or preview.
+      then: The client keeps observing through the established long window and never replays the request.
+    - name: Short methods remain bounded
+      given: Health or storage retain uses no long scan contract.
+      when: Its timeout is resolved.
+      then: It remains at the existing 15-second bound.
+  risks: [An overly broad branch could hide unrelated short-method hangs; focused exact-method assertions must fail closed.]
+  changeBudget: { maxFiles: 2, maxDiffLines: 60 }
+advancedPolicy: { maxDurationMs: null, observedTokenCeiling: null, noProgressTimeoutMs: null, fileLimit: null, fileLimitMode: warn, changedLineLimit: null, changedLineLimitMode: warn, baseMaxAttempts: 1, maxExtraAttempts: 0, maxMainCorrections: 1, maxMainReverifications: 1, maxWorkerValidationRepairs: 1, maxConcurrency: 1, completionMode: warn, changeBudgetMode: warn, maxAdaptationRounds: 0 }
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/daemon/client.ts
+    - tests/daemon.test.ts
+acceptance:
+  criteria:
+    - storage_audit and storage_preview use the existing long observation mapping and response slack.
+    - storage_retain and health remain at 15 seconds; existing long methods do not regress.
+    - No retry, replay, cancellation, public setting, server or storage lifecycle behavior is added.
+    - Candidate changes only the two allowed paths.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/daemon.test.ts tests/daemon-cli.test.ts tests/mcp.test.ts
+    - git diff --check

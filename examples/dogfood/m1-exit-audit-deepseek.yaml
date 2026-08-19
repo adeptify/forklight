@@ -50,7 +50,7 @@ contract:
     purpose: Stop M1 from drifting through stale plans and repeated audits; establish one final graduation verdict before the milestone boundary.
     audience: 一骏 and the Main runtime deciding whether to stop at M1 or open M2.
     currentSituation: The previous audit predates five integrated M1 slices and still lists them as gaps. The live store and progress file are also stale after approved retention cleanup. Product code must not expand unless the current M1 exit contract has a real blocking gap.
-    parentGoalPlan: Goal forklight-main-token-leverage, final step of M1.
+    parentGoalPlan: Archived Goal forklight-main-token-leverage-m1, final step of M1.
     priorDecisions:
       - Main owns planning and final judgment; Workers own bounded research and execution.
       - CLI/API must graduate before Hub work.
@@ -80,7 +80,7 @@ contract:
     - Verify current CLI/API surfaces for Task, Plan, Goal, outcome intake, work hierarchy and Task Plan context.
     - Verify v3 background reaches standalone and Plan/Goal/outcome paths and Worker prompts.
     - Reconcile real Coding and non-Coding dogfood evidence.
-    - Rewrite goals/forklight-main-token-leverage/evidence/m1-cli-api-gap-audit.md as a concise final exit audit with Verdict, requirement matrix, blocking gaps, non-blocking later work and exact boundary checks.
+    - Rewrite goals/archive/forklight-main-token-leverage-m1/evidence/m1-cli-api-gap-audit.md as a concise final exit audit with Verdict, requirement matrix, blocking gaps, non-blocking later work and exact boundary checks.
   outOfScope:
     - Do not edit product code, tests, configuration, SSOT contract/plan/progress/decisions, other evidence files, examples, Hub, Store or backups.
     - Do not run Providers, create Tasks, mutate daemon state, design Hub, start M2, claim Main Token savings or require M2-M5 features for M1.
@@ -147,11 +147,11 @@ worker:
   allowEdits: true
   allowedCommands: []
   focusPaths:
-    - goals/forklight-main-token-leverage/contract.md
-    - goals/forklight-main-token-leverage/plan.md
-    - goals/forklight-main-token-leverage/evidence/m1-cli-api-gap-audit.md
-    - goals/forklight-main-token-leverage/evidence/coding-delegation-run.md
-    - goals/forklight-main-token-leverage/evidence/noncoding-delegation-run.md
+    - goals/archive/forklight-main-token-leverage-m1/contract.md
+    - goals/archive/forklight-main-token-leverage-m1/plan.md
+    - goals/archive/forklight-main-token-leverage-m1/evidence/m1-cli-api-gap-audit.md
+    - goals/archive/forklight-main-token-leverage-m1/evidence/coding-delegation-run.md
+    - goals/archive/forklight-main-token-leverage-m1/evidence/noncoding-delegation-run.md
     - src/cli.ts
     - src/daemon/protocol.ts
     - src/daemon/server.ts
@@ -177,6 +177,6 @@ acceptance:
     - M2-M5 work is separated from M1 blockers and no Hub work is proposed before the boundary.
     - Only the existing audit report changes.
   commands:
-    - test -f goals/forklight-main-token-leverage/evidence/m1-cli-api-gap-audit.md
-    - rg -q 'Verdict|结论' goals/forklight-main-token-leverage/evidence/m1-cli-api-gap-audit.md && rg -q 'G1|G2|G3|G4|G5' goals/forklight-main-token-leverage/evidence/m1-cli-api-gap-audit.md
+    - test -f goals/archive/forklight-main-token-leverage-m1/evidence/m1-cli-api-gap-audit.md
+    - rg -q 'Verdict|结论' goals/archive/forklight-main-token-leverage-m1/evidence/m1-cli-api-gap-audit.md && rg -q 'G1|G2|G3|G4|G5' goals/archive/forklight-main-token-leverage-m1/evidence/m1-cli-api-gap-audit.md
     - git diff --check

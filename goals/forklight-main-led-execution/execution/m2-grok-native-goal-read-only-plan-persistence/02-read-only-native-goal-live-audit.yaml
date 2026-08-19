@@ -1,0 +1,62 @@
+version: 2
+name: M2 live audit read-only native Goal plan persistence
+project: /Users/yijunwang/code/forklight
+taskClass: m2-read-only-native-goal-plan-live-audit
+taskFamily: forklight-storage-lifecycle
+workerProfileId: grok-4-6-xhigh
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 0
+  reason: Read-only deterministic activated-source audit changes no product files and proves the approved live native Goal plus storage regression gate.
+contract:
+  outcome: Prove the activated Grok 4.6 Xhigh read-only native Goal persists its Task-local plan, reaches complete plus achieved, passes the approved resolved-Candidate storage regression, and leaves the Workspace unchanged.
+  presentation: { summary: 合入后实跑只读原生Goal，确认计划可保存且Workspace零改动。, language: zh-CN }
+  context:
+    - Start only after implementation Candidate passes independent verification, two usable Judges, Main accept, safe Integration, npm run check, Daemon activation and matched health.
+    - This is a new Task. It does not resume, correct, retry, relabel or replace failed Tasks 385e9c92-e3bb-4eb9-8008-e5ae255f1b31 or f20334a0-b8bd-4886-977b-62fa3553e501.
+    - Native Goal truth must include a non-empty Task-local plan file, classifier verdict achieved and complete status; process exit or prose alone is insufficient.
+    - Read the accepted read-only plan-persistence and resolved-terminal storage specs completely, then audit activated behavior without reopening design.
+    - One Attempt only. No validation repair, correction, reverify, adaptation, retry, replacement, Judge or source edit is available.
+  inScope: [Activated read-only native Goal lifecycle, Task-local plan persistence, resolved succeeded Candidate regression, active and artifact safety guards, zero Workspace diff.]
+  outOfScope: [Edits, real Home mutation, reclaim, Store rewrite, correction, review, Integration, public redesign, Hub/UI, commit, push, retry, or replacement.]
+  executionSteps: [Trace the activated permission projection and classifier, inspect focused regression meaning, run approved commands, and return pass or one exact blocker.]
+  deliverables: [One bounded live native Goal verdict with persisted plan, achieved classifier and zero Candidate change.]
+  modules:
+    - name: Activated read-only native Goal
+      responsibility: Audit real Task-local plan persistence and Workspace edit denial before the existing storage classifier gate.
+      consumes: [Integrated Grok adapter, accepted Work Item specs, focused storage lifecycle tests.]
+      produces: [Complete plus achieved native Goal and pass or one exact mismatch.]
+      boundaries: [No mutation, retry, historical relabel, cleanup or coordination mechanism.]
+  callChain: [ForkLight launches read-only native Goal, Planner persists Task-local plan, Workspace writes remain denied, classifier reaches achieved, independent acceptance proves storage regression and zero diff.]
+  scenarios:
+    - name: Native plan completes under read-only policy
+      given: Activated Grok native Goal receives plan mutators and exact Workspace Write/Edit denials.
+      when: It plans and executes this bounded audit.
+      then: A non-empty Task-local plan is durable, classifier says achieved, status is complete, and Workspace diff is empty.
+    - name: Storage safety precedence remains narrow
+      given: Resolved and unresolved succeeded Candidates plus active, ambiguous and evidence-incomplete guards.
+      when: Focused activated tests classify them.
+      then: Only the safe resolved Task is reclaimable and every unsafe equivalent remains protected.
+  risks: [A passing process exit without durable plan and complete plus achieved Goal truth is insufficient.]
+  changeBudget: { maxFiles: 1, maxDiffLines: 20 }
+advancedPolicy: { maxDurationMs: null, observedTokenCeiling: null, noProgressTimeoutMs: null, fileLimit: null, fileLimitMode: warn, changedLineLimit: null, changedLineLimitMode: warn, baseMaxAttempts: 1, maxExtraAttempts: 0, maxMainCorrections: 0, maxMainReverifications: 0, maxWorkerValidationRepairs: 0, maxConcurrency: 1, completionMode: warn, changeBudgetMode: warn, maxAdaptationRounds: 0 }
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: false
+  allowedCommands: []
+  focusPaths:
+    - src/workers/grok.ts
+    - src/core/storage-lifecycle.ts
+    - tests/storage-lifecycle.test.ts
+acceptance:
+  criteria:
+    - Durable native Goal has a non-empty Task-local plan file, last classifier verdict achieved and complete status.
+    - Activated storage classifier passes the authentic resolved succeeded Candidate and safety-guard regressions.
+    - Independent verification passes with zero Candidate change and no Workspace source modification.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/storage-lifecycle.test.ts
+    - git diff --check

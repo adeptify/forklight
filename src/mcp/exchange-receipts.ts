@@ -25,9 +25,14 @@ type TaskScopedMcpOperation =
   | "forklight_remediation_verify"
   | "forklight_candidate_reverify"
   | "forklight_review_graph_create"
+  | "forklight_review_graph_repair_result"
   | "forklight_direct_codex_capture"
   | "forklight_resolve"
-  | "forklight_reopen";
+  | "forklight_reopen"
+  | "forklight_storage_reclaim"
+  | "forklight_storage_retain"
+  | "forklight_delivery_prepare"
+  | "forklight_delivery_decide";
 
 interface WithMcpExchangeReceiptParams<T> {
   readonly operation: TaskScopedMcpOperation;

@@ -17,7 +17,10 @@ import {
   computeStatistics,
   deriveRoutingEvidence,
   projectCompactProviderModelSummaries,
+  strategyIdentityKey,
 } from "../src/core/statistics.js";
+import { DEFAULT_ROUTING_POLICY } from "../src/core/model-routing.js";
+import { projectStrategyPolicyAdvice } from "../src/core/strategy-advice.js";
 import type { AttemptRecord, TaskRecord, VerificationResult } from "../src/core/types.js";
 import { ForkLightDaemon } from "../src/daemon/server.js";
 import { StateStore } from "../src/state/store.js";
@@ -385,4 +388,97 @@ test("CLI records through the Daemon and keeps the private note out of its recei
     await exactDaemon.close();
     f.store.close();
   }
+});
+
+test("mode-aware quality excludes non-model failures and keeps Main-direct out of win/loss", () => {
+  const now = "2026-08-17T00:00:00.000Z";
+  const base = (id: string, status: TaskRecord["status"], mode: "single-run" | "native-goal" | undefined, error?: string): TaskRecord => ({
+    id,
+    name: id,
+    status,
+    sourcePath: "/source",
+    taskFile: `/${id}.yaml`,
+    spec: {
+      provider: { name: "deepseek", model: "v4" },
+      runtime: { name: "claude-code", effort: "high" },
+      taskClass: "coding:attr-mode",
+      ...(mode === undefined ? {} : { executionMode: mode }),
+    } as TaskRecord["spec"],
+    paths: {} as TaskRecord["paths"],
+    sessionId: `s-${id}`,
+    createdAt: now,
+    updatedAt: now,
+    startedAt: now,
+    finishedAt: now,
+    ...(error === undefined ? {} : { error }),
+  });
+  const ok = base("ok", "succeeded", "single-run");
+  const cred = base("cred", "failed", "single-run", "HTTP 401: Invalid API key");
+  const amb = base("amb", "failed", "native-goal", "no progress");
+  const map = deriveRoutingEvidence({
+    taskClass: "coding:attr-mode",
+    identityMode: "full-worker-mode",
+    history: [
+      {
+        task: ok,
+        attempts: [{
+          id: "ok-1", taskId: "ok", ordinal: 1, status: "succeeded",
+          sessionId: "s-ok", rawLogPath: "/log", startedAt: now, finishedAt: now,
+        }],
+        events: [],
+        verification: {
+          passed: true, behaviorPassed: true, policyPassed: true, sourceCompatible: true,
+          commands: [{ command: "npm test", exitCode: 0, stdout: "", stderr: "", durationMs: 1, timedOut: false }],
+          diffPath: "/diff", sourceUnchanged: true,
+        },
+      },
+      {
+        task: cred,
+        attempts: [{
+          id: "cred-1", taskId: "cred", ordinal: 1, status: "failed",
+          sessionId: "s-cred", rawLogPath: "/log", startedAt: now, finishedAt: now,
+        }],
+        events: [],
+      },
+      {
+        task: amb,
+        attempts: [{
+          id: "amb-1", taskId: "amb", ordinal: 1, status: "failed",
+          sessionId: "s-amb", rawLogPath: "/log", startedAt: now, finishedAt: now,
+        }],
+        events: [],
+      },
+    ],
+  });
+  const single = map.get(strategyIdentityKey("deepseek", "v4", "claude-code", "high", "single-run"))!;
+  const native = map.get(strategyIdentityKey("deepseek", "v4", "claude-code", "high", "native-goal"))!;
+  assert.equal(single.modelQualityFailureCount, 0);
+  assert.equal(single.ignoredNonModelTaskCount, 1);
+  assert.equal(native.ambiguousFailureCount, 1);
+  assert.equal(native.modelQualityFailureCount, 0);
+
+  const projection = projectStrategyPolicyAdvice({
+    taskClass: "coding:attr-mode",
+    policy: DEFAULT_ROUTING_POLICY,
+    competitionIntent: "none",
+    competitionTriggers: [],
+    shouldRunCompetition: false,
+    exactEvidence: map,
+    mainDirect: [{
+      taskClass: "coding:attr-mode",
+      status: "completed",
+      reason: "small-clear-change",
+    }],
+  });
+  assert.equal(projection.mainDirectHistory.present, true);
+  assert.equal(projection.mainDirectHistory.recordCount, 1);
+  assert.equal(projection.mainDirectHistory.comparedAsWorkerEvidence, false);
+  assert.equal(
+    projection.strategy.rows.reduce((sum, row) => sum + row.relevantSampleCount, 0),
+    single.relevantSampleCount + native.relevantSampleCount,
+  );
+  assert.equal(
+    projection.strategy.rows.reduce((sum, row) => sum + row.modelQualityFailureCount, 0),
+    0,
+  );
 });

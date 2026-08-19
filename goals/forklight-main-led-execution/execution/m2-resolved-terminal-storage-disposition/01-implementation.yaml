@@ -1,0 +1,85 @@
+version: 2
+name: M2 make terminal Main resolution outrank stale storage wait packets
+project: /Users/yijunwang/code/forklight
+taskClass: m2-resolved-terminal-storage-disposition
+taskFamily: forklight-storage-lifecycle
+workerProfileId: grok-4-6-xhigh
+deliveryProfileId: forklight-self-upgrade
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 2
+  reason: Terminal workspace reclamation is destructive-lifecycle-adjacent, so two independent classifier-safety and public-compatibility views are required.
+contract:
+  outcome: A valid latest Main terminal resolution makes a terminal Task reclaimable after active and durable-evidence safety guards, even when an older decision packet still says await review, Main decision, or Integration; unresolved or unsafe Tasks remain protected.
+  presentation: { summary: 修复 resolved terminal Task 的存储处置优先级，只改现有 classifier 与聚焦回归。, language: zh-CN }
+  context:
+    - Read specs/m2-delivery-journeys/work-items/resolved-terminal-storage-disposition/spec.md completely before editing.
+    - Six authentic succeeded zero-change audit Tasks already have Main accept plus task.resolution.completed but remain protected/awaiting-main-decision, retaining 685377515 regenerable bytes.
+    - classifyKnownTask computes latestTaskResolutionState, then returns on stale Candidate packet waits before its existing resolvedReady branch.
+    - ForkLight serves one local developer. Reuse current Store/event/packet truth; add no state machine, migration, lock, lease, checksum, handshake, or distributed mechanism.
+  inScope:
+    - Reorder or condition the existing classifier so a valid terminal resolution suppresses only stale review, Main-decision, and Integration wait packets after active and safety guards.
+    - Keep terminal status and durable latest-Revision-artifact requirements in the existing resolvedReady eligibility proof.
+    - Add focused authentic succeeded-Candidate regressions for resolved eligibility, unresolved protection, active/safety precedence, durable Revision preservation, and known-regenerable-only reclaim.
+    - Preserve existing delivered, remediation, handoff, reviewer, retain, ambiguous mapping/process/root, preview, reclaim, integrity, daemon, CLI, and MCP behavior.
+  outOfScope:
+    - Public schema/protocol/command changes, Store/event rewrite, automatic resolution, packet rewrite, second lifecycle classifier, broad cleanup, Runtime/Profile, Integration, docs, Goal parser, Hub/UI, commit, or push.
+    - General consistency machinery, multi-user, distributed, or cross-node coordination.
+  executionSteps:
+    - Trace exact classifier guards, packet wait branches, latest resolution state, durable Revision lookup, and reclaim target preservation.
+    - Construct the authentic succeeded zero-change Candidate/Main packet shape in a focused failing-before regression.
+    - Implement the smallest precedence correction without changing event or public output contracts.
+    - Run every acceptance command, inspect the exact diff, and stop after one complete passing slice.
+  deliverables:
+    - One source-compatible Candidate within the two accepted paths.
+    - Focused evidence that resolved terminal Candidates become main-resolved-terminal only after all existing safety conditions hold.
+    - A concise Worker handoff naming exact behavior, tests, and remaining risk.
+  modules:
+    - name: Existing storage lifecycle classifier
+      responsibility: Convert current Task, operation, packet, resolution, Candidate, and disposition truth into one safe lifecycle classification.
+      consumes: [Task status, active operation truth, Main decision packet, latest resolution event, latest Revision artifact, disposition events, and path/process safety.]
+      produces: [Protected, retained, reclaimable, or reclaimed with the existing reason vocabulary.]
+      boundaries: [No public schema, Store rewrite, duplicate state, automatic resolution, or new coordination mechanism.]
+    - name: Focused lifecycle regressions
+      responsibility: Prove the authentic succeeded resolved Candidate path and unchanged safety precedence.
+      consumes: [Existing StateStore fixtures, Candidate/verification/Main-review events, durable Revision files, and lifecycle API.]
+      produces: [Failing-before and passing-after machine evidence with durable evidence preserved.]
+      boundaries: [Temporary Homes only; no real ForkLight Home or broad historical reclaim.]
+  callChain:
+    - ForkLight independently verifies a zero-change audit Candidate and Main records accept, leaving a packet that can still say protect-candidate or ready-for-integration.
+    - Main explicitly resolves the terminal Task as handled elsewhere after parent delivery is durable.
+    - Storage audit evaluates active and safety guards, terminal resolution, Candidate artifact, and stale packet waits.
+    - Exact preview/reclaim removes known regenerable targets and retains Revision and audit evidence.
+  scenarios:
+    - name: Resolved succeeded Candidate becomes reclaimable
+      given: A succeeded Task has passed verification, a durable latest Revision, Main accept packet truth, and a later valid terminal resolution.
+      when: Storage audit classifies it.
+      then: It is reclaimable/main-resolved-terminal and confirmed reclaim preserves durable Revision evidence.
+    - name: Unresolved equivalent remains protected
+      given: The same succeeded Candidate packet has no terminal resolution.
+      when: Storage audit classifies it.
+      then: Existing awaiting-review/Main/Integration protection remains.
+    - name: Safety guards still win
+      given: A Task is resolved but has an active or unknown operation, unsafe/ambiguous mapping, or missing latest Revision artifact.
+      when: Audit or reclaim runs.
+      then: It remains protected and no target is deleted.
+  risks: [Moving resolution above active or artifact checks could delete live or unrecoverable work; leaving it below stale packet waits keeps terminal Tasks permanently protected. Both are blockers.]
+  changeBudget: { maxFiles: 2, maxDiffLines: 220 }
+advancedPolicy: { maxDurationMs: null, observedTokenCeiling: null, noProgressTimeoutMs: null, workerStopGraceMs: 60000, fileLimit: null, fileLimitMode: warn, changedLineLimit: null, changedLineLimitMode: warn, baseMaxAttempts: 1, maxExtraAttempts: 0, maxMainCorrections: 1, maxMainReverifications: 1, maxConcurrency: 1, completionMode: warn, changeBudgetMode: warn, maxAdaptationRounds: 0 }
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths: [src/core/storage-lifecycle.ts, tests/storage-lifecycle.test.ts]
+acceptance:
+  criteria:
+    - A valid latest terminal Main resolution suppresses only stale Candidate wait packets after active and safety guards; unresolved equivalents stay protected.
+    - Terminal status and durable latest-Revision-artifact checks remain mandatory, and confirmed reclaim preserves durable evidence while removing only known regenerable targets.
+    - Candidate changes only the two accepted paths and all existing focused storage and public surfaces remain compatible.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/storage-lifecycle.test.ts tests/daemon.test.ts tests/daemon-cli.test.ts tests/mcp.test.ts
+    - git diff --check

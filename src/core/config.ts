@@ -60,8 +60,13 @@ export function forklightHome(): string {
   return path.join(homedir(), ".local", "share", "forklight");
 }
 
+/** Canonical per-Task run directory: `<home>/runs/<taskId>`. */
+export function taskRunRoot(home: string, taskId: string): string {
+  return path.join(home, "runs", taskId);
+}
+
 export function taskPaths(home: string, taskId: string): TaskPaths {
-  const root = path.join(home, "runs", taskId);
+  const root = taskRunRoot(home, taskId);
   return {
     root,
     baseline: path.join(root, "baseline"),
@@ -82,12 +87,77 @@ export function verifierGitPaths(paths: TaskPaths): {
   };
 }
 
+/** M2-A Runtime-home names owned by one Task root. Regenerable caches only. */
+export function taskRuntimeHomePaths(root: string): {
+  grokHome: string;
+  codexHome: string;
+  codexTmp: string;
+} {
+  return {
+    grokHome: path.join(root, "grok-home"),
+    codexHome: path.join(root, "codex-home"),
+    codexTmp: path.join(root, "codex-tmp"),
+  };
+}
+
+/** Top-level names ordinary reclaim may remove. Unknown names are never implied. */
+export const KNOWN_REGENERABLE_ENTRY_NAMES = [
+  "workspace",
+  "baseline",
+  "claude-config",
+  "grok-home",
+  "codex-home",
+  "codex-tmp",
+  "verifier-git",
+  "verifier-git.index",
+] as const;
+
+/** Top-level durable evidence names ordinary reclaim must keep. */
+export const DURABLE_EVIDENCE_ENTRY_NAMES = [
+  "logs",
+  "result.diff",
+  "workspace.raw.patch",
+  "workspace.generated.patch",
+  "revisions",
+  "reviews",
+  "handoff",
+  "source-manifest.json",
+  "integration",
+] as const;
+
+export const STORE_DATABASE_NAME = "forklight.sqlite";
+export const STORE_WAL_NAME = "forklight.sqlite-wal";
+export const STORE_SHM_NAME = "forklight.sqlite-shm";
+export const DAEMON_SOCKET_NAME = "forklight.sock";
+export const DAEMON_LOG_NAME = "daemon.log";
+export const HUB_INSTANCE_NAME = "hub-instance.json";
+export const HUB_OWNER_CLAIM_NAME = ".hub-owner.json";
+export const BACKUP_MANIFEST_NAME = "forklight.backup.json";
+
+/** Known top-level names that a Home backup must not copy. */
+export const HOME_TRANSIENT_ENTRY_NAMES = [
+  DAEMON_SOCKET_NAME,
+  DAEMON_LOG_NAME,
+  HUB_INSTANCE_NAME,
+  HUB_OWNER_CLAIM_NAME,
+  STORE_WAL_NAME,
+  STORE_SHM_NAME,
+] as const;
+
+/** ForkLight-owned durable roots that a Home backup must keep when present. */
+export const HOME_OWNED_DURABLE_ROOT_NAMES = [
+  "runs",
+  "competitions",
+  "review-projects",
+  "samples",
+] as const;
+
 export function daemonSocketPath(home = forklightHome()): string {
-  return path.join(home, "forklight.sock");
+  return path.join(home, DAEMON_SOCKET_NAME);
 }
 
 export function daemonLogPath(home = forklightHome()): string {
-  return path.join(home, "daemon.log");
+  return path.join(home, DAEMON_LOG_NAME);
 }
 
 export function keychainAccount(spec: TaskSpec): string {

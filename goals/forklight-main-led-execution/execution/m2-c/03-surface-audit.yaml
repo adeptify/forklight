@@ -1,0 +1,88 @@
+version: 2
+name: M2-C audit storage CLI daemon and MCP parity
+project: /Users/yijunwang/code/forklight
+taskClass: m2-storage-surface-audit
+taskFamily: forklight-storage-lifecycle
+workerProfileId: grok-4-6-xhigh
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 0
+  reason: Read-only deterministic CLI and API parity audit changes no product files.
+contract:
+  outcome: Verify that storage audit, preview, and confirmed reclaim use one canonical lifecycle authority through daemon, CLI, and MCP, with strict confirm, bounded privacy-safe JSON and human output, and no read-path mutation.
+  presentation: { summary: 只读核对 storage audit、preview、reclaim 的 CLI、Daemon 与 MCP 语义一致。, language: zh-CN }
+  context:
+    - Starts only after the integrated protection audit passes.
+    - Use specs/m2-c-task-storage-lifecycle/spec.md as the sole accepted boundary.
+  inScope:
+    - Inspect daemon protocol/coordinator/server, CLI command parsing and rendering, MCP schemas and annotations, parity, confirm, and next-action tests.
+  outOfScope:
+    - No edits, real-home mutation, automatic reclaim, Hub, backup deletion, routing, commit, or push.
+  executionSteps:
+    - Trace each public operation to the single integrated core authority.
+    - Compare JSON and human projections, mutation annotations, confirm requirements, and error privacy.
+    - Return a concise pass or named parity/authority gap.
+  deliverables: [A read-only storage public-surface parity audit.]
+  modules:
+    - name: Storage public surfaces
+      responsibility: Translate one lifecycle projection and confirmed reclaim result consistently without duplicating eligibility.
+      consumes: [Integrated daemon protocol, CLI, MCP, and focused surface tests.]
+      produces: [A bounded parity, confirm, privacy, and authority result.]
+      boundaries: [Preview stays read-only; reclaim requires explicit confirm; no automatic next action or Hub.]
+  callChain:
+    - Protection audit passes.
+    - This isolated Task reads integrated public surfaces.
+    - ForkLight independently runs daemon, CLI, and MCP tests.
+    - Machine success releases the final boundary audit.
+  scenarios:
+    - name: Surface parity
+      given: Audit, preview, and reclaim cover the same lifecycle state.
+      when: Daemon, CLI, and MCP outputs are compared.
+      then: They expose the same closed facts, bytes, reason, and one next action.
+    - name: Unsafe surface
+      given: A read mutates, reclaim omits confirm, output leaks private content, or a surface invents eligibility.
+      when: Inspection or tests run.
+      then: The audit fails and the Goal does not advance.
+  risks: [Presentation must consume canonical truth rather than become a second eligibility engine.]
+  changeBudget: { maxFiles: 1, maxDiffLines: 20 }
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: false
+  allowedCommands: []
+  focusPaths:
+    - src/daemon/protocol.ts
+    - src/daemon/coordinator.ts
+    - src/daemon/server.ts
+    - src/cli.ts
+    - src/mcp/server.ts
+    - tests/daemon.test.ts
+    - tests/daemon-cli.test.ts
+    - tests/mcp.test.ts
+acceptance:
+  criteria:
+    - Daemon, CLI, and MCP consume one lifecycle authority and agree on audit, preview, reclaim, refusal, integrity, bytes, and next action.
+    - Audit and preview are non-mutating; reclaim requires explicit confirm and re-evaluation.
+    - No source file changes.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/daemon.test.ts tests/daemon-cli.test.ts tests/mcp.test.ts
+    - git diff --check

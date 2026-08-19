@@ -1,0 +1,170 @@
+version: 2
+name: M4-A complete role-aware Main usage capture
+project: /Users/yijunwang/code/forklight
+taskClass: m4-complete-main-usage-capture
+taskFamily: forklight-main-token-leverage
+workerProfileId: grok-4-6-xhigh
+executionPreference: auto
+routingDecision:
+  taskFamily: forklight-main-token-leverage
+  shortlist:
+    - provider: xai
+      model: grok-4.6
+      runtime: grok-build
+      effort: xhigh
+      workerProfileId: grok-4-6-xhigh
+    - provider: openai
+      model: gpt-5.6-luna
+      runtime: codex-cli
+      effort: max
+      workerProfileId: codex-luna-max
+  selectedWorker:
+    provider: xai
+    model: grok-4.6
+    runtime: grok-build
+    effort: xhigh
+    workerProfileId: grok-4-6-xhigh
+  selectedBecause:
+    code: user-specified
+    note: M4 has no comparable exact-class history; Main follows 一骏's standing Grok 4.6 Xhigh preference after matched health, without claiming a routing recommendation.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+reviewRequirement:
+  requiredJudges: 2
+  reason: Main Token accounting is a core value claim; two different-view Judges must inspect counter truth, privacy, persistence and non-claim behavior before Integration.
+contract:
+  outcome: Capture complete direct-main and delegated-main Codex terminal Token usage under one exact ForkLight Task/comparison/profile identity, expose privacy-safe CLI and MCP status, and keep exchange estimates separate without making any saving claim.
+  presentation:
+    summary: 先把直接Main和委派Main的完整Token按同一口径记下来；这里只记录，不宣称节省。
+    language: zh-CN
+  context:
+    - Read AGENTS.md, specs/m4-a-complete-main-usage/spec.md and goals/forklight-main-led-execution/evidence/m4-entry-audit.md completely before editing. They are the unique accepted boundary; do not create another spec or roadmap.
+    - M3 is graduated. Current Store has 13 Main-direct decisions with no Token, 11,590 CLI/MCP receipts and two legacy direct-Codex calibrations unrelated to the three representative families.
+    - Existing directCodexSavings subtracts exchange-byte estimates from direct Codex totals. Preserve that legacy read surface, but do not present it as complete Main usage or M4 proof.
+    - Reuse normalizeCodexTerminalUsage for the canonical complete terminal counters. Do not add a tokenizer, parse raw logs or retain prompt/response content.
+    - Derive taskClass, taskFamily and directCodexProfileId only from the stored Task. The caller supplies only Task id, opaque comparison/run identifiers, role and complete usage event.
+    - ForkLight is for one local developer. Use simple insert/read Store truth; add no checksum, content hash, lock, lease, version handshake, migration protocol or distributed coordination.
+    - This Task is M4-A only. Pair validity, saving arithmetic, family aggregation and calibration remain dependency-held in M4-B/C/D.
+  inScope:
+    - Add one immutable role-aware Main usage sample schema for direct-main and delegated-main.
+    - Persist and read samples through StateStore with one role per comparison and unique sample/run identities.
+    - Fail before persistence on missing Task class/family/profile, malformed terminal usage, duplicate role or contradictory identity.
+    - Add canonical capture and read-only status services through Daemon, CLI and MCP with count-only privacy-safe output.
+    - Keep Task Token exchange estimates, Worker usage and legacy direct-Codex records backward compatible and semantically separate.
+    - Add focused tests for counter disjointness, identity derivation, uniqueness, rollback, privacy, status read-only behavior and surface agreement.
+  outOfScope:
+    - Pair assessment, equivalence or quality gate, Main Token saving arithmetic, family value report, calibration run, economics redesign, routing/model ranking or legacy backfill.
+    - Automatic Task, Worker, Competition, Judge, retry, correction, Integration, Provider probe or Hub/UI work.
+    - Raw Codex state/history, prompt, response, log, source, diff, path, credentials, free-form note, tokenizer or Provider access.
+    - Commit, push, reset or any path outside the accepted focus set.
+  executionSteps:
+    - Trace the existing direct-Codex terminal normalizer, Store insert/read patterns and direct-Codex CLI/MCP call chain only.
+    - Define the smallest role-aware count-only sample and status shapes that preserve legacy surfaces.
+    - Implement the Store/service/Daemon/CLI/MCP vertical slice inside the focus paths.
+    - Run every approved command, inspect the exact diff and stop immediately when all M4-A acceptance passes.
+  deliverables:
+    - One exact Candidate implementing complete Main usage capture and read-only status without a saving claim.
+    - Focused proof of canonical counter reuse, Task-derived identity, duplicate rejection, privacy, compatibility and no work creation.
+    - Concise handoff naming paths, schema, commands, limits and the still dependency-held M4-B/C/D work.
+  modules:
+    - name: Main usage sample core
+      responsibility: Normalize one complete role-aware Main terminal usage sample using the existing disjoint Codex counter adapter.
+      consumes: [Stored Task class/family/direct-Codex profile, opaque comparison and run ids, role, Codex turn.completed usage.]
+      produces: [Detached immutable count-only sample with gross Token and schema version.]
+      boundaries: [No raw content, tokenizer, inferred identity or saving arithmetic.]
+    - name: Durable local evidence
+      responsibility: Insert and list samples with exact Task/comparison/role uniqueness in the current local Store.
+      consumes: [Canonical sample and existing Task foreign-key truth.]
+      produces: [Durable role samples and missing-role status.]
+      boundaries: [No migration/backfill protocol, lock, lease, checksum or parallel consistency system.]
+    - name: Canonical public capture and status
+      responsibility: Share one service through Daemon, CLI and MCP while keeping status read-only.
+      consumes: [Capture parameters or exact Task/comparison query.]
+      produces: [Privacy-safe count-only JSON and concise human status.]
+      boundaries: [No Task creation, pair decision, value claim, Provider call or Hub/UI.]
+  callChain:
+    - Main prepares or completes a measured Codex run and supplies one complete terminal usage event.
+    - CLI or MCP sends only role, opaque ids, Task id and usage counters to the Daemon.
+    - Coordinator derives class/family/profile from current Task truth and delegates canonical normalization/persistence.
+    - Status reads the same Store records and reports captured/missing roles without mutation or claim.
+  scenarios:
+    - name: Two comparable roles captured
+      given: A Task has explicit class, family and direct-Codex Main profile and two complete measured runs exist.
+      when: Main captures one direct-main and one delegated-main event under the same comparison.
+      then: Both round-trip with exact disjoint counters and status becomes pair-review-ready without computing savings.
+    - name: Missing identity fails early
+      given: A legacy Task omits family or Main profile.
+      when: Capture is requested.
+      then: ForkLight returns a stable non-echoing error and writes no sample.
+    - name: Duplicate role cannot overwrite
+      given: One role already exists for a comparison.
+      when: Another sample attempts the same role or reuses a run reference.
+      then: The insert fails and existing durable truth is unchanged.
+    - name: Observation remains read-only
+      given: Zero or one role exists.
+      when: CLI or MCP requests status repeatedly.
+      then: Missing roles remain explicit and no Task, event, sample, receipt-side claim or Worker is created by status itself.
+  risks:
+    - A new capture path could duplicate or reinterpret counters; reuse the canonical terminal normalizer and focused cache/reasoning tests.
+    - A caller could spoof family/profile; derive both only from stored Task truth.
+    - Product output could overclaim savings; M4-A status must carry no change/saving field and must label exchange evidence separately.
+  changeBudget:
+    maxFiles: 13
+    maxDiffLines: 2200
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 60000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxWorkerValidationRepairs: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test, .forklight-boundary-capture, .forklight-receipt-retry, plans]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/main-token-usage.ts
+    - src/state/store.ts
+    - src/daemon/coordinator.ts
+    - src/daemon/protocol.ts
+    - src/daemon/server.ts
+    - src/cli.ts
+    - src/mcp/server.ts
+    - tests/main-token-usage.test.ts
+    - tests/store.test.ts
+    - tests/daemon.test.ts
+    - tests/daemon-cli.test.ts
+    - tests/mcp.test.ts
+acceptance:
+  criteria:
+    - Direct-main and delegated-main complete samples reuse canonical Codex terminal counters and round-trip through Store, Daemon, CLI and MCP with identical count-only truth.
+    - Task class, family and Main profile derive only from stored Task; missing or contradictory identity fails before persistence.
+    - Each comparison admits one sample per role and each sample/run identity is unique; duplicate failure never overwrites existing evidence.
+    - Status is read-only, reports missing roles explicitly and never computes pair validity, savings, quality or family value.
+    - Existing direct-Codex calibration, exchange-receipt, Token and economics surfaces remain readable and semantically separate.
+    - No raw/private content, tokenizer, Provider call, auto-work, Hub/UI, coordination mechanism or unrelated path exists.
+    - One Grok 4.6 Xhigh native Goal, ForkLight independent verification, two different-view Judges and Main serial Integration complete the quality chain.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/main-token-usage.test.ts tests/store.test.ts tests/daemon.test.ts tests/daemon-cli.test.ts tests/mcp.test.ts
+    - git diff --check

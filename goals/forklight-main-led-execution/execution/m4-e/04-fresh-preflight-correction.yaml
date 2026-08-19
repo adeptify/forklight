@@ -1,0 +1,146 @@
+version: 2
+name: M4-E fresh post-accept preflight binding correction
+project: /Users/yijunwang/code/forklight
+taskClass: m4-main-efficient-delivery-fresh-preflight-correction
+taskFamily: worker-runtime
+workerProfileId: grok-4-6-xhigh
+executionPreference: auto
+routingDecision:
+  taskFamily: worker-runtime
+  shortlist:
+    - { provider: xai, model: grok-4.6, runtime: grok-build, effort: xhigh, workerProfileId: grok-4-6-xhigh }
+  selectedWorker:
+    { provider: xai, model: grok-4.6, runtime: grok-build, effort: xhigh, workerProfileId: grok-4-6-xhigh }
+  selectedBecause:
+    code: user-specified
+    note: 一骏 explicitly revoked the final M4-E no-replacement boundary and authorized this exact two-path correction using Grok CLI 4.6 Xhigh native Goal.
+  competition: { intent: none, triggers: [] }
+  evidenceSnapshot: { scope: none, exactSampleCounts: {} }
+reviewRequirement:
+  requiredJudges: 2
+  reason: Main authority, receipt provenance and safe Integration are core delivery paths requiring two different-view Judges.
+runtime:
+  name: grok-build
+  executable: /Users/yijunwang/code/forklight/goals/forklight-main-led-execution/execution/m4-e/m4-e-workspace-local-seed-bootstrap.mjs
+  effort: xhigh
+  maxBudgetUsd: null
+contract:
+  outcome: Reuse the exact retained 19-path M4-E Candidate and correct only receipt binding so the first exact accept always creates a fresh post-accept preflight, while exact re-entry reuses only the receipt and Integration operation bound after that matching Main decision.
+  presentation: { summary: 修正旧预检单污染首次交付的问题，并保持精确重入只复用本次交付链。, language: zh-CN }
+  editablePaths:
+    - src/core/main-delivery.ts
+    - tests/main-delivery.test.ts
+  context:
+    - Read AGENTS.md, the accepted parent Spec, work-items/fresh-preflight-binding/spec.md, the fresh-preflight stop packet and retained-candidate.diff completely. They are the unique boundary.
+    - Task 2d774265-344f-43ea-8f69-79e2624765d3 remains immutable and protected. Its exact 19-path Candidate passed ForkLight verification and two Judges, but Main rejected one mixed granular/delivery receipt-binding gap before Integration.
+    - The Workspace-local wrapper materializes the retained 19-path Candidate before Grok starts. Modify only src/core/main-delivery.ts and tests/main-delivery.test.ts on top of it. The other 17 paths must remain byte-identical and are checked independently.
+    - Use current ordered Task events, Main review sequence, receipt id and operation receipt id. Add no persistent entity, EventType, receipt/schema field, lock, lease, checksum/content hash or version protocol.
+    - Distinguish a Main review recorded by the current call from an already matching bound review. The first call must ignore all older receipts and run fresh preflight.
+    - On exact re-entry, select the first receipt after the matching Main review, not the latest Task receipt. Reuse only an operation/result whose receiptId matches it. A later granular receipt cannot replace that binding.
+    - Preserve a bound rejected receipt as the durable blocker on exact re-entry; do not auto-retry. Preserve current revise/reject, timeout, privacy, public surface and safe Integration behavior.
+    - Do not spawn a subagent. One Attempt; zero repair, correction, reverify, adaptation, retry, fallback or further replacement. Failure stops with Workspace protected.
+  inScope:
+    - Minimal receipt/operation binding correction in src/core/main-delivery.ts.
+    - Focused mixed granular/delivery and exact-reentry tests in tests/main-delivery.test.ts.
+    - Reuse of all other retained Candidate behavior and existing independent acceptance.
+  outOfScope:
+    - Any edit to the other 17 retained paths, Integration/Store/type schema, CLI/Daemon/MCP redesign, new entity, retry, model switch, extra Judge, calibration, M5/Hub/UI, storage, credentials, remote, commit, push or reset.
+  executionSteps:
+    - Inspect the materialized decide flow, event payloads and existing re-entry tests.
+    - Implement the smallest event-order/current-Store binding without changing public schema.
+    - Add the accepted older-receipt, later-receipt, bound-rejection and exact-timeout scenarios.
+    - Self-check only the accepted paths; explicitly complete the native Goal. ForkLight runs every acceptance command independently.
+  deliverables:
+    - Exact retained 19-path Candidate with deltas only in the two editable paths.
+    - Passing fresh-first-call and exact-bound-reentry behavior tests.
+    - Handoff naming event-order semantics, changed tests and remaining risks.
+  modules:
+    - name: Main delivery receipt binding
+      responsibility: Bind preflight and Integration observation to the matching explicit Main decision.
+      consumes: [Ordered Task events, Main review payload, receipt ids, operation receipt ids.]
+      produces: [Fresh first preflight and deterministic exact re-entry.]
+      boundaries: [No schema, new state entity or granular command change.]
+    - name: Mixed workflow regression
+      responsibility: Prove historical granular receipts cannot poison or replace the delivery decide chain.
+      consumes: [Existing fixture Store and real preflight/Integration services.]
+      produces: [Focused deterministic acceptance cases.]
+      boundaries: [No synthetic product history or broad Integration retest redesign.]
+  callChain:
+    - Wrapper materializes the exact retained 19 paths in the isolated Workspace.
+    - Grok edits only the two accepted paths and completes one native Goal.
+    - ForkLight proves 17 frozen paths, build, focused behavior and diff validity, then captures one Revision.
+    - Two fresh Judges inspect that Revision; Main alone accepts and integrates serially.
+  scenarios:
+    - name: Old granular rejection cannot poison first accept
+      given: A rejected preflight exists before the matching Main accept.
+      when: delivery decide records that accept.
+      then: It creates a fresh receipt and may start exactly one Integration.
+    - name: Exact re-entry keeps bound receipt
+      given: A fresh decide receipt exists after the matching Main review and a newer unrelated receipt also exists.
+      when: The exact decide call is repeated.
+      then: It observes the original bound receipt/operation and creates no duplicate.
+    - name: Bound rejection remains truthful
+      given: The fresh decide receipt was rejected.
+      when: The same decide call is repeated.
+      then: It returns the same receipt/blocker and does not retry preflight.
+  risks:
+    - Choosing latest-by-Task would preserve the defect; tests require first post-review binding and matching operation receipt id.
+    - Adding caller identity to schema would exceed scope; the single-local event order is the accepted durable boundary.
+  changeBudget: { maxFiles: 20, maxDiffLines: 3800 }
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 60000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxWorkerValidationRepairs: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test, .forklight-boundary-capture, .forklight-receipt-retry, plans]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/main-delivery.ts
+    - src/core/types.ts
+    - src/daemon/coordinator.ts
+    - src/daemon/protocol.ts
+    - src/daemon/server.ts
+    - src/daemon/client.ts
+    - src/cli.ts
+    - src/cli/supervision.ts
+    - src/cli/exchange-receipts.ts
+    - src/mcp/server.ts
+    - src/mcp/exchange-receipts.ts
+    - tests/main-delivery.test.ts
+    - tests/cli-supervision.test.ts
+    - tests/cli-exchange-receipts.test.ts
+    - tests/daemon.test.ts
+    - tests/daemon-cli.test.ts
+    - tests/mcp.test.ts
+    - README.md
+    - docs/operations.md
+acceptance:
+  criteria:
+    - Operational policy proves current-source applicability and Candidate preservation for all 17 frozen retained paths.
+    - First exact accept creates a fresh post-review receipt; older rejected or unconsumed receipts are ignored.
+    - Exact re-entry uses the first post-review receipt and only its matching Integration operation; later unrelated receipts do not replace it.
+    - A bound rejected receipt is reused as a blocker without automatic retry; timeout re-entry creates no duplicate review, receipt or operation.
+    - Build, all focused M4-E tests and diff validation pass; two Judges and Main serial Integration remain required.
+  commands:
+    - node goals/forklight-main-led-execution/execution/m4-e/fresh-preflight-correction.test.mjs --candidate
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/main-delivery.test.ts tests/cli-supervision.test.ts tests/cli-exchange-receipts.test.ts tests/review-graph.test.ts tests/integration.test.ts tests/daemon.test.ts tests/daemon-cli.test.ts tests/mcp.test.ts
+    - git diff --check

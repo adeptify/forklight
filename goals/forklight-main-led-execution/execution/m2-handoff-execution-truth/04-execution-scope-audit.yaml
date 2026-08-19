@@ -1,0 +1,62 @@
+version: 2
+name: M2 audit canonical execution helper reuse and exact scope
+project: /Users/yijunwang/code/forklight
+taskClass: m2-handoff-execution-scope-audit
+taskFamily: forklight-runtime-continuation
+workerProfileId: minimax-m3-cn
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 0
+  reason: Read-only deterministic canonical-helper and scope audit changes no files and repeats no delivery operation.
+contract:
+  outcome: Verify the activated fix reuses one canonical Runtime capability resolver, changes only newly authorized successor execution truth and focused tests, and adds no historical rewrite, duplicate validation, Quality-policy expansion, coordination machinery, generated output, or unrelated behavior.
+  presentation: { summary: 最终只读核对 canonical helper、精确 diff 和单人本地边界。, language: zh-CN }
+  context:
+    - Starts only after Goal and Competition activated audits pass.
+    - Read the accepted spec. This is the final product-fix gate before exact documentation Candidate recovery becomes ready.
+  inScope:
+    - Inspect integrated diff, canonical execution-mode imports/calls, allowed paths, source/history boundaries, and complete focused machine surface.
+  outOfScope:
+    - No edits, Store/home mutation, handoff, docs recovery, Quality policy work, review, Integration, Hub, commit, push, or new mechanism.
+  executionSteps:
+    - Confirm no duplicate Runtime capability table or handoff-only mode resolver was added.
+    - Confirm only new successors change; historical Tasks and the stopped Task remain immutable.
+    - Confirm exact source/test scope and run the approved integrated machine gate.
+  deliverables: [One final zero-diff canonical-helper, scope, and compatibility verdict.]
+  modules:
+    - name: Integrated scope boundary
+      responsibility: Audit canonical reuse, exact changed paths, and absence of unauthorized machinery.
+      consumes: [Integrated diff, accepted spec, canonical execution helpers, and focused tests.]
+      produces: [Pass or one exact blocker before documentation recovery.]
+      boundaries: [No mutation, Quality policy promotion, history rewrite, distributed feature, or UI.]
+  callChain:
+    - Shared handoff builder calls canonical destination capability resolution once.
+    - Newly authorized successor stores truthful fields; all other source and history stay unchanged.
+    - Machine pass returns Main to the exact documentation Candidate recovery dependency.
+  scenarios:
+    - name: Canonical helper stays sole truth
+      given: Runtime capability semantics already live in execution-mode.ts.
+      when: Integrated diff and tests are inspected.
+      then: Handoff reuses that source and adds no competing mapping.
+    - name: Narrow authorization stays narrow
+      given: User authorized execution truth only.
+      when: Candidate and integrated source are compared with the Work Item.
+      then: No Quality policy, Store, API, docs, generated, coordination, or unrelated path changed.
+  risks: [A duplicate capability table or adjacent policy expansion can drift and is a blocker even when tests pass.]
+  changeBudget: { maxFiles: 1, maxDiffLines: 20 }
+advancedPolicy: { maxDurationMs: null, observedTokenCeiling: null, noProgressTimeoutMs: null, fileLimit: null, fileLimitMode: warn, changedLineLimit: null, changedLineLimitMode: warn, baseMaxAttempts: 1, maxExtraAttempts: 0, maxMainCorrections: 0, maxMainReverifications: 0, maxConcurrency: 1, completionMode: warn, changeBudgetMode: warn, maxAdaptationRounds: 0 }
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: false
+  allowedCommands: []
+  focusPaths: [src/core/candidate-handoff.ts, src/core/execution-mode.ts, src/core/task.ts, src/core/worker-profiles.ts, src/core/runner.ts, tests/competition.test.ts, tests/goal.test.ts, tests/task.test.ts, tests/worker-profiles.test.ts, tests/worker-runtime.test.ts]
+acceptance:
+  criteria:
+    - Integrated fix reuses canonical capability truth, changes only newly authorized successor execution fields and accepted tests, and stays inside the single-developer no-coordination boundary with zero source change.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/competition.test.ts tests/goal.test.ts tests/task.test.ts tests/worker-profiles.test.ts tests/worker-runtime.test.ts
+    - git diff --check

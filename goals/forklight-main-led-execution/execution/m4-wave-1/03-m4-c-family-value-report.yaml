@@ -1,0 +1,169 @@
+version: 2
+name: M4-C family Main Token value report
+project: /Users/yijunwang/code/forklight
+taskClass: m4-family-main-token-value-report
+taskFamily: forklight-main-token-leverage
+workerProfileId: grok-4-6-xhigh
+executionPreference: auto
+routingDecision:
+  taskFamily: forklight-main-token-leverage
+  shortlist:
+    - provider: xai
+      model: grok-4.6
+      runtime: grok-build
+      effort: xhigh
+      workerProfileId: grok-4-6-xhigh
+    - provider: openai
+      model: gpt-5.6-luna
+      runtime: codex-cli
+      effort: max
+      workerProfileId: codex-luna-max
+  selectedWorker:
+    provider: xai
+    model: grok-4.6
+    runtime: grok-build
+    effort: xhigh
+    workerProfileId: grok-4-6-xhigh
+  selectedBecause:
+    code: user-specified
+    note: M4 has no comparable exact-class routing history; Main follows 一骏's standing Grok 4.6 Xhigh preference after matched health, without claiming a routing recommendation.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+reviewRequirement:
+  requiredJudges: 2
+  reason: Family value reporting combines Main pair validity with Worker Token, cost, time and correction evidence; two different-view Judges must inspect claim gating, missing-data truth and separation before Integration.
+contract:
+  outcome: For one to ten explicit task families, return every in-scope accepted or rejected Main pair and prove delegated Main Token lower only when every requested family has at least one current accepted pair with strictly positive direct-minus-delegated change, while keeping Worker Token, cost, time and correction evidence separate and explicit.
+  presentation:
+    summary: 按明确指定的任务族展示每一组可比结果；只有所有任务族都有严格更低且质量合格的真实配对时才说已证明，其余情况完整说明缺什么。
+    language: zh-CN
+  context:
+    - Read AGENTS.md, specs/m4-c-family-value-report/spec.md, goals/forklight-main-led-execution/evidence/m4-entry-audit.md, goals/forklight-main-led-execution/evidence/m4-a-complete-main-usage-delivery.md and goals/forklight-main-led-execution/evidence/m4-b-valid-main-token-pair-delivery.md completely before editing. They are the unique accepted boundary; do not create another spec or roadmap.
+    - M4-A and M4-B are integrated and activated. Reuse their canonical count-only samples, immutable assessments and current-report truth; do not weaken pair validity or reinterpret legacy direct-Codex or exchange estimates.
+    - Reuse canonical Task economics, Attempt/event, verification, Main review and Integration reads. Import their helpers without changing their files unless the accepted Spec is updated first.
+    - Empty Store, uncovered family, legacy-only family and invalid/stale pair are valid read-only cannot-determine results. Missing evidence is not zero.
+    - ForkLight serves one local developer. Current Store truth plus serial Main Integration is sufficient; add no checksum, content hash, lock, lease, version handshake or distributed consistency mechanism.
+    - This Task is M4-C only. It does not create representative comparisons, write Goal evidence files, launch work, rank models, run Competition or add Hub/UI.
+  inScope:
+    - Add one canonical read-only value report for one to ten exact task-family names plus an optional exact comparison-id filter.
+    - List every accepted and rejected comparison in scope with direct/delegated exact Main totals, signed change, percentage availability, measurement identity and pair quality evidence.
+    - Mark a family proven-lower only when at least one current accepted M4-B pair has strictly positive direct-minus-delegated change; keep equal, higher, rejected, incomplete and absent evidence visible.
+    - Mark the overall report proven only when every requested family is proven-lower; otherwise return typed cannot-determine reasons without mutating Milestone truth.
+    - Project Worker gross Token completeness, Runtime estimate completeness, official per-native-currency quote/range/unavailable evidence, elapsed evidence and validation-repair/Main-correction/reverification/handoff counts as separate fields.
+    - Preserve native currencies separately, keep Runtime estimates distinct from Provider quotes, and never combine Worker Token with Main Token.
+    - Expose one canonical object through Daemon, CLI JSON/human output and MCP with focused empty, legacy, stale, valid, multi-pair, economics, privacy and compatibility tests.
+  outOfScope:
+    - Representative calibration execution, report-file auto-write, Provider call, model ranking, automatic Competition, Task, retry, correction, Judge assignment or Integration authority.
+    - Hidden best-pair selection, percentage averaging, FX conversion, treating caps or estimates as spend, treating unavailable as zero, or promoting legacy exchange arithmetic to Main Token.
+    - Raw prompt, response, source, diff, path, log, credential or free-form note content; pricing changes; Hub/UI; coordination mechanisms.
+    - Commit, push, reset or any path outside the accepted focus set.
+  executionSteps:
+    - Trace only M4-B pair-report reads and the existing Task economics/event projections needed by this contract.
+    - Define the smallest closed family/comparison/economics report shape with typed cannot-determine reasons and deterministic ordering.
+    - Implement the Core/Daemon/CLI/MCP vertical slice inside the ten approved paths without changing pair or delivery authority.
+    - Run every approved command, inspect the exact diff and stop immediately when all M4-C acceptance passes.
+  deliverables:
+    - One exact Candidate implementing the canonical read-only family value report.
+    - Focused proof for empty/uncovered/legacy/stale/accepted/multiple-pair behavior, strict-positive gating, economics separation, native currencies, privacy and surface agreement.
+    - Concise handoff naming response schema, typed reasons, counters, commands and dependency-held M4-D work.
+  modules:
+    - name: Family claim projection
+      responsibility: Group exact requested families deterministically and derive proven-lower only from current accepted M4-B pairs with strictly positive signed change.
+      consumes: [Requested family names, optional comparison ids, M4-B pair reports.]
+      produces: [Per-family and overall proven or cannot-determine result with every comparison visible.]
+      boundaries: [No hidden winner, percentage average, ranking, auto-work or Milestone mutation.]
+    - name: Separated delivery value evidence
+      responsibility: Project canonical Worker Token, Runtime estimate, Provider native-currency, elapsed and correction/handoff evidence for the delegated Task.
+      consumes: [Task economics, Attempts, events, verification, Main review and Integration records.]
+      produces: [Explicit values, denominators and typed unavailable reasons.]
+      boundaries: [No FX, Provider bill claim, cap-as-spend, unavailable-as-zero or Worker/Main arithmetic.]
+    - name: Canonical public report
+      responsibility: Return the same privacy-safe read-only object through Daemon, CLI and MCP.
+      consumes: [Family projection and separated delivery value evidence.]
+      produces: [Canonical JSON plus bounded human rendering.]
+      boundaries: [No raw content, Task creation, evidence-file write or Hub/UI.]
+  callChain:
+    - Main requests one to ten exact families and optional exact comparison ids through CLI or MCP.
+    - Daemon coordinator reads all in-scope M4-B reports, never selects a hidden favorable pair, and resolves delegated Task economics/event evidence.
+    - Core returns deterministic per-comparison, per-family and overall truth with separate evidence categories and typed gaps.
+    - CLI and MCP render the same canonical object without mutation or background work.
+  scenarios:
+    - name: Empty or uncovered family
+      given: No current accepted M4-B pair exists for a requested family.
+      when: The value report is read.
+      then: The family and overall result are cannot-determine with typed reasons and no zero sample.
+    - name: Mixed family evidence
+      given: A family has accepted lower, equal or higher pairs plus rejected or stale comparisons.
+      when: The report is read.
+      then: Every comparison remains visible; the family is proven-lower only because of an accepted strictly positive pair, without hiding contrary evidence.
+    - name: Complete representative set
+      given: Every requested family has at least one current accepted pair with strictly positive direct-minus-delegated change.
+      when: The report is read.
+      then: Overall is proven and every claim points to its pair and separated delivery evidence.
+    - name: Economics evidence is partial
+      given: Worker usage, quote, time or correction evidence is incomplete.
+      when: A valid Main pair is reported.
+      then: Main pair arithmetic remains exact while each missing delivery-value category is explicitly unavailable or incomplete.
+  risks:
+    - Aggregation could hide unfavorable pairs; list all in-scope comparisons and never average percentages.
+    - Economics could be mixed into Main Token; keep typed fields and denominators separate and test the boundary.
+    - Missing evidence could look like zero; require typed unavailable reasons and deterministic cannot-determine results.
+  changeBudget:
+    maxFiles: 10
+    maxDiffLines: 2800
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 60000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxWorkerValidationRepairs: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test, .forklight-boundary-capture, .forklight-receipt-retry, plans]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/main-token-value-report.ts
+    - src/daemon/coordinator.ts
+    - src/daemon/protocol.ts
+    - src/daemon/server.ts
+    - src/cli.ts
+    - src/mcp/server.ts
+    - tests/main-token-value-report.test.ts
+    - tests/daemon.test.ts
+    - tests/daemon-cli.test.ts
+    - tests/mcp.test.ts
+acceptance:
+  criteria:
+    - Empty, uncovered, invalid and legacy-only families return deterministic cannot-determine with typed reasons; missing evidence is never a zero sample.
+    - Only current accepted M4-B pairs contribute a Main result; rejected, stale and incomplete comparisons remain visible and cannot graduate a family.
+    - Every comparison exposes exact direct/delegated Main totals, signed change, percentage availability and quality gates; strictly positive direct-minus-delegated is required for proven-lower.
+    - Worker Token, Runtime estimate, native-currency Provider cost, time and correction/handoff evidence remain separate with explicit denominators and unavailable reasons.
+    - All valid pairs remain visible; no percentage averaging, model ranking, hidden favorable selection, FX conversion, cap-as-spend or unavailable-as-zero exists.
+    - Daemon, CLI JSON/human and MCP agree on one privacy-safe read-only response and create no work.
+    - No representative calibration execution, report-file write, Hub/UI, coordination mechanism or unrelated path exists.
+    - One Grok 4.6 Xhigh native Goal, ForkLight independent verification, two different-view Judges and Main serial Integration complete the quality chain.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/main-token-usage.test.ts tests/main-token-pair.test.ts tests/main-token-value-report.test.ts tests/task-economics-report.test.ts tests/daemon.test.ts tests/daemon-cli.test.ts tests/mcp.test.ts
+    - git diff --check

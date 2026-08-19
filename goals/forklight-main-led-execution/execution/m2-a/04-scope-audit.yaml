@@ -1,0 +1,104 @@
+version: 2
+name: M2-A final source and generated-output scope audit
+project: /Users/yijunwang/code/forklight
+taskClass: m2-grok-46-scope-audit
+taskFamily: forklight-runtime-recovery
+workerProfileId: local-grok-builder
+provider:
+  name: xai
+  model: grok-4.6
+  keychainService: forklight.xai.api-key
+runtime:
+  name: grok-build
+  executable: grok
+  effort: xhigh
+  maxBudgetUsd: null
+contract:
+  outcome: Confirm the integrated M2-A change stayed within execution/Profile/tests/narrow-doc boundaries, generated dist output never became business delivery, Hub is untouched, and no native Goal claim was introduced.
+  presentation:
+    summary: 最后只审真实改动边界与生成物处置，防止再次把 dist 或 Hub 噪声当交付。
+    language: zh-CN
+  context:
+    - The prior ordinary Candidate was rejected specifically because dist output entered the signed patch.
+    - This final Task is read-only and exists to close that concrete integration-safety failure, not to increase test count.
+  inScope:
+    - Inspect integrated source paths and generated-output policy against the accepted M2-A spec.
+    - Confirm Hub, credentials, review/storage/routing code, and native Goal claims are absent.
+  outOfScope:
+    - No edits, new abstractions, broad repository review, Provider probes, Integration, commit, or push.
+  executionSteps:
+    - Compare the integrated path set and current source behavior with the M2-A accepted boundaries.
+    - Check generated dist handling and native Goal wording in focused sources and docs.
+    - Return one bounded pass or exact out-of-scope path/claim.
+  deliverables:
+    - A final read-only M2-A scope and generated-output audit.
+  modules:
+    - name: M2-A delivery boundary
+      responsibility: Distinguish accepted business paths from generated output and forbidden feature areas.
+      consumes:
+        - Accepted M2-A spec, integrated source, workspace policy, and narrow docs.
+      produces:
+        - A bounded safe-scope result or exact blocking path/claim.
+      boundaries:
+        - No manual subpatch, source mutation, or broader repository audit.
+  callChain:
+    - Goal admits this final read-only Task after compatibility evidence passes.
+    - Grok inspects only the accepted boundary and generated-output policy.
+    - ForkLight runs build hygiene and focused runtime tests.
+    - Goal may complete this M2-A execution slice only when the machine gate passes.
+  scenarios:
+    - name: Generated output stays generated
+      given: npm run build recreates dist files.
+      when: Task and Integration evidence are evaluated.
+      then: dist remains outside business delivery and cannot inflate or alter the accepted patch.
+    - name: Forbidden claim or path appears
+      given: Hub, unrelated feature, or Grok native Goal wording entered source.
+      when: The audit runs.
+      then: It returns the exact blocker and Goal does not claim the M2-A slice complete.
+  risks:
+    - A broad final audit would repeat earlier work; inspect only the accepted path and claim boundaries.
+  changeBudget:
+    maxFiles: 1
+    maxDiffLines: 20
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude: [.git, node_modules, dist, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: false
+  allowedCommands: []
+  focusPaths:
+    - specs/m2-a-grok-execution-truth/spec.md
+    - src/core/execution-mode.ts
+    - src/core/settings.ts
+    - src/core/worker-profiles.ts
+    - src/workers/grok.ts
+    - docs/configuration.md
+    - docs/main-clients/grok-build.md
+acceptance:
+  criteria:
+    - M2-A integrated business paths stay inside the accepted spec and dist/** remains generated-only.
+    - Hub, unrelated M2-B/C features, credentials, and Grok native Goal claims are absent.
+    - No source file changes.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/task.test.ts tests/task-preview.test.ts tests/worker-profiles.test.ts tests/worker-readiness.test.ts tests/worker-runtime.test.ts tests/cli-health.test.ts
+    - git diff --check

@@ -33,7 +33,8 @@ forklight-mcp
 ## Choosing Worker runtime
 
 - Default Worker is often `claude-code` (settings `defaultRuntime`).  
-- For a Grok **Worker** (not Main), set Task `runtime.name: grok-build` and `provider.name: xai` (model e.g. `grok-4.5`).  
+- For a Grok **Worker** (not Main), select the saved `grok-4-6-xhigh` Profile or set Task `runtime.name: grok-build`, `provider.name: xai`, model `grok-4.6`, and effort `xhigh`.
+- New `auto` Grok Tasks resolve to `native-goal`: first launch sends `/goal <Worker contract>` with `--session-id`, ordinary continuation sends `/goal resume` on the same Session/Goal, and an authorized correction after native completion starts a successor `/goal` in the same Session. Explicit `persistent-session` still uses `--session-id` / `--resume` without claiming native Goal. Omitted historical Grok records stay `single-run`.
 - Being Main=Grok does **not** auto-switch Worker to grok-build.
 
 ## Grok as Worker (OAuth)
@@ -48,3 +49,4 @@ Headless tool runs use `--always-approve` (not interactive TUI).
 - Do not commit/push via ForkLight.  
 - Worker claims are non-authoritative; independent verify always runs.  
 - Checkpoint MCP is unsupported on Grok → `checkpoint.skipped`; independent acceptance still runs.
+- Grok `nativeGoal` is supported for `grok-build`. Success still requires native `complete` plus `achieved` plus Task-owned classifier details; process exit and assistant prose are not enough. Do not relabel historical `persistent-session` Tasks.

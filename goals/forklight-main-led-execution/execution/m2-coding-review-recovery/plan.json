@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "name": "M2 Coding exact Candidate review recovery and audit",
+  "objective": "Adopt exact final Candidate bytes, run one fresh two-Judge gate, integrate serially after Main accept, and rerun the accepted integrated-source audits.",
+  "items": [
+    { "id": "exact-candidate-review", "task": "./01-exact-candidate.yaml", "dependsOn": [] },
+    { "id": "integrated-recovery-audit", "task": "../m2-coding-journey/02-integrated-recovery-audit.yaml", "dependsOn": ["exact-candidate-review"] },
+    { "id": "wrong-candidate-safety-audit", "task": "../m2-coding-journey/03-wrong-candidate-safety-audit.yaml", "dependsOn": ["integrated-recovery-audit"] },
+    { "id": "operation-surface-audit", "task": "../m2-coding-journey/04-operation-surface-audit.yaml", "dependsOn": ["wrong-candidate-safety-audit"] }
+  ]
+}

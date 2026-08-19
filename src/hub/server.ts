@@ -29,6 +29,7 @@ import {
   type DaemonHealthEvidence,
   type RuntimeDisplayMetadata,
 } from "../setup/doctor.js";
+import { projectMainSetupResult, projectSetupStatus } from "../setup/status.js";
 import type { DaemonMethod } from "../daemon/protocol.js";
 import { WORK_HIERARCHY_INVALID_FILTER_REASON } from "../core/work-hierarchy.js";
 import {
@@ -41,7 +42,6 @@ import {
   type OutcomeIntakeCreateInput,
 } from "../core/outcome-intake.js";
 import {
-  providerDefinition,
   providerLabel,
   providerNames,
   isProviderName,
@@ -2216,6 +2216,38 @@ export class HubServer {
           this.deps.packageRoot,
         );
         const versionJourney = this.buildVersionJourney(daemon);
+        const setup = projectSetupStatus({
+          prerequisites: prereqs,
+          providers: providers.map((provider) => ({
+            name: provider.name,
+            label: provider.label,
+            variantLabel: provider.variantLabel,
+            configured: provider.configured,
+            authMode: provider.authMode,
+            defaultModel: provider.defaultModel,
+            defaultEndpoint: provider.defaultEndpoint,
+            variants: provider.variants,
+          })),
+          defaultProvider: settings.execution.defaultProvider,
+          workers: settings.workerProfiles.profiles.map((profile) => {
+            const ready = workerReadiness.find((row) => row.workerId === profile.id);
+            const provider: ProviderName = ready?.provider
+              ?? profile.provider
+              ?? settings.execution.defaultProvider;
+            return {
+              id: profile.id,
+              label: profile.label,
+              runtime: profile.runtime,
+              provider,
+              model: ready?.model ?? profile.model ?? "",
+              selected: profile.id === settings.workerProfiles.defaultProfileId,
+            };
+          }),
+          mains: mains.map((item) => ({
+            client: item.client,
+            installed: item.mcp.installed || item.skill.installed || item.plugin.installed,
+          })),
+        });
         return {
           settings: viewHubSettings(settings),
           modelCatalog: settings.modelCatalog,
@@ -2230,6 +2262,7 @@ export class HubServer {
           runtimeReadinessSourceDetail: runtimeFacts.sourceDetail,
           runtimes,
           mains,
+          setup,
           daemon,
           versionJourney,
         };
@@ -2386,29 +2419,69 @@ export class HubServer {
         this.sendJson(req, res, 422, { error: "Unsupported provider" });
         return;
       }
-      if (provider === "openai") {
-        this.sendJson(req, res, 422, {
-          error: "Codex Workers use the local Codex sign-in; do not store an OpenAI API key here",
-        });
-        return;
-      }
-      if (apiKey.length < 8 || apiKey.length > 4096 || /[\0\r\n]/.test(apiKey)) {
-        this.sendJson(req, res, 422, { error: "Invalid API key" });
-        return;
-      }
-      const settings = this.deps.settings.get();
-      const definition = providerDefinition(provider, settings.providerDefaults);
-      const account = this.deps.account();
-      this.deps.keychain.write(definition.defaultKeychainService, account, apiKey);
-      // Keychain change affects describeProviders() — invalidate setup snapshot.
-      this.cache.invalidate("setupStatus");
-      this.cache.invalidate("opsHealth");
-      this.sendJson(req, res, 200, {
-        ok: true,
+      const variant = typeof body.variant === "string" && body.variant.length > 0
+        ? body.variant
+        : this.deps.setup.defaultVariantId(provider);
+      const selection = {
         provider,
-        keychainService: definition.defaultKeychainService,
-        configured: true,
-      });
+        variant,
+        ...(typeof body.model === "string" ? { model: body.model } : {}),
+        ...(typeof body.endpoint === "string" ? { endpoint: body.endpoint } : {}),
+      };
+      try {
+        if (provider === "openai") {
+          if (apiKey.length > 0) {
+            this.sendJson(req, res, 422, {
+              error: "Codex Workers use the local Codex sign-in; do not store an OpenAI API key here",
+            });
+            return;
+          }
+          const result = this.deps.setup.selectSignedInProvider(selection);
+          this.cache.invalidate("setupStatus");
+          this.cache.invalidate("opsHealth");
+          this.sendJson(req, res, 200, {
+            ok: true,
+            provider,
+            configured: true,
+            authMode: result.authMode,
+          });
+          return;
+        }
+        if (apiKey.length === 0) {
+          const decided = this.deps.setup.resolveProviderSetup(selection);
+          if (decided.mode === "local-sign-in") {
+            const result = this.deps.setup.selectSignedInProvider(selection);
+            this.cache.invalidate("setupStatus");
+            this.cache.invalidate("opsHealth");
+            this.sendJson(req, res, 200, {
+              ok: true,
+              provider,
+              configured: true,
+              authMode: result.authMode,
+            });
+            return;
+          }
+          this.sendJson(req, res, 422, { error: "Invalid API key" });
+          return;
+        }
+        if (apiKey.length < 8 || apiKey.length > 4096 || /[\0\r\n]/.test(apiKey)) {
+          this.sendJson(req, res, 422, { error: "Invalid API key" });
+          return;
+        }
+        const result = this.deps.setup.commitProvider(selection, apiKey);
+        this.cache.invalidate("setupStatus");
+        this.cache.invalidate("opsHealth");
+        this.sendJson(req, res, 200, {
+          ok: true,
+          provider,
+          keychainService: result.keychainService,
+          configured: true,
+          authMode: result.authMode,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Provider setup failed";
+        this.sendJson(req, res, 422, { error: message });
+      }
       return;
     }
 
@@ -2440,14 +2513,15 @@ export class HubServer {
           ? {}
           : { packageRoot: this.deps.packageRoot }),
       });
-      const ok = "ok" in result ? result.ok : true;
+      const projected = projectMainSetupResult(result, component);
+      const ok = projected.ok;
       // Only invalidate when install actually succeeded; a failed install must
       // not invent a fresh "installed" snapshot.
       if (ok) {
         this.cache.invalidate("setupStatus");
         this.cache.invalidate("opsHealth");
       }
-      this.sendJson(req, res, ok ? 200 : 422, result);
+      this.sendJson(req, res, ok ? 200 : 422, { ...result, newSessionNeeded: projected.newSessionNeeded });
       return;
     }
 
@@ -2473,12 +2547,13 @@ export class HubServer {
         component = body.component;
       }
       const result = await uninstallMainComponent(client, component);
-      const ok = "ok" in result ? result.ok : true;
+      const projected = projectMainSetupResult(result, component);
+      const ok = projected.ok;
       if (ok) {
         this.cache.invalidate("setupStatus");
         this.cache.invalidate("opsHealth");
       }
-      this.sendJson(req, res, ok ? 200 : 422, result);
+      this.sendJson(req, res, ok ? 200 : 422, { ...result, newSessionNeeded: projected.newSessionNeeded });
       return;
     }
 

@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import {
   CompetitionCoordinator,
@@ -41,6 +42,8 @@ import type {
   VerificationResult,
 } from "../src/core/types.js";
 import { StateStore } from "../src/state/store.js";
+import { DEFAULT_ROUTING_POLICY } from "../src/core/model-routing.js";
+import { projectStrategyPolicyAdvice } from "../src/core/strategy-advice.js";
 
 const base = Date.parse("2026-07-20T00:00:00Z");
 const at = (minutes: number): string => new Date(base + minutes * 60_000).toISOString();
@@ -1223,6 +1226,45 @@ function sha256(content: string): string {
   return createHash("sha256").update(content).digest("hex");
 }
 
+function seedDestinationExecutionProfiles(settings: SettingsService): void {
+  const current = settings.get();
+  const withFlash = upsertWorkerProfile(current.workerProfiles, {
+    id: "deepseek-flash-1m",
+    label: "DeepSeek Flash 1M",
+    runtime: "claude-code",
+    modelConfigId: "deepseek-flash",
+    effort: "high",
+    executionPreference: "auto",
+  }, current.modelCatalog);
+  settings.update({
+    workerProfiles: upsertWorkerProfile(withFlash, {
+      id: "codex-auto",
+      label: "Codex Auto",
+      runtime: "codex-cli",
+      provider: "openai",
+      model: "gpt-5.6-luna",
+      endpoint: "https://api.openai.com/v1",
+      effort: "medium",
+      executionPreference: "auto",
+    }, current.modelCatalog),
+  });
+}
+
+function resolveProfileSelection(settings: SettingsService, workerProfileId: string) {
+  const current = settings.get();
+  return resolveWorkerSelection({ workerProfileId }, {
+    execution: current.execution,
+    providerDefaults: current.providerDefaults,
+    workerProfiles: current.workerProfiles,
+    ...(current.modelCatalog === undefined ? {} : { modelCatalog: current.modelCatalog }),
+  });
+}
+
+const EXECUTION_TRUTH_GAPS = [{
+  description: "src/b.ts still needs the second export completed",
+  acceptanceExpectation: "src/b.ts exports the updated constant and acceptance passes",
+}];
+
 function seedGrokBuilderProfile(settings: SettingsService): void {
   const current = settings.get();
   const catalog = upsertModelConfig(current.modelCatalog, {
@@ -1245,6 +1287,60 @@ function seedGrokBuilderProfile(settings: SettingsService): void {
     catalog,
   );
   settings.update({ modelCatalog: catalog, workerProfiles: profiles });
+}
+
+function withProfileExecutionPreference(
+  settings: SettingsService,
+  profileId: string,
+  executionPreference: "auto" | "single-run" | "persistent-session" | "native-goal",
+): void {
+  const current = settings.get();
+  const profile = current.workerProfiles.profiles.find((item) => item.id === profileId);
+  if (profile === undefined) {
+    throw new Error(`test fixture missing profile ${profileId}`);
+  }
+  settings.update({
+    workerProfiles: upsertWorkerProfile(
+      current.workerProfiles,
+      { ...structuredClone(profile), executionPreference },
+      current.modelCatalog,
+    ),
+  });
+}
+
+function countStoreRows(
+  store: StateStore,
+  table: "tasks" | "events" | "competitions" | "competition_candidates" | "attempts" | "provider_probes",
+): number {
+  const db = new DatabaseSync(store.databasePath);
+  try {
+    return (db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
+  } finally {
+    db.close();
+  }
+}
+
+/** Valid persisted Profile, then a forced unsupported preference on read.
+ *  Upsert and stored-settings validation both reject the unsupported pref, so
+ *  admission would never see it unless get() returns the mutated clone. */
+class SettingsWithForcedExecutionPreference extends SettingsService {
+  constructor(
+    store: StateStore,
+    readonly profileId: string,
+    readonly executionPreference: "persistent-session" | "native-goal",
+  ) {
+    super(store);
+  }
+
+  override get() {
+    const current = structuredClone(super.get());
+    const profile = current.workerProfiles.profiles.find((item) => item.id === this.profileId);
+    if (profile === undefined) {
+      throw new Error(`test fixture missing profile ${this.profileId}`);
+    }
+    profile.executionPreference = this.executionPreference;
+    return current;
+  }
 }
 
 const REASONED_OPTIONS = {
@@ -1393,13 +1489,23 @@ test("mixed-runtime competition freezes each candidate's own Worker identity fro
   const { coordinator, store, settings, cleanup } = setupCoordinator(src);
   try {
     seedGrokBuilderProfile(settings);
+    withProfileExecutionPreference(settings, "default", "auto");
+    withProfileExecutionPreference(settings, "grok-builder", "auto");
     const baseSpec = makeContractSpec(src);
+    // Stale source freeze must not leak onto either candidate.
+    const sourceSpec: TaskSpec = {
+      ...baseSpec,
+      executionPreference: "auto",
+      executionMode: "persistent-session",
+    };
+    const sourceBefore = structuredClone(sourceSpec);
     const candidates: CandidateOverride[] = [
       { workerProfileId: "default" },
       { workerProfileId: "grok-builder" },
     ];
 
-    const { competition } = await coordinator.create(baseSpec, "/test.yaml", candidates, REASONED_OPTIONS);
+    const { competition } = await coordinator.create(sourceSpec, "/test.yaml", candidates, REASONED_OPTIONS);
+    assert.deepEqual(sourceSpec, sourceBefore);
     const stored = store.getCompetition(competition.id);
     assert.equal(stored.legacy, undefined);
     assert.equal(stored.reason?.intent, "required");
@@ -1416,12 +1522,101 @@ test("mixed-runtime competition freezes each candidate's own Worker identity fro
     assert.equal(claude.identity?.provider, "deepseek");
     assert.equal(claude.identity?.workerProfileId, "default");
 
-    // Each candidate Task keeps its own runtime, not the parent's.
+    // Each candidate Task keeps its own runtime and execution truth, not the parent's.
     const claudeTask = store.getTask(claude.taskId);
     const grokTask = store.getTask(grok.taskId);
     assert.equal(claudeTask.spec.runtime.name, "claude-code");
+    assert.equal(claudeTask.spec.provider.name, "deepseek");
+    assert.equal(claudeTask.spec.runtime.effort, "high");
+    assert.equal(claudeTask.spec.workerProfileId, "default");
+    assert.equal(claudeTask.spec.executionPreference, "auto");
+    assert.equal(claudeTask.spec.executionMode, "single-run");
     assert.equal(grokTask.spec.runtime.name, "grok-build");
     assert.equal(grokTask.spec.provider.name, "xai");
+    assert.equal(grokTask.spec.provider.model, "grok-4.5");
+    assert.equal(grokTask.spec.runtime.effort, "high");
+    assert.equal(grokTask.spec.workerProfileId, "grok-builder");
+    assert.equal(grokTask.spec.executionPreference, "auto");
+    assert.equal(grokTask.spec.executionMode, "native-goal");
+  } finally {
+    cleanup();
+  }
+});
+
+test("saved-Profile candidate freezes an explicit execution preference over the source Task", async () => {
+  const src = makeSourceProject();
+  const { coordinator, store, settings, cleanup } = setupCoordinator(src);
+  try {
+    seedGrokBuilderProfile(settings);
+    withProfileExecutionPreference(settings, "default", "auto");
+    withProfileExecutionPreference(settings, "grok-builder", "persistent-session");
+    const sourceSpec: TaskSpec = {
+      ...makeContractSpec(src),
+      executionPreference: "native-goal",
+      executionMode: "native-goal",
+    };
+    const sourceBefore = structuredClone(sourceSpec);
+
+    const { competition } = await coordinator.create(sourceSpec, "/test.yaml", [
+      { workerProfileId: "default" },
+      { workerProfileId: "grok-builder" },
+    ], REASONED_OPTIONS);
+
+    assert.deepEqual(sourceSpec, sourceBefore);
+    const byProfile = new Map(
+      store.getCompetitionCandidates(competition.id).map((c) => [c.identity?.workerProfileId, c]),
+    );
+    const grokTask = store.getTask(byProfile.get("grok-builder")!.taskId);
+    const claudeTask = store.getTask(byProfile.get("default")!.taskId);
+    assert.equal(grokTask.spec.provider.name, "xai");
+    assert.equal(grokTask.spec.runtime.name, "grok-build");
+    assert.equal(grokTask.spec.executionPreference, "persistent-session");
+    assert.equal(grokTask.spec.executionMode, "persistent-session");
+    assert.equal(claudeTask.spec.executionPreference, "auto");
+    assert.equal(claudeTask.spec.executionMode, "single-run");
+  } finally {
+    cleanup();
+  }
+});
+
+test("unsupported candidate execution preference rejects admission before any durable mutation", async () => {
+  const src = makeSourceProject();
+  const { store, settings, home, cleanup } = setupCoordinator(src);
+  try {
+    seedGrokBuilderProfile(settings);
+    withProfileExecutionPreference(settings, "default", "auto");
+    const forcedSettings = new SettingsWithForcedExecutionPreference(
+      store,
+      "default",
+      "persistent-session",
+    );
+    const coordinator = new CompetitionCoordinator(store, forcedSettings);
+    const sourceSpec: TaskSpec = {
+      ...makeContractSpec(src),
+      executionPreference: "auto",
+      executionMode: "single-run",
+    };
+
+    await assert.rejects(
+      () => coordinator.create(sourceSpec, "/test.yaml", [
+        { workerProfileId: "default" },
+        { workerProfileId: "grok-builder" },
+      ], REASONED_OPTIONS),
+      /persistent-session/,
+    );
+
+    assert.equal(store.listTasks().length, 0);
+    assert.equal(store.listCompetitions().length, 0);
+    assert.equal(countStoreRows(store, "tasks"), 0);
+    assert.equal(countStoreRows(store, "events"), 0);
+    assert.equal(countStoreRows(store, "competitions"), 0);
+    assert.equal(countStoreRows(store, "competition_candidates"), 0);
+    assert.equal(countStoreRows(store, "attempts"), 0);
+    assert.equal(countStoreRows(store, "provider_probes"), 0);
+    const runsDir = path.join(home, "runs");
+    assert.equal(existsSync(runsDir) ? readdirSync(runsDir).length : 0, 0);
+    const compDir = path.join(home, "competitions");
+    assert.equal(existsSync(compDir) ? readdirSync(compDir).length : 0, 0);
   } finally {
     cleanup();
   }
@@ -1566,6 +1761,125 @@ test("cross-Worker handoff freezes destination network policy and clears stale s
       digestPrefix: "abcd1234ef00",
     });
     assert.equal(built.networkPolicy, undefined, "inherit destination must remove the stale direct policy");
+  } finally {
+    cleanup();
+  }
+});
+
+test("Competition handoff freezes destination execution truth from the selected Runtime", async () => {
+  const src = makeTwoFileSourceProject();
+  const { store, settings, cleanup } = setupCoordinator(src);
+  try {
+    seedDestinationExecutionProfiles(settings);
+    const coordinator = new CompetitionCoordinator(store, settings);
+    const { competition } = await coordinator.create(makeContractSpec(src), "/test.yaml", [
+      { workerProfileId: "grok-4-6-xhigh" },
+      { workerProfileId: "default" },
+    ], {
+      ...REASONED_OPTIONS,
+      readinessVerifier: () => {},
+    });
+    const source = store.getCompetitionCandidates(competition.id)
+      .find((candidate) => candidate.identity?.workerProfileId === "grok-4-6-xhigh")!;
+    const createdSource = store.getTask(source.taskId);
+    store.updateTask(source.taskId, {
+      spec: {
+        ...createdSource.spec,
+        workerProfileId: "grok-4-6-xhigh",
+        provider: { ...createdSource.spec.provider, name: "xai", model: "grok-4.6" },
+        runtime: { ...createdSource.spec.runtime, name: "grok-build", effort: "xhigh" },
+        executionPreference: "auto",
+        executionMode: "persistent-session",
+      },
+    });
+    const sourceTask = store.getTask(source.taskId);
+    assert.equal(sourceTask.spec.runtime.name, "grok-build");
+    assert.equal(sourceTask.spec.executionPreference, "auto");
+    assert.equal(sourceTask.spec.executionMode, "persistent-session");
+    const { revisionId } = completeTwoFileCandidate(store, sourceTask, { passed: false });
+    coordinator.recordRetainedPartial(
+      competition.id,
+      source.id,
+      ["src/a.ts"],
+      EXECUTION_TRUTH_GAPS,
+    );
+    const request = {
+      competitionId: competition.id,
+      candidateId: source.id,
+      candidateRevisionId: revisionId,
+      destinationWorkerProfileId: "deepseek-flash-1m",
+      reason: "Hand Grok Candidate to DeepSeek Claude Code for the remaining gap.",
+      confirm: true as const,
+    };
+
+    const forcedSettings = structuredClone(settings.get());
+    const forcedDestination = forcedSettings.workerProfiles.profiles
+      .find((profile) => profile.id === "deepseek-flash-1m")!;
+    forcedDestination.executionPreference = "persistent-session";
+    const tasksBefore = store.listTasks().length;
+    const handoffsBefore = store.listCandidateHandoffs().length;
+    await assert.rejects(
+      () => executeCandidateHandoff(store, forcedSettings, request, { canLaunch: () => ({ ok: true }) }),
+      /persistent-session/,
+    );
+    assert.equal(store.listTasks().length, tasksBefore);
+    assert.equal(store.listCandidateHandoffs().length, handoffsBefore);
+
+    const view = await executeCandidateHandoff(
+      store,
+      settings.get(),
+      request,
+      { canLaunch: () => ({ ok: true }) },
+    );
+    const successor = store.getTask(view.successorTaskId);
+    const sourceAfter = store.getTask(sourceTask.id);
+    assert.equal(successor.spec.workerProfileId, "deepseek-flash-1m");
+    assert.equal(successor.spec.provider.name, "deepseek");
+    assert.equal(successor.spec.runtime.name, "claude-code");
+    assert.equal(successor.spec.executionPreference, "auto");
+    assert.equal(successor.spec.executionMode, "single-run");
+    assert.equal(sourceAfter.spec.executionPreference, "auto");
+    assert.equal(sourceAfter.spec.executionMode, "persistent-session");
+    assert.deepEqual(sourceAfter.spec.provider, sourceTask.spec.provider);
+    assert.deepEqual(sourceAfter.spec.runtime, sourceTask.spec.runtime);
+
+    const builderInput = {
+      reusablePaths: ["src/a.ts"],
+      remainingGaps: EXECUTION_TRUTH_GAPS,
+      digestPrefix: "abcd1234ef00",
+    };
+    const grokBuilt = buildHandoffSuccessorSpec(
+      sourceAfter.spec,
+      resolveProfileSelection(settings, "grok-4-6-xhigh"),
+      builderInput,
+    );
+    assert.equal(grokBuilt.executionPreference, "auto");
+    assert.equal(grokBuilt.executionMode, "native-goal");
+    const codexBuilt = buildHandoffSuccessorSpec(
+      sourceAfter.spec,
+      resolveProfileSelection(settings, "codex-auto"),
+      builderInput,
+    );
+    assert.equal(codexBuilt.executionPreference, "auto");
+    assert.equal(codexBuilt.executionMode, "native-goal");
+    const legacyBuilt = buildHandoffSuccessorSpec(
+      sourceAfter.spec,
+      resolveProfileSelection(settings, "default"),
+      builderInput,
+    );
+    assert.equal(legacyBuilt.executionPreference, "single-run");
+    assert.equal(legacyBuilt.executionMode, "single-run");
+    assert.throws(
+      () => buildHandoffSuccessorSpec(
+        sourceAfter.spec,
+        {
+          ...resolveProfileSelection(settings, "deepseek-flash-1m"),
+          executionPreference: "persistent-session",
+        },
+        builderInput,
+      ),
+      /persistent-session/,
+    );
   } finally {
     cleanup();
   }
@@ -2953,4 +3267,297 @@ test("handoff rejects non-exact replay of destination Profile while preserving o
   } finally {
     cleanup();
   }
+});
+
+test("authentic pre-origin Competition handoff projects without fabricating Goal ownership", async () => {
+  const home = mkdtempSync(path.join(tmpdir(), "forklight-comp-legacy-handoff-"));
+  const store = new StateStore(home);
+  try {
+    const source = task("legacy-comp-src", "xai", "grok-4.6", "failed");
+    const successor = task("legacy-comp-succ", "xai", "grok-4.6", "queued");
+    const currentSource = task("current-comp-src", "xai", "grok-4.6", "failed");
+    const currentSuccessor = task("current-comp-succ", "xai", "grok-4.6", "queued");
+    store.createTask(source);
+    store.createTask(successor);
+    store.createTask(currentSource);
+    const current = {
+      schemaVersion: 1 as const,
+      id: "current-comp-handoff",
+      status: "prepared" as const,
+      origin: {
+        kind: "competition" as const,
+        competitionId: "comp-current",
+        sourceCandidateId: "cand-current",
+      },
+      sourceTaskId: currentSource.id,
+      sourceCandidateRevisionId: "rev-current-comp-handoff",
+      sourcePatchDigest: "a".repeat(64),
+      gapContractDigest: "b".repeat(64),
+      reusablePathCount: 1,
+      remainingGapCount: 1,
+      reusablePaths: ["src/a.ts"],
+      remainingGaps: [{
+        description: "finish remaining gap",
+        acceptanceExpectation: "tests pass",
+      }],
+      destinationWorkerProfileId: "grok-builder",
+      destinationIdentity: {
+        provider: "xai",
+        model: "grok-4.6",
+        runtime: "grok-build",
+        effort: "xhigh" as const,
+      },
+      successorTaskId: currentSuccessor.id,
+      reason: "Current competition origin stays exact",
+      createdAt: at(1),
+      updatedAt: at(1),
+      preparedAt: at(1),
+      nextAction: "wait-for-successor" as const,
+    };
+    store.createCandidateHandoff({
+      record: current,
+      task: currentSuccessor,
+      authorizationEvent: { summary: "current competition handoff" },
+    });
+
+    const legacyJson = JSON.stringify({
+      schemaVersion: 1,
+      id: "legacy-comp-handoff",
+      status: "prepared",
+      competitionId: "comp-legacy",
+      sourceCandidateId: "cand-legacy",
+      sourceTaskId: source.id,
+      sourceCandidateRevisionId: "rev-legacy-comp-handoff",
+      sourcePatchDigest: "c".repeat(64),
+      gapContractDigest: "d".repeat(64),
+      reusablePathCount: 1,
+      remainingGapCount: 1,
+      reusablePaths: ["src/a.ts"],
+      remainingGaps: [{
+        description: "finish remaining gap",
+        acceptanceExpectation: "tests pass",
+      }],
+      destinationWorkerProfileId: "grok-builder",
+      destinationIdentity: current.destinationIdentity,
+      successorTaskId: successor.id,
+      reason: "Authentic pre-origin Competition identity",
+      createdAt: at(2),
+      updatedAt: at(2),
+      preparedAt: at(2),
+      nextAction: "wait-for-successor",
+    });
+    const raw = new DatabaseSync(store.databasePath);
+    try {
+      raw.prepare(
+        `INSERT INTO candidate_handoffs
+         (id, source_revision_id, source_task_id, successor_task_id, competition_id,
+          status, record_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        "legacy-comp-handoff",
+        "rev-legacy-comp-handoff",
+        source.id,
+        successor.id,
+        "comp-legacy",
+        "prepared",
+        legacyJson,
+        at(2),
+        at(2),
+      );
+    } finally {
+      raw.close();
+    }
+
+    const durable = store.getCandidateHandoff("legacy-comp-handoff");
+    const projected = projectCandidateHandoff(durable, successor.status);
+    const sourceView = resolveHandoffViewForTask(store, source.id);
+    const successorView = resolveHandoffViewForTask(store, successor.id);
+    assert.equal(durable.origin.kind, "competition");
+    assert.equal(projected.originKind, "competition");
+    assert.equal(projected.competitionId, "comp-legacy");
+    assert.equal(projected.sourceCandidateId, "cand-legacy");
+    assert.equal(projected.goalId, undefined);
+    assert.equal(projected.itemId, undefined);
+    assert.equal(sourceView?.originKind, "competition");
+    assert.equal(sourceView?.isSuccessor, false);
+    assert.equal(successorView?.originKind, "competition");
+    assert.equal(successorView?.isSuccessor, true);
+
+    const currentView = resolveHandoffViewForTask(store, currentSource.id);
+    assert.equal(currentView?.originKind, "competition");
+    assert.equal(currentView?.competitionId, "comp-current");
+    assert.equal(currentView?.goalId, undefined);
+    const after = new DatabaseSync(store.databasePath);
+    try {
+      const row = after.prepare(
+        `SELECT record_json FROM candidate_handoffs WHERE id = ?`,
+      ).get("legacy-comp-handoff") as { record_json: string };
+      assert.equal(row.record_json, legacyJson);
+    } finally {
+      after.close();
+    }
+  } finally {
+    store.close();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("competition policy history cannot escalate intent none and stays explanation-only", () => {
+  const historical = [{
+    status: "completed" as const,
+    hasReason: true,
+    intent: "consider" as const,
+    triggers: ["critical" as const],
+    mainDecision: "accept" as const,
+    taskClass: "coding:comp-policy",
+  }];
+  const none = projectStrategyPolicyAdvice({
+    taskClass: "coding:comp-policy",
+    policy: DEFAULT_ROUTING_POLICY,
+    competitionIntent: "none",
+    competitionTriggers: [],
+    shouldRunCompetition: false,
+    exactEvidence: new Map(),
+    competitions: historical,
+  });
+  assert.equal(none.competitionPolicy.determination, "not-advised");
+  assert.equal(none.competitionPolicy.shouldRunCompetition, false);
+  assert.equal(none.competitionPolicy.historyCanOverrideIntentNone, false);
+  assert.equal(none.competitionPolicy.createsWork, false);
+  assert.equal(none.competitionPolicy.matchingCompetitionCount, 0);
+  assert.deepEqual(none.competitionPolicy.admission, {
+    completed: 0, running: 0, pending: 0, legacyUnknownReason: 0,
+  });
+  assert.deepEqual(none.competitionPolicy.outcomes, {
+    accept: 0, reject: 0, revise: 0, noDecision: 0,
+  });
+  assert.ok(none.competitionPolicy.reasons.includes("intent-none"));
+
+  const explained = projectStrategyPolicyAdvice({
+    taskClass: "coding:comp-policy",
+    policy: DEFAULT_ROUTING_POLICY,
+    competitionIntent: "consider",
+    competitionTriggers: ["critical"],
+    shouldRunCompetition: true,
+    exactEvidence: new Map(),
+    competitions: historical,
+  });
+  assert.equal(explained.competitionPolicy.determination, "explained");
+  assert.equal(explained.competitionPolicy.createsWork, false);
+  assert.equal(explained.competitionPolicy.admission.completed, 1);
+  assert.equal(explained.competitionPolicy.outcomes.accept, 1);
+  assert.ok(explained.competitionPolicy.reasons.includes("historical-explanation-only"));
+
+  const requiredNoTriggers = projectStrategyPolicyAdvice({
+    taskClass: "coding:comp-policy",
+    policy: DEFAULT_ROUTING_POLICY,
+    competitionIntent: "required",
+    competitionTriggers: [],
+    shouldRunCompetition: true,
+    exactEvidence: new Map(),
+    competitions: historical,
+  });
+  assert.equal(requiredNoTriggers.competitionPolicy.determination, "cannot-determine");
+  assert.ok(requiredNoTriggers.competitionPolicy.reasons.includes("missing-valid-triggers"));
+  assert.equal(requiredNoTriggers.competitionPolicy.matchingCompetitionCount, 0);
+  assert.deepEqual(requiredNoTriggers.competitionPolicy.outcomes, {
+    accept: 0, reject: 0, revise: 0, noDecision: 0,
+  });
+  assert.equal(requiredNoTriggers.competitionPolicy.createsWork, false);
+
+  const noHistory = projectStrategyPolicyAdvice({
+    taskClass: "coding:comp-policy",
+    policy: DEFAULT_ROUTING_POLICY,
+    competitionIntent: "required",
+    competitionTriggers: ["user-requested"],
+    shouldRunCompetition: true,
+    exactEvidence: new Map(),
+    competitions: [],
+  });
+  assert.equal(noHistory.competitionPolicy.determination, "cannot-determine");
+  assert.ok(noHistory.competitionPolicy.reasons.includes("no-matching-competition-history"));
+  assert.equal(noHistory.competitionPolicy.createsWork, false);
+});
+
+test("competition policy considers only scope- and trigger-compatible history", () => {
+  const mixed = [
+    {
+      status: "completed" as const,
+      hasReason: true,
+      intent: "consider" as const,
+      triggers: ["critical" as const],
+      mainDecision: "accept" as const,
+      taskClass: "coding:comp-policy",
+    },
+    {
+      status: "completed" as const,
+      hasReason: true,
+      intent: "consider" as const,
+      triggers: ["user-requested" as const],
+      mainDecision: "reject" as const,
+      taskClass: "coding:comp-policy",
+    },
+    {
+      status: "completed" as const,
+      hasReason: true,
+      intent: "required" as const,
+      triggers: ["critical" as const],
+      mainDecision: "revise" as const,
+      taskClass: "coding:other-class",
+    },
+    {
+      status: "completed" as const,
+      hasReason: false,
+      triggers: [],
+      taskClass: "coding:comp-policy",
+    },
+  ];
+  const consider = projectStrategyPolicyAdvice({
+    taskClass: "coding:comp-policy",
+    policy: DEFAULT_ROUTING_POLICY,
+    competitionIntent: "consider",
+    competitionTriggers: ["critical"],
+    shouldRunCompetition: true,
+    exactEvidence: new Map(),
+    competitions: mixed,
+  });
+  assert.equal(consider.competitionPolicy.determination, "explained");
+  assert.equal(consider.competitionPolicy.matchingCompetitionCount, 1);
+  assert.equal(consider.competitionPolicy.admission.completed, 1);
+  assert.equal(consider.competitionPolicy.admission.legacyUnknownReason, 0);
+  assert.equal(consider.competitionPolicy.outcomes.accept, 1);
+  assert.equal(consider.competitionPolicy.outcomes.reject, 0);
+  assert.equal(consider.competitionPolicy.outcomes.revise, 0);
+  assert.equal(consider.competitionPolicy.createsWork, false);
+  assert.equal(consider.competitionPolicy.shouldRunCompetition, true);
+  assert.ok(consider.competitionPolicy.reasons.includes("historical-explanation-only"));
+
+  const required = projectStrategyPolicyAdvice({
+    taskClass: "coding:comp-policy",
+    policy: DEFAULT_ROUTING_POLICY,
+    competitionIntent: "required",
+    competitionTriggers: ["critical", "not-a-trigger"],
+    shouldRunCompetition: true,
+    exactEvidence: new Map(),
+    competitions: mixed,
+  });
+  assert.equal(required.competitionPolicy.determination, "explained");
+  assert.deepEqual(required.competitionPolicy.validTriggers, ["critical"]);
+  assert.equal(required.competitionPolicy.matchingCompetitionCount, 1);
+  assert.equal(required.competitionPolicy.outcomes.accept, 1);
+  assert.equal(required.competitionPolicy.createsWork, false);
+
+  const incompatible = projectStrategyPolicyAdvice({
+    taskClass: "coding:comp-policy",
+    policy: DEFAULT_ROUTING_POLICY,
+    competitionIntent: "consider",
+    competitionTriggers: ["new-family"],
+    shouldRunCompetition: true,
+    exactEvidence: new Map(),
+    competitions: mixed,
+  });
+  assert.equal(incompatible.competitionPolicy.determination, "cannot-determine");
+  assert.ok(incompatible.competitionPolicy.reasons.includes("no-matching-competition-history"));
+  assert.equal(incompatible.competitionPolicy.matchingCompetitionCount, 0);
+  assert.equal(incompatible.competitionPolicy.createsWork, false);
 });

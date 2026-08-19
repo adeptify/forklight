@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "family": "hub-product-comprehension",
+  "evidenceMode": "historical-read-only",
+  "historicalRouting": {
+    "result": "cannot-determine",
+    "reason": "score-gap-too-small",
+    "createsWork": false
+  },
+  "requirements": [
+    {
+      "id": "truthful-failure-detail",
+      "sourceContract": "examples/dogfood/m1-task-detail-failure-truth-grok.yaml",
+      "outcome": "Show failure cause, completed evidence and the next decision without hiding uncertainty."
+    },
+    {
+      "id": "human-information-hierarchy",
+      "sourceContract": "examples/dogfood/m3-hub-human-information-architecture-deepseek.yaml",
+      "outcome": "Lead with user outcome and next action before technical evidence."
+    },
+    {
+      "id": "now-history-separation",
+      "sourceContract": "examples/dogfood/m3-hub-now-history-information-architecture-glm.yaml",
+      "outcome": "Separate active attention from terminal history while preserving truthful dispositions."
+    },
+    {
+      "id": "durable-history-pagination",
+      "sourceContract": "examples/dogfood/m3-hub-durable-history-pagination-glm.yaml",
+      "outcome": "Page durable history deterministically without mutating or inventing records."
+    },
+    {
+      "id": "readable-dependency-lineage",
+      "sourceContract": "examples/dogfood/m3-hub-readable-dependency-lineage-deepseek.yaml",
+      "outcome": "Explain Goal, Plan and Task dependency lineage in a human-readable hierarchy."
+    },
+    {
+      "id": "submit-preview-information-hierarchy",
+      "sourceContract": "examples/dogfood/m3-task-submit-preview-information-hierarchy-flash.yaml",
+      "outcome": "Preview task scope, Runtime, policy and acceptance before a user confirms submission."
+    }
+  ],
+  "hubMutationOccurred": false,
+  "m5Implemented": false,
+  "sourceRefs": [
+    "goals/forklight-main-led-execution/evidence/m3-entry-audit.md",
+    "goals/forklight-main-led-execution/evidence/m3-wave-1.md",
+    "goals/forklight-main-led-execution/evidence/m3-routing-graduation.md"
+  ]
+}

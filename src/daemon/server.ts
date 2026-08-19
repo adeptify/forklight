@@ -195,6 +195,38 @@ function parseCompetitionOptions(
   return options;
 }
 
+type SocketProbeObservation =
+  | { event: "connected" }
+  | { event: "timeout" }
+  | { event: "error"; code?: string };
+
+type SocketProbeOutcome =
+  | { kind: "connected" }
+  | { kind: "stale" }
+  | { kind: "indeterminate"; reason: "EPERM" | "EACCES" | "timeout" | "unknown" };
+
+function interpretSocketProbe(observation: SocketProbeObservation): SocketProbeOutcome {
+  if (observation.event === "connected") return { kind: "connected" };
+  if (observation.event === "timeout") return { kind: "indeterminate", reason: "timeout" };
+  if (observation.code === "ECONNREFUSED") return { kind: "stale" };
+  if (observation.code === "EPERM" || observation.code === "EACCES") {
+    return { kind: "indeterminate", reason: observation.code };
+  }
+  return { kind: "indeterminate", reason: "unknown" };
+}
+
+function indeterminateSocketProbeMessage(
+  reason: Extract<SocketProbeOutcome, { kind: "indeterminate" }>["reason"],
+): string {
+  if (reason === "timeout") {
+    return "ForkLight daemon socket probe timed out; leaving the existing endpoint unchanged";
+  }
+  if (reason === "unknown") {
+    return "ForkLight daemon socket probe failed; leaving the existing endpoint unchanged";
+  }
+  return `ForkLight daemon socket probe failed (${reason}); leaving the existing endpoint unchanged`;
+}
+
 export class ForkLightDaemon {
   private readonly store: StateStore;
   private readonly settingsService: SettingsService;
@@ -235,8 +267,12 @@ export class ForkLightDaemon {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
     if (staleSocket) {
-      if (await this.probeSocketEndpoint()) {
+      const probe = interpretSocketProbe(await this.probeSocketEndpoint());
+      if (probe.kind === "connected") {
         throw new Error("ForkLight daemon is already running on this home");
+      }
+      if (probe.kind === "indeterminate") {
+        throw new Error(indeterminateSocketProbeMessage(probe.reason));
       }
       let current;
       try {
@@ -324,13 +360,17 @@ export class ForkLightDaemon {
     });
   }
 
-  private probeSocketEndpoint(): Promise<boolean> {
+  private probeSocketEndpoint(): Promise<SocketProbeObservation> {
     return new Promise((resolve) => {
       const socket = net.createConnection(this.socketPath);
       socket.setTimeout(200);
-      socket.once("connect", () => { socket.destroy(); resolve(true); });
-      socket.once("error", () => { socket.destroy(); resolve(false); });
-      socket.once("timeout", () => { socket.destroy(); resolve(false); });
+      socket.once("connect", () => { socket.destroy(); resolve({ event: "connected" }); });
+      socket.once("error", (error: NodeJS.ErrnoException) => {
+        socket.destroy();
+        const code = error.code;
+        resolve(code === undefined ? { event: "error" } : { event: "error", code });
+      });
+      socket.once("timeout", () => { socket.destroy(); resolve({ event: "timeout" }); });
     });
   }
 
@@ -889,6 +929,18 @@ export class ForkLightDaemon {
         return this.coordinator.directCodexPublicationPreview(params);
       case "direct_codex_publication_register":
         return this.coordinator.directCodexPublicationRegister(params);
+      case "main_token_capture":
+        return this.coordinator.mainTokenCapture(params);
+      case "main_token_capture_episode":
+        return this.coordinator.mainTokenCaptureEpisode(params);
+      case "main_token_status":
+        return this.coordinator.mainTokenStatus(params.taskId, params.comparisonId);
+      case "main_token_assess":
+        return this.coordinator.mainTokenAssess(params);
+      case "main_token_pair_report":
+        return this.coordinator.mainTokenPairReport(params.taskId, params.comparisonId);
+      case "main_token_value_report":
+        return this.coordinator.mainTokenValueReport(params);
       case "adaptation_preview":
         return this.coordinator.adaptationPreview({
           taskId: requiredString(params.taskId, "taskId"),
@@ -970,6 +1022,21 @@ export class ForkLightDaemon {
           ...(reviewerWorkerProfileId === undefined || reviewerWorkerProfileId.length === 0
             ? {}
             : { reviewerWorkerProfileId }),
+          reason,
+          confirm: true,
+        });
+      }
+      case "review_graph_repair_result": {
+        if (params.confirm !== true) {
+          throw new Error("review_graph_repair_result requires explicit confirm: true");
+        }
+        const reason = requiredString(params.reason, "reason").trim();
+        if (reason.length < 1 || reason.length > 1000) {
+          throw new Error("reason must be 1-1000 characters");
+        }
+        return this.coordinator.repairReviewResult({
+          taskId: requiredString(params.taskId, "taskId"),
+          assignmentId: requiredString(params.assignmentId, "assignmentId"),
           reason,
           confirm: true,
         });
@@ -1118,6 +1185,75 @@ export class ForkLightDaemon {
         return this.coordinator.proposeOutcomeIntake(params);
       case "outcome_intake_confirm":
         return this.coordinator.confirmOutcomeIntake(params);
+      case "storage_audit":
+        return this.coordinator.storageAudit();
+      case "storage_preview":
+        return this.coordinator.storagePreview(
+          typeof params.taskId === "string" ? params.taskId : undefined,
+        );
+      case "storage_reclaim": {
+        if (params.confirm !== true) {
+          throw new Error("storage_reclaim requires explicit confirm: true");
+        }
+        const taskId = typeof params.taskId === "string" ? params.taskId : undefined;
+        const allEligible = params.allEligible === true;
+        if ((taskId === undefined) === !allEligible) {
+          throw new Error("storage_reclaim requires exactly one of taskId or allEligible");
+        }
+        return this.coordinator.storageReclaim({
+          confirm: true,
+          ...(taskId === undefined ? { allEligible: true } : { taskId }),
+        });
+      }
+      case "storage_retain": {
+        if (params.confirm !== true) {
+          throw new Error("storage_retain requires explicit confirm: true");
+        }
+        return this.coordinator.storageRetain({
+          taskId: requiredString(params.taskId, "taskId"),
+          reason: requiredString(params.reason, "reason"),
+          confirm: true,
+        });
+      }
+      case "delivery_prepare": {
+        if (params.confirm !== true) {
+          throw new Error("delivery_prepare requires explicit confirm: true");
+        }
+        const reviewerProfileIds = Array.isArray(params.reviewerProfileIds)
+          ? params.reviewerProfileIds
+          : Array.isArray(params.reviewerWorkerProfileIds)
+            ? params.reviewerWorkerProfileIds
+            : [];
+        return this.coordinator.deliveryPrepare({
+          ...(typeof params.taskFile === "string" ? { taskFile: params.taskFile } : {}),
+          ...(typeof params.taskId === "string" ? { taskId: params.taskId } : {}),
+          reviewerProfileIds: reviewerProfileIds as string[],
+          reason: requiredString(params.reason, "reason"),
+          timeoutMs: params.timeoutMs as number,
+          confirm: true,
+          ...(params.includeDiffMaxBytes === undefined
+            ? {}
+            : { includeDiffMaxBytes: params.includeDiffMaxBytes as number }),
+        });
+      }
+      case "delivery_decide": {
+        if (params.confirm !== true) {
+          throw new Error("delivery_decide requires explicit confirm: true");
+        }
+        const decision = requiredString(params.decision, "decision");
+        if (decision !== "accept" && decision !== "revise" && decision !== "reject") {
+          throw new Error("decision must be accept, revise, or reject");
+        }
+        return this.coordinator.deliveryDecide({
+          taskId: requiredString(params.taskId, "taskId"),
+          decision,
+          revisionId: requiredString(params.revisionId ?? params.revision, "revisionId"),
+          digest: requiredString(params.digest, "digest"),
+          reason: requiredString(params.reason, "reason"),
+          timeoutMs: params.timeoutMs as number,
+          confirm: true,
+        });
+      }
       default:
         throw new Error(`Unknown daemon method: ${String(request.method)}`);
     }

@@ -1,0 +1,51 @@
+version: 2
+name: M2 final audit of activated Runtime boundary
+project: /Users/yijunwang/code/forklight
+taskClass: m2-source-only-recovery-activation-boundary-final-audit
+taskFamily: forklight-integration-recovery
+workerProfileId: volcengine-glm52-1m
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 0
+  reason: Read-only zero-change activation audit has deterministic independent checks after reviewed Integration.
+contract:
+  outcome: Re-prove the integrated source-only recovery boundary under environment-correct Workspace acceptance while Main separately binds activated identity to durable Integration and matched real-source health.
+  presentation: { summary: 在正确执行环境重验恢复边界，不把隔离 Workspace 当作已激活 Daemon。, language: zh-CN }
+  context:
+    - Read the accepted Coding Work Item and coding-integrated-audit-recovery spec completely; inspect current integrated source only.
+    - Prior Task f17333fc passed build, 250 focused tests and diff but its isolated Home correctly had no Daemon. Main has preserved that failed acceptance-contract evidence.
+    - Safe Integration 15bd69bc and Main real-source health supply activated identity. This Task proves the local source-only recovery boundary and must not infer or manufacture a Daemon.
+    - Use ForkLight checkpoint MCP for approved commands. No source edit or Integration is permitted.
+  inScope: [Source-only delivery gate, build/activation refusal behavior, privacy-safe projection, focused tests, zero diff.]
+  outOfScope: [Workspace-local activated-Daemon claim, edits, Runtime redesign, replay support, restart experiment, Integration, Store schema, Hub, docs, commit, push, credentials, or coordination machinery.]
+  executionSteps: [Inspect the integrated recovery gate, invoke build, focused tests and diff check through checkpoint MCP, report one bounded verdict.]
+  deliverables: [One environment-correct zero-diff activation-boundary verdict.]
+  modules:
+    - name: Source-only activated boundary
+      responsibility: Preserve explicit refusal of build and activation replay in the integrated source.
+      consumes: [Integrated recovery gate, focused tests, Main-supplied activation evidence.]
+      produces: [Pass or exact blocker with zero diff.]
+      boundaries: [No Daemon launch, restart, edit, replay, or new Runtime claim.]
+  callChain: [Inspect integrated delivery gate, run build and focused refusal tests, return zero-diff verdict; Main reconciles real-source health separately.]
+  scenarios:
+    - name: Environment-correct boundary
+      given: Safe Integration and Main real-source health already prove activated identity.
+      when: The isolated Task inspects and tests integrated recovery.
+      then: Build and activation operations remain ineligible for recovery without requiring a Daemon inside the Task Home.
+  risks: [Do not reinterpret daemon-unavailable in an isolated Home as a product identity mismatch.]
+  changeBudget: { maxFiles: 1, maxDiffLines: 20 }
+advancedPolicy: { maxDurationMs: null, observedTokenCeiling: null, noProgressTimeoutMs: null, fileLimit: null, fileLimitMode: warn, changedLineLimit: null, changedLineLimitMode: warn, baseMaxAttempts: 1, maxExtraAttempts: 0, maxMainCorrections: 0, maxMainReverifications: 0, maxConcurrency: 1, completionMode: warn, changeBudgetMode: warn, maxAdaptationRounds: 0 }
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: false
+  allowedCommands: []
+  focusPaths: [src/core/integration.ts, src/daemon/coordinator.ts, src/daemon/client.ts, tests/integration.test.ts, tests/daemon.test.ts]
+acceptance:
+  criteria: [Integrated source-only recovery refuses build and activation replay, focused behavior passes, and the Task produces zero source change.]
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/integration.test.ts tests/daemon.test.ts
+    - git diff --check

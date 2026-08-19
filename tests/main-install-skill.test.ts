@@ -11,6 +11,7 @@ import {
   uninstallMainFull,
   uninstallMainSkill,
 } from "../src/hub/main-install.js";
+import { projectMainSetupResult } from "../src/setup/status.js";
 
 const SAMPLE_SKILL = `---
 name: forklight-orchestrator
@@ -36,6 +37,7 @@ test("installMainSkill writes skill file with backup; uninstall removes it", asy
   });
   assert.equal(installed.ok, true);
   assert.equal(installed.skillInstalled, true);
+  assert.equal(projectMainSetupResult(installed, "skill").newSessionNeeded, true);
   const body = await readFile(skillPath, "utf8");
   assert.match(body, /ForkLight Orchestrator/);
   assert.doesNotMatch(body, /api[_-]?key|sk-/i);

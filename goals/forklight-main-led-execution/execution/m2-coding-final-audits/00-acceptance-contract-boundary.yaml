@@ -1,0 +1,55 @@
+version: 2
+name: M2 final audit of acceptance-contract and machine-gate boundary
+project: /Users/yijunwang/code/forklight
+taskClass: m2-source-only-recovery-acceptance-contract-final-audit
+taskFamily: forklight-integration-recovery
+workerProfileId: default
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 0
+  reason: Read-only zero-change audit verifies the already delivered amended-acceptance and Goal gate behavior with deterministic tests.
+contract:
+  outcome: Independently prove that a failed amended-remediation check has no delivery authority, preserves original Task truth, and never relabels a failed machine gate as success.
+  presentation: { summary: 核对失败的验收修订没有交付权，也不会改写失败历史或越过 machine gate。, language: zh-CN }
+  context:
+    - Read the accepted coding-integrated-audit-recovery spec and current decision packet completely; inspect integrated source only.
+    - Task f17333fc failed solely because its isolated Home had no Daemon. Exact Main revise and acceptance-contract attribution are durable; amended remediation check eb46f89b then passed 3/4 and created no delivery disposition because its replacement incorrectly expected daemon-unavailable in Main's matched real Home.
+    - This audit is the distinct fourth Goal milestone required by the product's 4–8 milestone contract. It must prove the boundary, not repeat the integrated recovery call-chain audit.
+    - Use ForkLight checkpoint MCP for every approved command.
+  inScope: [Failed amended check has no delivery authority, preservation of passing-command and Task history, exact attribution/revise binding, Goal machine-gate fail-closed behavior, zero diff.]
+  outOfScope: [Product edits, another remediation, changed Goal schema, Coding implementation, Candidate, Judge, Integration, Hub, docs, commit, push, credentials, or coordination machinery.]
+  executionSteps: [Trace amendment validation and Goal gate consumption, inspect focused regressions, run approved commands, report one bounded verdict.]
+  deliverables: [One zero-diff acceptance-contract boundary verdict.]
+  modules:
+    - name: Acceptance-contract boundary
+      responsibility: Preserve immutable failure truth and refuse delivery authority when an exact failed-command remediation does not fully pass.
+      consumes: [Main remediation records, Goal gate projection, focused tests.]
+      produces: [Pass or exact blocker with zero diff.]
+      boundaries: [No mutation, new bypass, or general acceptance weakening.]
+  callChain: [Bind Main revise and attribution to failed verification, record failed amended check without disposition, preserve failed Task, keep machine gate closed.]
+  scenarios:
+    - name: Failed amendment has no authority
+      given: One exact amended remediation check passed only three of four commands.
+      when: ForkLight projects remediation and Goal evidence.
+      then: No delivery disposition exists, prior Task truth is unchanged, and no gate consumes the failed check.
+    - name: Machine gate remains truthful
+      given: The original Goal milestone is a machine gate and its Task remains failed.
+      when: Goal evidence is reconciled after remediation.
+      then: The machine gate remains failed and requires a fresh environment-correct Task.
+  risks: [Do not treat remediation delivery authority as general machine success or rewrite the stopped Goal.]
+  changeBudget: { maxFiles: 1, maxDiffLines: 20 }
+advancedPolicy: { maxDurationMs: null, observedTokenCeiling: null, noProgressTimeoutMs: null, fileLimit: null, fileLimitMode: warn, changedLineLimit: null, changedLineLimitMode: warn, baseMaxAttempts: 1, maxExtraAttempts: 0, maxMainCorrections: 0, maxMainReverifications: 0, maxConcurrency: 1, completionMode: warn, changeBudgetMode: warn, maxAdaptationRounds: 0 }
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: false
+  allowedCommands: []
+  focusPaths: [src/core/main-remediation.ts, src/core/goal.ts, src/core/main-review.ts, tests/main-remediation.test.ts, tests/goal.test.ts, tests/cli-health.test.ts]
+acceptance:
+  criteria: [A failed amended remediation preserves original failure, has no delivery authority, and cannot satisfy a failed machine gate.]
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/main-remediation.test.ts tests/goal.test.ts tests/cli-health.test.ts
+    - git diff --check

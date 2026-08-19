@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "name": "M2 source-only Integration recovery delivery",
+  "objective": "Implement the accepted recovery slice, preserve the same Task across one daemon restart, verify and review it independently, integrate it serially, and audit the activated source without expanding into build or activation replay.",
+  "items": [
+    { "id": "source-only-recovery", "task": "./01-implementation.yaml", "dependsOn": [] },
+    { "id": "integrated-recovery-audit", "task": "./02-integrated-recovery-audit.yaml", "dependsOn": ["source-only-recovery"] },
+    { "id": "wrong-candidate-safety-audit", "task": "./03-wrong-candidate-safety-audit.yaml", "dependsOn": ["integrated-recovery-audit"] },
+    { "id": "operation-surface-audit", "task": "./04-operation-surface-audit.yaml", "dependsOn": ["wrong-candidate-safety-audit"] }
+  ]
+}

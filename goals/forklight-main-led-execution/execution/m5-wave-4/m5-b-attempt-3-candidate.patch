@@ -1,0 +1,3855 @@
+diff --git a/workspace/DESIGN.md b/workspace/DESIGN.md
+new file mode 100644
+index 0000000..759fc83
+--- /dev/null
++++ b/workspace/DESIGN.md
+@@ -0,0 +1,71 @@
++# ForkLight Hub design
++
++ForkLight is the execution-and-delivery member of the GoalBoard product family. GoalBoard holds
++what a Goal is and how it is complete. This Hub holds what is true now, whether a decision is
++needed, what was retained, and what happens next. The two products share a light, compact, flat
++visual language. They do not share a data model.
++
++## Tokens
++
++- Field `#f6f7f9`, paper `#ffffff`, ink `#171a21`, muted `#5b616c`
++- Action `#1677ff` / `#0958d9` with soft `#e6f0ff`
++- Semantic green `#389e0d`, amber `#d48806`, violet `#722ed1`, red `#cf1322`
++- Cool hairline `#e4e7ec`, radii 4-6px (never above 8px)
++- Type: Inter, SF Pro Text, PingFang SC, Hiragino Sans GB
++- Line icons in the product bar; color always has a text label
++
++The authored default is light. A quiet dark theme exists for preference only and does not restore
++the old teal sidebar.
++
++## Hierarchy
++
++1. Compact product bar: ForkLight identity, Work, one Decision Center, a System disclosure
++2. Work: searchable, resizable Now/History Goal Tree plus one continuous Goal file
++3. Contextual Task detail host (`#fl-detail`) for confirmed actions
++4. System routes (Models, Worker, Main, Delivery, Competition, Insights) stay auxiliary
++
++One `#fl-view` and one detail host remain. Authentication, fetch, privacy projections and confirmed
++mutations are unchanged.
++
++## Components
++
++- **Product bar.** Work and Decision Center are the only primary routes. System holds Models, Worker, Main, Delivery, Limits, Competition and Insights.
++- **Goal Tree.** Presentation-only Now vs History split of canonical hierarchy cards. Search filters
++  names and cues. Width is a bounded CSS variable (`200-420px`) written without `.style` property
++  access. Finished Goals stay in History.
++- **Goal file.** Fixed reading order: desired result; one current-truth sentence; decision needed
++  (link only); phase and checkpoint; current Task with fact, reason and retained work; blockers
++  with next action; delivery/History; folded technical evidence (ids, Runtime, Attempt, Token, cost,
++  the seven-column board).
++- **Decision Center.** Browser grouping of `waiting-user-decision` cards by Goal, plus one
++  parentless group. Each item shows fact, reason, retained work, impact and the existing confirmed
++  Task actions. No stored decision list and no second mutation path.
++- **Task detail.** Existing drawer/sheet. Machine result, retained Candidate, Judge opinion and
++  Main state stay distinct.
++
++## Content rules
++
++Important state uses fact, then reason, then next action. Page-visible copy has no em dash or en
++dash. Raw ids, Runtime, Attempt, Token, cost and logs stay inside explicit disclosures. A
++suggestion is never rendered as an executed action.
++
++## States
++
++Loading, empty, filtered-empty, stale, error, disabled and reduced-motion keep their previous
++honest treatments. Setup blockers appear in the Goal file with the exact missing prerequisite and
++a link to the System surface. Live refresh keeps the DOM when the current route and canonical
++truth are unchanged. Switching Work and Decision Center always replaces `#fl-view`. A real update
++restores Goal/Task selection, tree width/query/scope, scroll, filters, open evidence and
++unsubmitted drafts without stealing focus.
++
++Status labels stay on one line. Goal file and Decision Center narrative uses a readable measure
++(about 68 characters). Accents are hairline, not thick left bars.
++
++## Responsive behavior
++
++Desktop: product bar, Goal Tree and Goal file side by side, detail as a right-hand panel.
++
++At `760px` and below: exactly one primary pane (tree, Goal file, or detail). Opening a Goal starts
++the file at its header and desired-result section. Back restores the tree and its reading position.
++Chrome stays compact (no full-width nav/utils wrap) and the connection status stays visible. Status
++groups stack. Touch targets on the narrow Back and New-work bridge are at least 44px.
+diff --git a/baseline/src/hub/public/app.css b/workspace/src/hub/public/app.css
+index 33c51ec..0b066bb 100644
+--- a/baseline/src/hub/public/app.css
++++ b/workspace/src/hub/public/app.css
+@@ -1,43 +1,42 @@
+ /* ===========================================================
+-   ForkLight Hub - calm comic structure, soft light palette
+-   Alignment: one spacing scale, one border weight, one radius.
+-   Light: muted slate + soft teal (not neon). Dark: same system.
++   ForkLight Hub: GoalBoard-family execution workspace.
++   Field #f6f7f9, paper white, ink #171a21, action #1677ff.
++   Semantic green / amber / violet / red. Hairlines. 3-8px radii.
+    =========================================================== */
+ 
+ :root,
+ [data-theme="light"] {
+-  /* Neutrals - warm slate, low contrast */
+-  --bg: #f4f5f7;
+-  --bg2: #eceef2;
++  --bg: #f6f7f9;
++  --bg2: #eef0f3;
+   --paper: #ffffff;
+-  --ink: #2a3038;
+-  --muted: #6b7380;
++  --ink: #171a21;
++  --muted: #5b616c;
+   --line: #e4e7ec;
+   --line2: #d5dae2;
+-  /* Accent - desaturated teal */
+-  --hi: #3d9b8a;
+-  --hi2: #2f7f71;
+-  --hi-soft: #e8f4f1;
+-  --coral: #c45c4a;
+-  --coral-soft: #f7ecea;
+-  --mint: #3d9b8a;
+-  --mint-soft: #e8f4f1;
+-  --sky: #4a7fb0;
+-  --sky-soft: #eaf1f7;
+-  --nav: #1e252e;
+-  --nav-text: #c8cfd8;
+-  --nav-muted: #7d8794;
+-  --shadow: 0 1px 2px rgba(42, 48, 56, 0.04), 0 1px 3px rgba(42, 48, 56, 0.03);
+-  --shadow-soft: 0 1px 2px rgba(42, 48, 56, 0.03);
+-  --green: #2f7f71;
+-  --green-soft: #e8f4f1;
+-  --yellow: #9a7b2f;
+-  --yellow-soft: #f7f2e6;
+-  --red: #b54a52;
+-  --red-soft: #f7eaea;
+-  /* Geometry - single system */
+-  --radius: 10px;
+-  --radius-sm: 8px;
++  --hi: #1677ff;
++  --hi2: #0958d9;
++  --hi-soft: #e6f0ff;
++  --coral: #d4380d;
++  --coral-soft: #fff2e8;
++  --mint: #389e0d;
++  --mint-soft: #f6ffed;
++  --sky: #1677ff;
++  --sky-soft: #e6f0ff;
++  --violet: #722ed1;
++  --violet-soft: #f9f0ff;
++  --nav: #ffffff;
++  --nav-text: #171a21;
++  --nav-muted: #5b616c;
++  --shadow: 0 1px 2px rgba(23, 26, 33, 0.04);
++  --shadow-soft: 0 1px 1px rgba(23, 26, 33, 0.03);
++  --green: #389e0d;
++  --green-soft: #f6ffed;
++  --yellow: #d48806;
++  --yellow-soft: #fffbe6;
++  --red: #cf1322;
++  --red-soft: #fff1f0;
++  --radius: 6px;
++  --radius-sm: 4px;
+   --border: 1px solid var(--line);
+   --border-strong: 1px solid var(--line2);
+   --gap: 12px;
+@@ -45,42 +44,45 @@
+   --pad: 14px;
+   --pad-sm: 10px;
+   --pad-x: 20px;
+-  --sidebar: 204px;
+-  --font: "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", "SF Pro Display",
+-    system-ui, -apple-system, sans-serif;
++  --sidebar: 0px;
++  --goal-tree-width: 280px;
++  --font: Inter, "SF Pro Text", "PingFang SC", "Hiragino Sans GB",
++    "Noto Sans SC", system-ui, -apple-system, sans-serif;
+   --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+   --ease: cubic-bezier(0.22, 1, 0.36, 1);
+   color-scheme: light;
+ }
+ 
+ [data-theme="dark"] {
+-  --bg: #12161c;
+-  --bg2: #181d25;
+-  --paper: #1a2029;
+-  --ink: #e4e8ee;
+-  --muted: #8b95a3;
+-  --line: #2a323d;
+-  --line2: #384250;
+-  --hi: #4aafa0;
+-  --hi2: #3d9b8a;
+-  --hi-soft: rgba(74, 175, 160, 0.12);
+-  --coral: #d47a6c;
+-  --coral-soft: rgba(212, 122, 108, 0.12);
+-  --mint: #4aafa0;
+-  --mint-soft: rgba(74, 175, 160, 0.1);
+-  --sky: #6a9ec8;
+-  --sky-soft: rgba(106, 158, 200, 0.12);
+-  --nav: #0e1218;
+-  --nav-text: #c8cfd8;
+-  --nav-muted: #6b7582;
+-  --shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+-  --shadow-soft: 0 1px 2px rgba(0, 0, 0, 0.18);
+-  --green: #4aafa0;
+-  --green-soft: rgba(74, 175, 160, 0.12);
+-  --yellow: #c4a55a;
+-  --yellow-soft: rgba(196, 165, 90, 0.12);
+-  --red: #d47a84;
+-  --red-soft: rgba(212, 122, 132, 0.12);
++  --bg: #14161b;
++  --bg2: #1b1e25;
++  --paper: #1d2129;
++  --ink: #eef0f4;
++  --muted: #9aa1ad;
++  --line: #2b303a;
++  --line2: #3a4150;
++  --hi: #3c89ff;
++  --hi2: #1677ff;
++  --hi-soft: rgba(22, 119, 255, 0.14);
++  --coral: #ff7a45;
++  --coral-soft: rgba(212, 56, 13, 0.16);
++  --mint: #73d13d;
++  --mint-soft: rgba(56, 158, 13, 0.14);
++  --sky: #3c89ff;
++  --sky-soft: rgba(22, 119, 255, 0.14);
++  --violet: #b37feb;
++  --violet-soft: rgba(114, 46, 209, 0.16);
++  --nav: #1d2129;
++  --nav-text: #eef0f4;
++  --nav-muted: #9aa1ad;
++  --shadow: 0 1px 2px rgba(0, 0, 0, 0.28);
++  --shadow-soft: 0 1px 1px rgba(0, 0, 0, 0.18);
++  --green: #73d13d;
++  --green-soft: rgba(56, 158, 13, 0.14);
++  --yellow: #ffc53d;
++  --yellow-soft: rgba(212, 136, 6, 0.16);
++  --red: #ff4d4f;
++  --red-soft: rgba(207, 19, 34, 0.16);
+   --border: 1px solid var(--line);
+   --border-strong: 1px solid var(--line2);
+   color-scheme: dark;
+@@ -115,10 +117,10 @@ button:disabled { opacity: 0.42; cursor: not-allowed; }
+   border-radius: 999px;
+ }
+ 
+-/* ── Shell ── */
++/* ── Shell: compact product bar over one workspace ── */
+ .shell {
+   display: grid;
+-  grid-template-columns: var(--sidebar) minmax(0, 1fr);
++  grid-template-rows: auto minmax(0, 1fr);
+   height: 100vh;
+   height: 100dvh;
+   max-height: 100vh;
+@@ -127,121 +129,138 @@ button:disabled { opacity: 0.42; cursor: not-allowed; }
+   background: var(--bg);
+ }
+ 
+-/* ── Sidebar ── */
+-.sidebar {
++.product-bar {
+   display: flex;
+-  flex-direction: column;
+-  gap: 0;
+-  padding: var(--pad-sm);
+-  background: var(--nav);
+-  color: var(--nav-text);
+-  border-right: var(--border);
+-  border-right-color: color-mix(in srgb, var(--nav) 80%, #000);
+-  min-height: 0;
+-  overflow: hidden;
++  align-items: center;
++  gap: 16px;
++  min-height: 52px;
++  padding: 6px 16px;
++  background: var(--paper);
++  color: var(--ink);
++  border-bottom: var(--border);
++  flex-shrink: 0;
+ }
+ .brand {
+   display: flex;
+   align-items: center;
+-  gap: 10px;
+-  padding: 6px 8px 12px;
+-  border-bottom: 1px solid color-mix(in srgb, var(--nav-muted) 28%, transparent);
+-  margin-bottom: 8px;
++  gap: 8px;
+   flex-shrink: 0;
+ }
+ .brand-mark {
+-  width: 32px; height: 32px; border-radius: 8px;
++  width: 28px; height: 28px; border-radius: 6px;
+   display: grid; place-items: center;
+-  font-weight: 800; font-size: 10px; letter-spacing: 0.06em;
+-  color: #0f2a24;
++  color: #fff;
+   background: var(--hi);
+   border: none;
+-  box-shadow: none;
+ }
+-.brand-name { font-weight: 700; font-size: 13.5px; color: #f0f2f5; letter-spacing: -0.02em; }
+-.brand-sub { font-size: 10.5px; color: var(--nav-muted); margin-top: 1px; }
++.brand-mark-icon { display: block; }
++.brand-name { font-weight: 700; font-size: 13.5px; color: var(--ink); letter-spacing: -0.02em; }
++.brand-sub { font-size: 11px; color: var(--muted); margin-top: 1px; }
+ 
+ .nav {
+   display: flex;
+-  flex-direction: column;
+-  gap: 2px;
++  flex-direction: row;
++  align-items: center;
++  gap: 4px;
+   flex: 1;
+-  min-height: 0;
++  min-width: 0;
+   overflow-y: auto;
+   overflow-x: hidden;
+-  padding: 0 2px;
+-}
+-.nav-group-label {
+-  font-size: 10px; font-weight: 700; letter-spacing: 0.08em;
+-  text-transform: uppercase; color: var(--nav-muted);
+-  padding: 12px 10px 4px;
+ }
++.nav-group-label { display: none; }
+ .nav-item {
+-  display: flex; align-items: center; gap: 8px;
+-  width: 100%; text-align: left;
+-  padding: 8px 10px;
++  display: inline-flex; align-items: center; gap: 6px;
++  width: auto; text-align: left;
++  padding: 6px 10px;
+   border: 1px solid transparent;
+-  border-radius: var(--radius-sm);
++  border-radius: 6px;
+   background: transparent;
+-  color: var(--nav-text);
++  color: var(--ink);
+   font-size: 13px; font-weight: 600;
+-  transition: background 0.12s, color 0.12s;
++  min-height: 32px;
+ }
+-.nav-item:hover { background: color-mix(in srgb, #fff 6%, transparent); color: #fff; }
++.nav-item:hover { background: var(--bg2); color: var(--ink); }
+ .nav-item.active {
+-  background: color-mix(in srgb, var(--hi) 16%, transparent);
+-  color: #f5f7f9;
++  background: var(--hi-soft);
++  color: var(--hi2);
+   border-color: transparent;
+-  box-shadow: inset 2px 0 0 var(--hi);
++  box-shadow: none;
+ }
+-.nav-icon { width: 16px; text-align: center; opacity: 0.75; font-size: 12px; flex-shrink: 0; }
++.nav-icon { width: 14px; display: grid; place-items: center; opacity: 0.8; flex-shrink: 0; }
++.nav-icon svg { display: block; }
+ 
+-.sidebar-foot {
+-  margin-top: auto;
+-  padding-top: 10px;
+-  border-top: 1px solid color-mix(in srgb, var(--nav-muted) 28%, transparent);
+-  display: flex; flex-direction: column; gap: var(--gap-sm);
++.system-menu { position: relative; }
++.system-menu > summary { list-style: none; cursor: pointer; }
++.system-menu > summary::-webkit-details-marker { display: none; }
++.system-menu-list {
++  position: absolute;
++  top: calc(100% + 4px);
++  left: 0;
++  min-width: 168px;
++  padding: 4px;
++  background: var(--paper);
++  border: var(--border);
++  border-radius: 6px;
++  box-shadow: var(--shadow);
++  z-index: 20;
++  display: flex;
++  flex-direction: column;
++}
++.system-menu-list .nav-item { width: 100%; }
++.system-menu.is-active > summary {
++  background: var(--bg2);
++  color: var(--ink);
++}
++
++.product-utils {
++  display: flex;
++  align-items: center;
++  gap: 8px;
+   flex-shrink: 0;
++  margin-left: auto;
++}
++.mobile-back {
++  min-height: 32px;
+ }
+ .lang-switch, .theme-switch {
+   display: flex; align-items: center; gap: 4px; flex-wrap: wrap;
+-  padding: 5px 6px;
+-  border-radius: var(--radius-sm);
+-  border: 1px solid color-mix(in srgb, var(--nav-muted) 30%, transparent);
+-  background: color-mix(in srgb, #000 15%, transparent);
++  padding: 3px 6px;
++  border-radius: 6px;
++  border: var(--border);
++  background: var(--bg);
+ }
+ .lang-label, .theme-label {
+-  font-size: 10.5px; color: var(--nav-muted); margin-right: 2px; font-weight: 600;
++  font-size: 10.5px; color: var(--muted); margin-right: 2px; font-weight: 600;
+ }
+ .lang-btn, .theme-btn {
+   appearance: none;
+   border: 1px solid transparent;
+   background: transparent;
+-  color: var(--nav-text);
+-  border-radius: 6px;
++  color: var(--ink);
++  border-radius: 4px;
+   padding: 3px 8px;
+   font-size: 11.5px; font-weight: 600;
+   min-height: 26px;
+ }
+ .lang-btn:hover, .theme-btn:hover {
+-  color: #fff;
+-  background: color-mix(in srgb, #fff 6%, transparent);
++  color: var(--ink);
++  background: var(--bg2);
+ }
+ .lang-btn.active, .theme-btn.active {
+-  background: color-mix(in srgb, var(--hi) 22%, transparent);
+-  border-color: color-mix(in srgb, var(--hi) 40%, transparent);
+-  color: #f0f2f5;
++  background: var(--hi-soft);
++  border-color: color-mix(in srgb, var(--hi) 30%, var(--line));
++  color: var(--hi2);
+ }
+ 
+ .conn-pill {
+   display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+-  padding: 8px 10px;
+-  border-radius: var(--radius-sm);
+-  border: 1px solid color-mix(in srgb, var(--nav-muted) 30%, transparent);
++  padding: 4px 8px;
++  border-radius: 6px;
++  border: var(--border);
+   font-size: 10.5px;
+-  color: var(--nav-text);
++  color: var(--muted);
+   line-height: 1.3;
+-  background: color-mix(in srgb, #000 12%, transparent);
++  background: var(--bg);
+ }
+ 
+ /* ── Workspace: shared horizontal padding for alignment ── */
+@@ -290,8 +309,7 @@ button:disabled { opacity: 0.42; cursor: not-allowed; }
+ }
+ .view {
+   min-width: 0;
+-  max-width: 1280px;
+-  animation: pop 0.16s var(--ease);
++  max-width: none;
+ }
+ @keyframes pop {
+   from { opacity: 0; transform: translateY(3px); }
+@@ -450,6 +468,7 @@ button:focus-visible,
+   background: var(--bg2);
+   color: var(--muted);
+   vertical-align: middle;
++  white-space: nowrap;
+ }
+ .badge-ok { background: var(--hi-soft); color: var(--hi2); }
+ .badge-warn { background: var(--yellow-soft); color: var(--yellow); }
+@@ -1264,20 +1283,27 @@ button:focus-visible,
+ }
+ .workbench-layout {
+   display: grid;
+-  grid-template-columns: minmax(208px, 250px) minmax(0, 1fr);
+-  gap: 18px;
+-  align-items: start;
++  grid-template-columns: var(--goal-tree-width, 280px) 8px minmax(0, 1fr);
++  gap: 0;
++  align-items: stretch;
+   min-width: 0;
++  min-height: calc(100dvh - 180px);
+ }
+ .work-portfolio {
+   min-width: 0;
++  width: var(--goal-tree-width, 280px);
+   max-height: min(720px, calc(100dvh - 180px));
+   overflow-y: auto;
+   scrollbar-gutter: stable;
+   border: var(--border);
+-  border-radius: var(--radius);
++  border-radius: 6px;
+   background: var(--paper);
+-  padding: 14px 10px 10px;
++  padding: 12px 10px 10px;
++}
++.goal-tree {
++  min-width: 0;
++  width: var(--goal-tree-width, 280px);
++  max-height: min(720px, calc(100dvh - 180px));
+ }
+ .work-portfolio-title {
+   padding: 0 6px;
+@@ -2548,8 +2574,7 @@ tr.clickable:focus-visible { outline: 2px solid var(--hi); outline-offset: -2px;
+   justify-content: space-between;
+   padding: 12px 0 14px;
+   margin-bottom: 8px;
+-  background: color-mix(in srgb, var(--bg) 92%, transparent);
+-  backdrop-filter: blur(8px);
++  background: var(--bg);
+   border-bottom: var(--border);
+ }
+ @keyframes detail-in {
+@@ -4033,7 +4058,7 @@ tr.clickable:focus-visible { outline: 2px solid var(--hi); outline-offset: -2px;
+   padding: var(--pad-sm) var(--pad);
+   margin-bottom: var(--gap);
+   box-shadow: var(--shadow-soft);
+-  border-left: 3px solid var(--hi);
++  border-left: 1px solid var(--hi);
+ }
+ .guide-step {
+   font-size: 10.5px; font-weight: 700; letter-spacing: 0.06em;
+@@ -5069,10 +5094,10 @@ tr.clickable:focus-visible { outline: 2px solid var(--hi); outline-offset: -2px;
+ }
+ /* Conclusion card */
+ .mr-conclusion {
+-  border-left: 3px solid var(--hi);
++  border-left: 1px solid var(--hi);
+ }
+ .mr-conclusion.mr-no-result {
+-  border-left: 3px solid var(--yellow);
++  border-left: 1px solid var(--yellow);
+ }
+ .mr-conclusion-title {
+   font-size: 14px;
+@@ -5418,7 +5443,7 @@ tr.clickable:focus-visible { outline: 2px solid var(--hi); outline-offset: -2px;
+   color: var(--yellow);
+ }
+ .delivery-invalid-row {
+-  border-left: 3px solid var(--red);
++  border-left: 1px solid var(--red);
+   padding-left: 8px;
+ }
+ .delivery-error-line {
+@@ -6053,9 +6078,9 @@ tr.clickable:focus-visible { outline: 2px solid var(--hi); outline-offset: -2px;
+   max-width: 100%;
+ }
+ .workbench-layout {
+-  grid-template-columns: minmax(196px, 224px) minmax(0, 1fr);
+-  gap: 20px;
+-  align-items: start;
++  grid-template-columns: var(--goal-tree-width, 280px) 8px minmax(0, 1fr);
++  gap: 0;
++  align-items: stretch;
+ }
+ .work-focused-column {
+   display: grid;
+@@ -6274,7 +6299,6 @@ tr.clickable:focus-visible { outline: 2px solid var(--hi); outline-offset: -2px;
+ }
+ .work-card-status {
+   flex: none;
+-  max-width: 42%;
+   padding: 2px 5px;
+   border-radius: 4px;
+   color: var(--muted);
+@@ -6283,7 +6307,7 @@ tr.clickable:focus-visible { outline: 2px solid var(--hi); outline-offset: -2px;
+   font-weight: 750;
+   line-height: 1.25;
+   text-align: right;
+-  overflow-wrap: anywhere;
++  white-space: nowrap;
+ }
+ .work-card-status.tone-active { color: var(--hi2); background: var(--hi-soft); }
+ .work-card-status.tone-attention { color: var(--yellow); background: var(--yellow-soft); }
+@@ -6510,9 +6534,6 @@ tr.clickable:focus-visible { outline: 2px solid var(--hi); outline-offset: -2px;
+   .work-card-head {
+     align-items: flex-start;
+   }
+-  .work-card-status {
+-    max-width: 47%;
+-  }
+ }
+ 
+ /* --- FL-113: hierarchy-first Work composition ------------------------- */
+@@ -7101,3 +7122,243 @@ tr.clickable:focus-visible { outline: 2px solid var(--hi); outline-offset: -2px;
+     padding: 9px;
+   }
+ }
++
++/* Goal Tree, continuous Goal file, Decision Center, 760px single pane */
++.goal-tree-search {
++  margin: 10px 6px 8px;
++}
++.goal-tree-search-input {
++  width: 100%;
++  min-height: 32px;
++  border: var(--border);
++  border-radius: 4px;
++  background: var(--bg);
++  padding: 4px 8px;
++}
++.goal-tree-scopes {
++  display: flex;
++  gap: 4px;
++  padding: 0 6px 8px;
++}
++.goal-tree-scope {
++  flex: 1;
++  min-height: 32px;
++  border: var(--border);
++  border-radius: 4px;
++  background: var(--bg);
++  color: var(--ink);
++  font-weight: 600;
++}
++.goal-tree-scope.is-selected {
++  background: var(--hi-soft);
++  color: var(--hi2);
++  border-color: color-mix(in srgb, var(--hi) 30%, var(--line));
++}
++.goal-tree-list {
++  min-width: 0;
++}
++.goal-tree-resize {
++  width: 8px;
++  cursor: col-resize;
++  align-self: stretch;
++  background: transparent;
++  border: 0;
++}
++.goal-tree-resize:hover,
++.goal-tree-resize.is-dragging,
++.goal-tree-resize:focus-visible {
++  background: color-mix(in srgb, var(--hi) 28%, transparent);
++  outline: none;
++}
++.work-focused-column {
++  min-width: 0;
++  overflow: auto;
++}
++.goal-file,
++.work-focus.goal-file {
++  display: flex;
++  flex-direction: column;
++  gap: 14px;
++  background: var(--paper);
++  border: var(--border);
++  border-radius: 6px;
++  padding: 16px 18px 20px;
++}
++.goal-file-section {
++  min-width: 0;
++  padding-bottom: 12px;
++  border-bottom: var(--border);
++}
++.goal-file-section:last-of-type { border-bottom: 0; }
++.goal-file-heading {
++  font-size: 12px;
++  font-weight: 700;
++  color: var(--muted);
++  margin-bottom: 6px;
++}
++.goal-file-lead,
++.goal-file-fact,
++.goal-file-reason,
++.goal-file-retained,
++.goal-file-next,
++.goal-file-blocker {
++  max-width: 68ch;
++  overflow-wrap: anywhere;
++  line-height: 1.45;
++}
++.goal-file-lead.is-attention,
++.goal-file-blocker {
++  color: var(--ink);
++}
++.goal-file-task-facts {
++  display: grid;
++  gap: 4px;
++  margin-top: 8px;
++}
++.goal-file-more-tasks {
++  display: grid;
++  gap: 8px;
++  margin-top: 8px;
++}
++.goal-file-setup-blocker {
++  display: grid;
++  gap: 6px;
++  margin-top: 8px;
++}
++.goal-file-evidence {
++  border-top: var(--border);
++  padding-top: 8px;
++}
++.goal-file-evidence > summary {
++  min-height: 32px;
++  cursor: pointer;
++  font-weight: 650;
++}
++.decision-center {
++  display: grid;
++  gap: 16px;
++  max-width: 880px;
++}
++.decision-center-title { font-size: 20px; }
++.decision-center-hint { color: var(--muted); overflow-wrap: anywhere; }
++.decision-group {
++  background: var(--paper);
++  border: var(--border);
++  border-radius: 6px;
++  padding: 12px 14px;
++  display: grid;
++  gap: 10px;
++}
++.decision-group-title { font-size: 15px; }
++.decision-item {
++  border-top: var(--border);
++  padding-top: 10px;
++  display: grid;
++  gap: 4px;
++}
++.decision-item-title { font-size: 14px; }
++.decision-item-fact,
++.decision-item-reason,
++.decision-item-retained,
++.decision-item-impact {
++  max-width: 68ch;
++  overflow-wrap: anywhere;
++  color: var(--ink);
++}
++.decision-item-actions {
++  display: flex;
++  flex-wrap: wrap;
++  gap: 8px;
++  margin-top: 6px;
++}
++.mobile-back:focus-visible,
++.goal-tree-scope:focus-visible,
++.goal-tree-search-input:focus-visible,
++.nav-item:focus-visible,
++.system-summary:focus-visible {
++  outline: 2px solid var(--hi);
++  outline-offset: 2px;
++}
++
++@media (max-width: 760px) {
++  .product-bar {
++    flex-wrap: wrap;
++    align-items: center;
++    gap: 4px 8px;
++    min-height: 44px;
++    padding: 6px 8px;
++  }
++  .brand-sub { display: none; }
++  .nav {
++    flex: 1 1 auto;
++    flex-basis: auto;
++    overflow-x: auto;
++    overflow-y: hidden;
++  }
++  .product-utils {
++    flex: 1 1 auto;
++    width: auto;
++    justify-content: flex-end;
++    flex-wrap: nowrap;
++    margin-left: auto;
++    gap: 4px;
++  }
++  .theme-label, .lang-label { display: none; }
++  .conn-pill { flex-shrink: 0; }
++  .topbar { padding: 8px 10px 6px; }
++  .page-title { font-size: 16px; }
++  .page-sub { display: none; }
++  .mobile-back { min-height: 44px; }
++  .workbench-layout {
++    display: block;
++    min-height: 0;
++  }
++  .goal-tree-resize { display: none; }
++  .work-portfolio,
++  .goal-tree {
++    width: 100%;
++    max-height: calc(100dvh - 132px);
++    overflow-y: auto;
++  }
++  .work-focused-column,
++  .goal-file {
++    width: 100%;
++    max-height: none;
++  }
++  .workbench-layout[data-mobile-pane="tree"] .work-focused-column,
++  .workbench-layout[data-mobile-pane="file"] .goal-tree,
++  .workbench-layout[data-mobile-pane="file"] .work-portfolio,
++  .workbench-layout[data-mobile-pane="detail"] .goal-tree,
++  .workbench-layout[data-mobile-pane="detail"] .work-portfolio,
++  .workbench-layout[data-mobile-pane="detail"] .work-focused-column {
++    display: none;
++  }
++  body[data-mobile-pane="detail"] #fl-detail {
++    width: 100vw;
++    max-width: 100vw;
++    left: 0;
++  }
++  .work-col-grid {
++    display: flex;
++    flex-direction: column;
++    gap: 8px;
++    min-width: 0;
++  }
++  .work-col-head { display: none; }
++  .work-cell-head { display: block; }
++  .work-board { overflow-x: visible; }
++  .work-context-new-entry {
++    display: inline-flex;
++    min-height: 44px;
++  }
++}
++
++@media (prefers-reduced-motion: reduce) {
++  .goal-tree-resize,
++  .nav-item,
++  .goal-tree-scope,
++  .decision-item {
++    transition: none;
++  }
++}
++/* Goal-first composition ends here. */
+diff --git a/baseline/src/hub/public/app.js b/workspace/src/hub/public/app.js
+index 339da3e..645f5f3 100644
+--- a/baseline/src/hub/public/app.js
++++ b/workspace/src/hub/public/app.js
+@@ -446,6 +446,10 @@ var S = {
+   /* FL-112B: one semantic portfolio selection. This is presentation state
+    * only; Core remains the sole owner of lifecycle and ancestry truth. */
+   workSelection: null,
++  workTreeQuery: "",
++  workTreeWidth: 280,
++  workTreeScope: "now",
++  workMobilePane: "tree",
+   /* FL-112E3: the viewed phase is browser-only navigation. It is kept beside
+    * the selected Goal so a poll can rebuild the board without changing which
+    * phase the user is reading. No phase click calls a mutation or refresh. */
+@@ -541,8 +545,17 @@ var WORK_READING_CONTEXT_MAX_COLLAPSE = 48;
+ var WORK_READING_CONTEXT_DISCLOSURES = [
+   "finishedOpen", "advancedOpen", "expertDetailsOpen", "goalSummaryOpen",
+   "filtersOpen", "oneOffCurrentOpen", "oneOffAttentionOpen", "oneOffHistoryOpen",
+-  "shapeGuideOpen", "pageStoryOpen", "outcomeAdvancedOpen"
++  "shapeGuideOpen", "pageStoryOpen", "outcomeAdvancedOpen", "goalFileEvidenceOpen"
+ ];
++var SYSTEM_TABS = ["model", "worker", "mains", "delivery", "competitions", "stats", "limits"];
++var GOAL_TREE_WIDTH_MIN = 200;
++var GOAL_TREE_WIDTH_MAX = 420;
++var GOAL_TREE_WIDTH_DEFAULT = 280;
++var GOAL_FILE_CURRENT_CODES = [
++  "waiting-user-decision", "running", "waiting-verification", "ready", "not-started"
++];
++var GOAL_FILE_BLOCKED_CODES = ["stopped-failed"];
++var GOAL_FILE_HISTORY_CODES = ["completed"];
+ var WORK_READING_CONTEXT_TABS = [
+   "overview", "instruction", "process", "result", "checks", "actions", "more"
+ ];
+@@ -899,6 +912,7 @@ function metric(label, value, hint){
+ var PAGE_DEPS = {
+   overview:      { tasks: true, boards: true, competitions: true, goals: true, sample: true, selfUpgradeEvidence: true },
+   work:          { workHierarchy: true, intakes: true },
++  decisions:     { workHierarchy: true },
+   tasks:         { tasks: true },
+   plans:         { boards: true },
+   goals:         { goals: true },
+@@ -1222,6 +1236,7 @@ function setPageChrome(){
+   if(titleEl) titleEl.textContent = p.title;
+   if(subEl) subEl.textContent = p.sub;
+   applyChromeI18n();
++  updateProductNav();
+ }
+ function showDisconnected(){
+   viewEl.replaceChildren(stateMsg("disconnected", t("reconnecting")));
+@@ -4802,6 +4817,342 @@ function workResolveSelection(view, current){
+   var requested = current && workMakeSelection(current.kind, current.id);
+   return workSelectionExists(view, requested) ? requested : workDefaultSelection(view);
+ }
++function workNormalizeTreeWidth(px){
++  var n = typeof px === "number" ? px : parseInt(px, 10);
++  if(!isFinite(n)) return 280;
++  if(n < 200) return 200;
++  if(n > 420) return 420;
++  return Math.round(n);
++}
++function workIsNarrowViewport(){
++  try {
++    return !!(window.matchMedia && window.matchMedia("(max-width: 760px)").matches);
++  } catch(_){
++    return false;
++  }
++}
++function workNextMobilePane(current, action){
++  if(action === "open-file") return "file";
++  if(action === "open-detail") return "detail";
++  if(action === "open-tree") return "tree";
++  if(action === "back"){
++    if(current === "detail") return "file";
++    if(current === "file") return "tree";
++    return "tree";
++  }
++  return current === "file" || current === "detail" ? current : "tree";
++}
++function workTreeItemMatches(item, query){
++  if(!query) return true;
++  var q = String(query).toLocaleLowerCase();
++  var parts = [item && item.name, item && item.objective, item && item.cue, item && item.status];
++  return parts.filter(Boolean).join(" ").toLocaleLowerCase().indexOf(q) >= 0;
++}
++function composeGoalTreeModel(view, query, scope){
++  query = String(query || "").trim();
++  scope = scope === "history" ? "history" : "now";
++  var now = [];
++  var history = [];
++  (view && view.goals || []).forEach(function(goal){
++    var item = {
++      kind: "goal",
++      id: String(goal.goalId || ""),
++      name: goal.name || "",
++      objective: goal.objective || "",
++      status: goal.status || "",
++      terminal: workGoalIsTerminalStatusForSelection(goal),
++      decisionCount: workGoalDecisionCount(goal),
++      taskCount: workGoalTaskCount(goal),
++      cue: workPortfolioCue(goal.summary || {}, {
++        completedNoDecision: goal.status === "completed" && workGoalDecisionCount(goal) === 0
++      })
++    };
++    if(!item.id) return;
++    if(item.terminal) history.push(item);
++    else now.push(item);
++  });
++  (view && view.independentPlans || []).forEach(function(plan){
++    var live = !workLaneIsTerminalHistory(plan.columns);
++    var item = {
++      kind: "plan",
++      id: String(plan.planId || ""),
++      name: plan.name || "",
++      objective: plan.objective || "",
++      status: "",
++      terminal: !live,
++      decisionCount: ((plan.columns && plan.columns["waiting-user-decision"]) || []).length,
++      taskCount: workPlanTaskCount(plan),
++      cue: workPortfolioCue(plan.summary || {})
++    };
++    if(!item.id) return;
++    if(live) now.push(item);
++    else history.push(item);
++  });
++  if(view && view.oneOffTasks){
++    var oneOffLive = !workLaneIsTerminalHistory(view.oneOffTasks.columns);
++    var item = {
++      kind: "one-off",
++      id: "inbox",
++      name: "",
++      objective: "",
++      status: "",
++      terminal: !oneOffLive,
++      decisionCount: ((view.oneOffTasks.columns && view.oneOffTasks.columns["waiting-user-decision"]) || []).length,
++      taskCount: workOneOffCardCount(view),
++      cue: workPortfolioCue(view.oneOffTasks.summary || {})
++    };
++    if(oneOffLive) now.push(item);
++    else history.push(item);
++  }
++  var source = scope === "history" ? history : now;
++  return {
++    now: now,
++    history: history,
++    scope: scope,
++    query: query,
++    visible: source.filter(function(entry){ return workTreeItemMatches(entry, query); })
++  };
++}
++function composeGoalFileModel(goal, viewedPlan){
++  var decisionCount = workGoalDecisionCount(goal);
++  var viewed = viewedPlan || workGoalCurrentPlan(goal);
++  var currentIndex = viewed && goal ? (goal.plans || []).indexOf(viewed) : -1;
++  if(currentIndex < 0 && viewed && goal){
++    currentIndex = (goal.plans || []).findIndex(function(plan){
++      return String(plan.planId || "") === String(viewed.planId || "");
++    });
++  }
++  var phaseState = currentIndex >= 0 ? workGoalPhaseState(goal, currentIndex) : "unknown";
++  var currentCards = [];
++  var blockedCards = [];
++  var historyCards = [];
++  if(viewed && viewed.columns){
++    GOAL_FILE_CURRENT_CODES.forEach(function(code){
++      ((viewed.columns[code]) || []).forEach(function(card){ currentCards.push(card); });
++    });
++    GOAL_FILE_BLOCKED_CODES.forEach(function(code){
++      ((viewed.columns[code]) || []).forEach(function(card){ blockedCards.push(card); });
++    });
++    GOAL_FILE_HISTORY_CODES.forEach(function(code){
++      ((viewed.columns[code]) || []).forEach(function(card){ historyCards.push(card); });
++    });
++  }
++  var currentTask = currentCards[0] || blockedCards[0] || null;
++  var blockers = [];
++  if(workLaneHasRealBlocker(goal && goal.summary && goal.summary.blocker, goal && goal.summary && goal.summary.blockerMessage)){
++    blockers.push({
++      source: "goal",
++      text: workNarrativeText(goal.summary.blockerMessage, goal.summary.blocker)
++    });
++  }
++  function pushCardBlocker(card){
++    var fact = workNarrativeText(card.whatCompletedMessage, card.whatCompleted || "");
++    var next = workLaneNextActionText(card, {});
++    var label = "";
++    (card.blockers || []).forEach(function(blocker){
++      if(!label) label = workSafeCardBlockerLabel(card, blocker);
++    });
++    if(!fact && !next && !label) return;
++    blockers.push({
++      source: "task",
++      taskId: card.taskId,
++      text: label || next || fact,
++      fact: fact,
++      reason: label || next,
++      retained: fact,
++      next: next
++    });
++  }
++  blockedCards.forEach(pushCardBlocker);
++  currentCards.concat(historyCards).forEach(function(card){
++    (card.blockers || []).forEach(function(blocker){
++      var label = workSafeCardBlockerLabel(card, blocker);
++      if(label) blockers.push({ source: "task", taskId: card.taskId, text: label });
++    });
++  });
++  return {
++    desiredResult: (goal && goal.objective) || "",
++    currentTruth: workSummaryWhat(goal && goal.summary),
++    decisionNeeded: decisionCount > 0,
++    decisionCount: decisionCount,
++    phase: viewed || null,
++    phaseState: phaseState,
++    currentTask: currentTask,
++    currentCards: currentCards,
++    blockedCards: blockedCards,
++    historyCards: historyCards,
++    blockers: blockers,
++    terminal: workGoalIsTerminalStatusForSelection(goal),
++    status: (goal && goal.status) || "",
++    nextAction: workSummaryNext(goal && goal.summary, {
++      completedNoDecision: !!(goal && goal.status === "completed" && decisionCount === 0)
++    }),
++    sectionOrder: [
++      "desired-result", "current-truth", "decision", "phase",
++      "current-task", "blockers", "delivery", "evidence"
++    ]
++  };
++}
++function collectDecisionGroups(view){
++  var byGoal = {};
++  var order = [];
++  var parentless = [];
++  function add(card, goalId, goalName){
++    if(!card || card.column !== "waiting-user-decision") return;
++    var item = {
++      taskId: card.taskId,
++      name: card.name || "",
++      fact: workNarrativeText(card.whatCompletedMessage, card.whatCompleted || ""),
++      reason: workNarrativeText(card.nextActionMessage, card.nextAction || ""),
++      retained: workNarrativeText(card.whatCompletedMessage, card.whatCompleted || ""),
++      impact: workPlacementLabel(card.placementReason),
++      card: card,
++      goalId: goalId || "",
++      goalName: goalName || ""
++    };
++    if(!goalId){
++      parentless.push(item);
++      return;
++    }
++    if(!byGoal[goalId]){
++      byGoal[goalId] = { goalId: goalId, goalName: goalName || "", items: [] };
++      order.push(goalId);
++    }
++    byGoal[goalId].items.push(item);
++  }
++  (view && view.goals || []).forEach(function(goal){
++    (goal.plans || []).forEach(function(plan){
++      ((plan.columns && plan.columns["waiting-user-decision"]) || []).forEach(function(card){
++        add(card, String(goal.goalId || ""), goal.name || "");
++      });
++    });
++  });
++  (view && view.independentPlans || []).forEach(function(plan){
++    ((plan.columns && plan.columns["waiting-user-decision"]) || []).forEach(function(card){
++      var crumb = card.breadcrumb || {};
++      add(card, crumb.goalId ? String(crumb.goalId) : "", crumb.goalName || "");
++    });
++  });
++  if(view && view.oneOffTasks){
++    ((view.oneOffTasks.columns && view.oneOffTasks.columns["waiting-user-decision"]) || []).forEach(function(card){
++      var crumb = card.breadcrumb || {};
++      add(card, crumb.goalId ? String(crumb.goalId) : "", crumb.goalName || "");
++    });
++  }
++  var groups = order.map(function(id){ return byGoal[id]; });
++  var total = parentless.length;
++  groups.forEach(function(group){ total += group.items.length; });
++  return { groups: groups, parentless: parentless, total: total };
++}
++function collectSetupBlockers(){
++  var hub = S.hub || {};
++  var daemon = hub.daemon || {};
++  var mains = hub.mains || [];
++  var models = (hub.modelCatalog && hub.modelCatalog.models) || [];
++  var workers = (hub.workerProfiles && hub.workerProfiles.profiles) || [];
++  var items = [];
++  if(!models.length){
++    items.push({ reason: t("readyModels"), next: "model", action: t("navModels") });
++  }
++  if(!workers.length){
++    items.push({ reason: t("readyWorkers"), next: "worker", action: t("navWorkers") });
++  }
++  var mainReady = mains.some(function(m){
++    return (m.plugin && m.plugin.installed) || (m.mcp && m.mcp.installed) || (m.skill && m.skill.installed);
++  });
++  if(!mainReady){
++    items.push({ reason: t("readyMain"), next: "mains", action: t("navMain") });
++  }
++  if(!(daemon.running === true || daemon.pid != null)){
++    items.push({ reason: t("readyDaemon"), next: "work", action: t("ovDaemon") });
++  }
++  return items;
++}
++function workApplyTreeWidth(px){
++  var width = workNormalizeTreeWidth(px);
++  S.workTreeWidth = width;
++  var tree = viewEl && viewEl.querySelector('[data-fl-role="goal-tree"]');
++  if(tree) tree.setAttribute("style", "--goal-tree-width:" + width + "px");
++  var layout = viewEl && viewEl.querySelector('[data-fl-role="workbench-layout"]');
++  if(layout) layout.setAttribute("style", "--goal-tree-width:" + width + "px");
++  return width;
++}
++function workApplyMobilePane(pane){
++  S.workMobilePane = pane === "file" || pane === "detail" ? pane : "tree";
++  var layout = viewEl && viewEl.querySelector('[data-fl-role="workbench-layout"]');
++  if(layout) layout.setAttribute("data-mobile-pane", S.workMobilePane);
++  if(document && document.body){
++    document.body.setAttribute("data-mobile-pane", S.workMobilePane);
++    document.body.setAttribute("data-hub-tab", S.tab || "work");
++  }
++  workUpdateMobileBack();
++}
++/* Narrow Goal-file entry must start at the Goal header and result, not at the
++ * leftover tree/page scroll. Background polls keep restore; only a deliberate
++ * open-file action calls this. */
++function workApplyGoalFileStart(){
++  if(!workIsNarrowViewport()) return;
++  if(!S || S.workMobilePane !== "file") return;
++  try {
++    var content = workContentScrollEl();
++    if(content){
++      content.scrollTop = 0;
++      content.scrollLeft = 0;
++    }
++    var fileHost = viewEl && viewEl.querySelector('[data-fl-role="goal-file-host"]');
++    if(fileHost) fileHost.scrollTop = 0;
++    var focused = viewEl && viewEl.querySelector('[data-fl-role="work-focus"]');
++    if(focused && typeof focused.scrollIntoView === "function"){
++      try { focused.scrollIntoView({ block: "start", inline: "nearest" }); }
++      catch(_){
++        try { focused.scrollIntoView(); } catch(__){}
++      }
++    }
++  } catch(_){}
++}
++function workUpdateMobileBack(){
++  var btn = document.getElementById("fl-mobile-back");
++  if(!btn) return;
++  var narrow = workIsNarrowViewport();
++  var show = false;
++  if(narrow && S.detail) show = true;
++  else if(narrow && (S.tab || "work") === "work" && S.workMobilePane !== "tree") show = true;
++  else if(narrow && S.tab === "decisions" && S.detail) show = true;
++  btn.hidden = !show;
++}
++function workMobileBack(){
++  if(S.detail){
++    hideDetail();
++    workApplyMobilePane(workNextMobilePane("detail", "back"));
++    return;
++  }
++  workApplyMobilePane(workNextMobilePane(S.workMobilePane, "back"));
++  /* Returning to the tree must not leave the page scrolled to the Goal file.
++   * The tree keeps its own reading position on [data-fl-role="goal-tree"]. */
++  if(S.workMobilePane === "tree" && workIsNarrowViewport()){
++    try {
++      var content = workContentScrollEl();
++      if(content){
++        content.scrollTop = 0;
++        content.scrollLeft = 0;
++      }
++    } catch(_){}
++  }
++}
++function updateProductNav(){
++  var effective = S.tab || "work";
++  $$("#fl-tabs [data-tab]").forEach(function(b){
++    var tab = b.getAttribute("data-tab");
++    var active = tab === effective
++      || (tab === "work" && effective !== "work" && LEGACY_TAB_REDIRECT[effective] === "work");
++    b.classList.toggle("active", active);
++  });
++  var system = document.getElementById("fl-system-menu");
++  if(system){
++    system.classList.toggle("is-active", SYSTEM_TABS.indexOf(effective) >= 0);
++  }
++  workUpdateMobileBack();
++}
+ /* FL-112E9: apply a pending created-work navigation intent against the
+  * refreshed canonical hierarchy only. Goal opens its Goal workspace; a
+  * standalone Plan opens its Plan workspace; a parentless Task selects
+@@ -4876,7 +5227,15 @@ function workOpenCreatedTaskDrawer(view){
+ }
+ function workSelectWorkspace(kind, id){
+   var next = workMakeSelection(kind, id);
+-  if(!next || workSelectionEqual(S.workSelection, next)) return;
++  if(!next) return;
++  if(workSelectionEqual(S.workSelection, next)){
++    if(workIsNarrowViewport() && S.workMobilePane !== "file" && S.workMobilePane !== "detail"){
++      workApplyMobilePane(workNextMobilePane(S.workMobilePane || "tree", "open-file"));
++      workApplyGoalFileStart();
++      workScheduleReadingContextSave();
++    }
++    return;
++  }
+   S.workSelection = next;
+   workBoardFocusRequest = { key: workSelectionKey(next) };
+   if(next.kind === "goal"){
+@@ -4886,17 +5245,17 @@ function workSelectWorkspace(kind, id){
+   workActionChooserReset();
+   workPendingHandoffReset();
+   hideDetail();
++  if(workIsNarrowViewport()) workApplyMobilePane(workNextMobilePane(S.workMobilePane, "open-file"));
+   render();
+-  /* On a stacked narrow layout, the portfolio can contain a long Finished
+-   * history. A deliberate selection should reveal the selected workspace,
+-   * while background refreshes continue to preserve the reader's position. */
++  /* On a stacked narrow layout, a deliberate selection opens the Goal file
++   * pane at its header and result. Background refreshes keep the position. */
+   try {
+-    if(window.matchMedia && window.matchMedia("(max-width: 900px)").matches){
++    if(workIsNarrowViewport()){
++      workApplyGoalFileStart();
+       var focused = viewEl && viewEl.querySelector('[data-fl-role="work-focus"]');
+       if(focused){
+         focused.setAttribute("tabindex", "-1");
+         try { focused.focus({ preventScroll: true }); } catch(_){ focused.focus(); }
+-        focused.scrollIntoView({ block: "start" });
+       }
+     }
+   } catch(_){}
+@@ -6380,35 +6739,153 @@ function renderWorkGoalSummary(goal, decisionCount){
+   });
+   return details;
+ }
++function renderGoalFileSection(role, title, body, extraClass){
++  var section = h("section", "goal-file-section" + (extraClass ? " " + extraClass : ""));
++  section.setAttribute("data-fl-role", role);
++  if(title) section.appendChild(h("h3", "goal-file-heading", title));
++  if(body) section.appendChild(body);
++  return section;
++}
++function renderGoalFileTaskLine(card){
++  var wrap = h("div", "goal-file-task");
++  wrap.appendChild(renderWorkCard(card));
++  var facts = h("div", "goal-file-task-facts");
++  var fact = workNarrativeText(card.whatCompletedMessage, card.whatCompleted || "");
++  if(fact) facts.appendChild(h("p", "goal-file-fact", t("goalFileFact", { text: fact })));
++  var reason = workCardPrimaryLine(card);
++  if(reason) facts.appendChild(h("p", "goal-file-reason", t("goalFileReason", { text: reason })));
++  var retained = workNarrativeText(card.whatCompletedMessage, card.whatCompleted || "");
++  if(retained) facts.appendChild(h("p", "goal-file-retained", t("goalFileRetained", { text: retained })));
++  if(facts.childNodes.length) wrap.appendChild(facts);
++  return wrap;
++}
+ function renderWorkFocusedGoal(goal){
+-  var focus = h("section", "work-focus");
++  var focus = h("section", "work-focus goal-file");
+   focus.setAttribute("data-fl-role", "work-focus");
+   focus.setAttribute("data-workspace-kind", "goal");
+   focus.setAttribute("data-workspace-id", String(goal.goalId || ""));
++  var viewedPlan = workGoalViewedPlan(goal) || workGoalCurrentPlan(goal);
++  var model = composeGoalFileModel(goal, viewedPlan);
+   var header = h("header", "work-focus-header");
+   var titleRow = h("div", "work-focus-title-row");
+   titleRow.appendChild(h("span", "work-focus-type", t("workGoalType")));
+   titleRow.appendChild(h("h2", "work-focus-title", goal.name || t("workUntitledGoal")));
+   if(goal.status) titleRow.appendChild(badge(goal.status));
+   header.appendChild(titleRow);
+-  if(goal.objective) header.appendChild(h("p", "work-focus-objective", goal.objective));
+-  header.appendChild(h("p", "work-focus-ancestry", t("workGoalWorkspaceHint")));
+   focus.appendChild(header);
+-  var decisionCount = workGoalDecisionCount(goal);
+-  focus.appendChild(renderWorkGoalSummary(goal, decisionCount));
+-  var viewedPlan = workGoalViewedPlan(goal) || workGoalCurrentPlan(goal);
+-  focus.appendChild(renderWorkCurrentPhase(goal, viewedPlan));
++
++  var resultBody = h("div", "goal-file-body");
++  resultBody.appendChild(h("p", "goal-file-lead", model.desiredResult || t("goalFileResultMissing")));
++  focus.appendChild(renderGoalFileSection("goal-file-result", t("goalFileResult"), resultBody));
++
++  var truthBody = h("div", "goal-file-body");
++  truthBody.appendChild(h("p", "goal-file-lead", model.currentTruth || t("workNoneYet")));
++  focus.appendChild(renderGoalFileSection("goal-file-truth", t("goalFileTruth"), truthBody));
++
++  var decisionBody = h("div", "goal-file-body");
++  if(model.decisionNeeded){
++    decisionBody.appendChild(h("p", "goal-file-lead is-attention", t("goalFileDecisionYes", {
++      count: String(model.decisionCount)
++    })));
++    var openDecisions = h("button", "btn primary sm", t("goalFileOpenDecisions"));
++    openDecisions.type = "button";
++    openDecisions.setAttribute("data-fl-role", "goal-file-open-decisions");
++    openDecisions.addEventListener("click", function(){ switchTab("decisions"); });
++    decisionBody.appendChild(openDecisions);
++  } else {
++    decisionBody.appendChild(h("p", "goal-file-lead", t("goalFileDecisionNo")));
++  }
++  focus.appendChild(renderGoalFileSection("goal-file-decision", t("goalFileDecision"), decisionBody));
++
++  var phaseWrap = h("div", "goal-file-body");
++  phaseWrap.appendChild(renderWorkCurrentPhase(goal, viewedPlan));
++  focus.appendChild(renderGoalFileSection("goal-file-phase", t("goalFilePhase"), phaseWrap));
++
++  var taskBody = h("div", "goal-file-body");
++  if(model.currentTask){
++    taskBody.appendChild(h("p", "goal-file-next", t("goalFileNext", { text: model.nextAction })));
++    taskBody.appendChild(renderGoalFileTaskLine(model.currentTask));
++    var moreCards = [];
++    model.currentCards.forEach(function(card){
++      if(card !== model.currentTask) moreCards.push(card);
++    });
++    (model.blockedCards || []).forEach(function(card){
++      if(card !== model.currentTask) moreCards.push(card);
++    });
++    if(moreCards.length){
++      var more = h("div", "goal-file-more-tasks");
++      moreCards.forEach(function(card){ more.appendChild(renderWorkCard(card)); });
++      taskBody.appendChild(more);
++    }
++  } else {
++    taskBody.appendChild(stateMsg("empty", t("workCurrentPhaseEmpty")));
++  }
++  focus.appendChild(renderGoalFileSection("goal-file-task", t("goalFileTask"), taskBody));
++
++  var blockerBody = h("div", "goal-file-body");
++  var setupBlockers = collectSetupBlockers();
++  if(!model.blockers.length && !setupBlockers.length){
++    blockerBody.appendChild(h("p", "goal-file-lead", t("goalFileNoBlockers")));
++  } else {
++    model.blockers.forEach(function(blocker){
++      var item = h("div", "goal-file-blocker-item");
++      if(blocker.fact){
++        item.appendChild(h("p", "goal-file-fact", t("goalFileFact", { text: blocker.fact })));
++      }
++      item.appendChild(h("p", "goal-file-blocker", t("goalFileReason", {
++        text: blocker.reason || blocker.text
++      })));
++      if(blocker.retained){
++        item.appendChild(h("p", "goal-file-retained", t("goalFileRetained", { text: blocker.retained })));
++      }
++      if(blocker.next){
++        item.appendChild(h("p", "goal-file-next", t("goalFileNext", { text: blocker.next })));
++      }
++      blockerBody.appendChild(item);
++    });
++    setupBlockers.forEach(function(item){
++      var row = h("div", "goal-file-setup-blocker");
++      row.appendChild(h("p", "goal-file-blocker", t("setupBlockerReason", { text: item.reason })));
++      var go = h("button", "btn sm", t("setupBlockerNext", { action: item.action }));
++      go.type = "button";
++      go.addEventListener("click", function(){ switchTab(item.next); });
++      row.appendChild(go);
++      blockerBody.appendChild(row);
++    });
++  }
++  focus.appendChild(renderGoalFileSection("goal-file-blockers", t("goalFileBlockers"), blockerBody));
++
++  var deliveryBody = h("div", "goal-file-body");
++  if(model.terminal){
++    deliveryBody.appendChild(h("p", "goal-file-lead", t("goalFileDeliveryDone", {
++      status: statusLabel(model.status)
++    })));
++  } else {
++    deliveryBody.appendChild(h("p", "goal-file-lead", t("goalFileDeliveryLive")));
++  }
++  if(model.historyCards.length){
++    model.historyCards.forEach(function(card){ deliveryBody.appendChild(renderWorkCard(card)); });
++  }
++  focus.appendChild(renderGoalFileSection("goal-file-delivery", t("goalFileDelivery"), deliveryBody));
++
++  var evidence = document.createElement("details");
++  evidence.className = "goal-file-evidence work-goal-summary";
++  evidence.setAttribute("data-fl-role", "goal-file-evidence");
++  var evSummary = document.createElement("summary");
++  evSummary.textContent = t("goalFileEvidence");
++  evidence.appendChild(evSummary);
++  var evBody = h("div", "goal-file-evidence-body");
++  evBody.appendChild(renderWorkGoalSummary(goal, model.decisionCount));
+   if(viewedPlan){
+-    var viewedIndex = (goal.plans || []).indexOf(viewedPlan);
+-    focus.appendChild(renderWorkTaskBoard(viewedPlan.columns || {},
++    evBody.appendChild(renderWorkTaskBoard(viewedPlan.columns || {},
+       "workPhaseTasksTitle", "workGoalTasksHint", {
+         planId: viewedPlan.planId,
+         phaseName: viewedPlan.name || t("workUntitledPlan"),
+-        phaseState: workGoalPhaseState(goal, viewedIndex < 0 ? 0 : viewedIndex)
++        phaseState: model.phaseState
+       }));
+-  } else {
+-    focus.appendChild(stateMsg("empty", t("workCurrentPhaseEmpty")));
+   }
++  evidence.appendChild(evBody);
++  focus.appendChild(evidence);
+   return focus;
+ }
+ function renderWorkFocusedPlan(plan){
+@@ -6634,43 +7111,99 @@ function renderWorkNewEntry(){
+   entry.appendChild(renderWorkShapeGuide());
+   return entry;
+ }
+-function renderWorkPortfolio(view, selection){
+-  var rail = h("aside", "work-portfolio");
+-  rail.setAttribute("data-fl-role", "work-portfolio");
+-  rail.setAttribute("aria-label", t("workPortfolioLabel"));
+-  rail.appendChild(h("h2", "work-portfolio-title", t("workPortfolioTitle")));
+-  rail.appendChild(h("p", "work-portfolio-hint", t("workPortfolioHint")));
++function renderWorkGoalTreeItem(item, selection){
++  var selected = workSelectionEqual(selection, workMakeSelection(item.kind, item.id));
++  var name = item.kind === "one-off"
++    ? t("workIndependentTasks")
++    : (item.name || (item.kind === "plan" ? t("workUntitledPlan") : t("workUntitledGoal")));
++  return renderWorkWorkspaceOption(
++    item.kind,
++    item.id,
++    name,
++    item.cue || t("workNoNext"),
++    item.taskCount || 0,
++    selected,
++    item.status
++  );
++}
++function renderWorkGoalTree(view, selection){
++  var model = composeGoalTreeModel(view, S.workTreeQuery, S.workTreeScope);
++  var rail = h("aside", "work-portfolio goal-tree");
++  rail.setAttribute("data-fl-role", "goal-tree");
++  rail.setAttribute("aria-label", t("goalTreeLabel"));
++  rail.setAttribute("style", "--goal-tree-width:" + workNormalizeTreeWidth(S.workTreeWidth) + "px");
++  rail.appendChild(h("h2", "work-portfolio-title", t("goalTreeLabel")));
++  var search = document.createElement("form");
++  search.className = "goal-tree-search";
++  search.setAttribute("data-fl-role", "goal-tree-search");
++  search.setAttribute("role", "search");
++  var searchLabel = h("label", "goal-tree-search-field", "");
++  searchLabel.appendChild(h("span", "sr-only", t("goalTreeSearch")));
++  var searchInput = document.createElement("input");
++  searchInput.type = "search";
++  searchInput.maxLength = 120;
++  searchInput.className = "goal-tree-search-input";
++  searchInput.setAttribute("data-fl-role", "goal-tree-search-input");
++  searchInput.setAttribute("aria-label", t("goalTreeSearch"));
++  searchInput.placeholder = t("goalTreeSearch");
++  searchInput.value = String(S.workTreeQuery || "");
++  searchInput.addEventListener("input", function(){
++    S.workTreeQuery = String(searchInput.value || "").slice(0, 120);
++    workScheduleReadingContextSave();
++    var list = rail.querySelector('[data-fl-role="goal-tree-list"]');
++    if(!list) return;
++    var next = composeGoalTreeModel(view, S.workTreeQuery, S.workTreeScope);
++    list.textContent = "";
++    if(!next.visible.length){
++      list.appendChild(h("p", "work-portfolio-empty", next.scope === "history"
++        ? t("goalTreeEmptyHistory") : t("goalTreeEmptyNow")));
++    } else {
++      next.visible.forEach(function(item){ list.appendChild(renderWorkGoalTreeItem(item, selection)); });
++    }
++  });
++  searchLabel.appendChild(searchInput);
++  search.appendChild(searchLabel);
++  search.addEventListener("submit", function(e){ e.preventDefault(); });
++  rail.appendChild(search);
++
++  var scopes = h("div", "goal-tree-scopes");
++  scopes.setAttribute("role", "tablist");
++  ["now", "history"].forEach(function(scope){
++    var btn = h("button", "goal-tree-scope" + (model.scope === scope ? " is-selected" : ""));
++    btn.type = "button";
++    btn.setAttribute("data-fl-role", "goal-tree-" + scope);
++    btn.setAttribute("aria-pressed", model.scope === scope ? "true" : "false");
++    btn.textContent = scope === "history" ? t("goalTreeHistory") : t("goalTreeNow");
++    btn.addEventListener("click", function(){
++      S.workTreeScope = scope;
++      workScheduleReadingContextSave();
++      render();
++    });
++    scopes.appendChild(btn);
++  });
++  rail.appendChild(scopes);
+   rail.appendChild(renderWorkNewEntry());
+-  var activeGoals = (view.goals || []).filter(function(goal){ return !workGoalIsTerminalStatusForSelection(goal); });
+-  activeGoals.sort(function(a, b){ return Number(workGoalNeedsAttention(b)) - Number(workGoalNeedsAttention(a)); });
+-  function goalOptions(goals){
+-    return goals.map(function(goal){
+-      return renderWorkWorkspaceOption("goal", goal.goalId, goal.name || t("workUntitledGoal"),
+-        workPortfolioCue(goal.summary, { completedNoDecision: false }), workGoalTaskCount(goal),
+-        workSelectionEqual(selection, workMakeSelection("goal", goal.goalId)), goal.status);
++
++  var list = h("div", "goal-tree-list");
++  list.setAttribute("data-fl-role", "goal-tree-list");
++  if(!model.visible.length){
++    list.appendChild(h("p", "work-portfolio-empty", model.scope === "history"
++      ? t("goalTreeEmptyHistory") : t("goalTreeEmptyNow")));
++  } else {
++    model.visible.forEach(function(item){ list.appendChild(renderWorkGoalTreeItem(item, selection)); });
++  }
++  rail.appendChild(list);
++  if(model.scope === "history"){
++    var finishedGoals = (view.goals || []).filter(function(goal){
++      return workGoalIsTerminalStatusForSelection(goal);
+     });
++    rail.appendChild(renderWorkFinishedGoals(finishedGoals));
+   }
+-  rail.appendChild(renderWorkPortfolioGroup(t("workPortfolioGoals"), goalOptions(activeGoals),
+-    t("workPortfolioNoActiveGoals")));
+-  var independent = view.independentPlans || [];
+-  rail.appendChild(renderWorkPortfolioGroup(t("workPortfolioPlans"), independent.map(function(plan){
+-    return renderWorkWorkspaceOption("plan", plan.planId, plan.name || t("workUntitledPlan"),
+-      workPortfolioCue(plan.summary), workPlanTaskCount(plan),
+-      workSelectionEqual(selection, workMakeSelection("plan", plan.planId)));
+-  }), t("workPortfolioNoIndependentPlans")));
+-  var oneOffItems = [];
+-  if(view.oneOffTasks){
+-    var oneOffCount = workOneOffCardCount(view);
+-    oneOffItems.push(renderWorkWorkspaceOption("one-off", "inbox", t("workIndependentTasks"),
+-      workPortfolioCue(view.oneOffTasks.summary), oneOffCount,
+-      workSelectionEqual(selection, workMakeSelection("one-off", "inbox"))));
+-  }
+-  rail.appendChild(renderWorkPortfolioGroup(t("workPortfolioOneOff"), oneOffItems,
+-    t("workPortfolioNoIndependentTasks")));
+-  var finishedGoals = (view.goals || []).filter(function(goal){ return workGoalIsTerminalStatusForSelection(goal); });
+-  rail.appendChild(renderWorkFinishedGoals(finishedGoals));
+   return rail;
+ }
++function renderWorkPortfolio(view, selection){
++  return renderWorkGoalTree(view, selection);
++}
+ function renderWorkFocusedWorkspace(view, selection){
+   if(!selection) return stateMsg("empty", t("workEmpty"));
+   if(selection.kind === "goal"){
+@@ -6684,11 +7217,59 @@ function renderWorkFocusedWorkspace(view, selection){
+   }
+   return stateMsg("empty", t("workSelectionUnavailable"));
+ }
++function renderWorkTreeResizeHandle(){
++  var handle = h("div", "goal-tree-resize");
++  handle.setAttribute("data-fl-role", "goal-tree-resize");
++  handle.setAttribute("role", "separator");
++  handle.setAttribute("aria-orientation", "vertical");
++  handle.setAttribute("aria-label", t("goalTreeResize"));
++  handle.setAttribute("tabindex", "0");
++  var dragging = false;
++  var startX = 0;
++  var startWidth = workNormalizeTreeWidth(S.workTreeWidth);
++  function applyFromClientX(clientX){
++    workApplyTreeWidth(startWidth + (clientX - startX));
++  }
++  handle.addEventListener("pointerdown", function(e){
++    dragging = true;
++    startX = e.clientX;
++    startWidth = workNormalizeTreeWidth(S.workTreeWidth);
++    handle.classList.add("is-dragging");
++    if(handle.setPointerCapture) handle.setPointerCapture(e.pointerId);
++  });
++  handle.addEventListener("pointermove", function(e){
++    if(!dragging) return;
++    applyFromClientX(e.clientX);
++  });
++  handle.addEventListener("pointerup", function(){
++    if(!dragging) return;
++    dragging = false;
++    handle.classList.remove("is-dragging");
++    workScheduleReadingContextSave();
++  });
++  handle.addEventListener("keydown", function(e){
++    var step = e.shiftKey ? 24 : 16;
++    if(e.key === "ArrowLeft"){
++      e.preventDefault();
++      workApplyTreeWidth(workNormalizeTreeWidth(S.workTreeWidth) - step);
++      workScheduleReadingContextSave();
++    } else if(e.key === "ArrowRight"){
++      e.preventDefault();
++      workApplyTreeWidth(workNormalizeTreeWidth(S.workTreeWidth) + step);
++      workScheduleReadingContextSave();
++    }
++  });
++  return handle;
++}
+ function renderWorkWorkbench(view, selection){
+   var layout = h("div", "workbench-layout");
+   layout.setAttribute("data-fl-role", "workbench-layout");
++  layout.setAttribute("data-mobile-pane", S.workMobilePane || "tree");
++  layout.setAttribute("style", "--goal-tree-width:" + workNormalizeTreeWidth(S.workTreeWidth) + "px");
+   layout.appendChild(renderWorkPortfolio(view, selection));
++  layout.appendChild(renderWorkTreeResizeHandle());
+   var focused = h("div", "work-focused-column");
++  focused.setAttribute("data-fl-role", "goal-file-host");
+   focused.appendChild(renderWorkContextHeader(view, selection));
+   focused.appendChild(renderWorkFocusedWorkspace(view, selection));
+   focused.appendChild(renderWorkAdvanced(view, selection));
+@@ -7239,7 +7820,9 @@ function workReadingNormalizeRecord(raw){
+     outcome: null,
+     selectedIntakeId: "",
+     confirmingIntakeId: "",
+-    createdNavigate: null
++    createdNavigate: null,
++    tree: { query: "", width: 280, scope: "now" },
++    pane: "tree"
+   };
+   if(raw.workspace && typeof raw.workspace === "object" && !Array.isArray(raw.workspace)){
+     var workspaceId = workReadingSafeString(raw.workspace.id);
+@@ -7336,6 +7919,16 @@ function workReadingNormalizeRecord(raw){
+       };
+     }
+   }
++  if(raw.tree && typeof raw.tree === "object" && !Array.isArray(raw.tree)){
++    record.tree.query = workReadingSafeString(raw.tree.query, 120);
++    var treeWidth = typeof raw.tree.width === "number" ? raw.tree.width : parseInt(raw.tree.width, 10);
++    if(!isFinite(treeWidth)) treeWidth = 280;
++    if(treeWidth < 200) treeWidth = 200;
++    if(treeWidth > 420) treeWidth = 420;
++    record.tree.width = Math.round(treeWidth);
++    record.tree.scope = raw.tree.scope === "history" ? "history" : "now";
++  }
++  if(raw.pane === "file" || raw.pane === "detail" || raw.pane === "tree") record.pane = raw.pane;
+   return record;
+ }
+ function workReadSessionContext(){
+@@ -7499,7 +8092,19 @@ function workBuildSessionContext(){
+     outcome: workReadingOutcomeRecord(),
+     selectedIntakeId: workReadingSafeString(S.selectedIntakeId || "", WORK_READING_CONTEXT_MAX_ID_CHARS),
+     confirmingIntakeId: workReadingSafeString(S.outcomeConfirmingId || "", WORK_READING_CONTEXT_MAX_ID_CHARS),
+-    createdNavigate: workReadingCreatedNavigateRecord()
++    createdNavigate: workReadingCreatedNavigateRecord(),
++    tree: {
++      query: workReadingSafeString(String(S.workTreeQuery || ""), 120),
++      width: (function(px){
++        var n = typeof px === "number" ? px : parseInt(px, 10);
++        if(!isFinite(n)) return 280;
++        if(n < 200) return 200;
++        if(n > 420) return 420;
++        return Math.round(n);
++      })(S.workTreeWidth),
++      scope: S.workTreeScope === "history" ? "history" : "now"
++    },
++    pane: S.workMobilePane === "file" || S.workMobilePane === "detail" ? S.workMobilePane : "tree"
+   };
+   WORK_READING_CONTEXT_DISCLOSURES.forEach(function(key){
+     record.disclosures[key] = !!captured[key];
+@@ -7648,7 +8253,9 @@ function workReadingContextToContinuity(view, record){
+     oneOffHistoryOpen: false, shapeGuideOpen: false, pageStoryOpen: false,
+     outcomeAdvancedOpen: false, focusKey: null, contentScrollTop: 0, contentScrollLeft: 0,
+     boardScrollLeft: 0, boardScrollCaptured: false, detailOpen: false,
+-    detailTaskId: null, detailTab: null, detailScrollTop: 0
++    detailTaskId: null, detailTab: null, detailScrollTop: 0,
++    treeWidth: 280, treeQuery: "", treeScope: "now",
++    mobilePane: "tree", goalFileEvidenceOpen: false, treeScrollTop: 0, fileScrollTop: 0
+   };
+   if(!record) return out;
+   var disclosures = record.disclosures || {};
+@@ -7670,6 +8277,18 @@ function workReadingContextToContinuity(view, record){
+     out.detailTab = WORK_READING_CONTEXT_TABS.indexOf(record.detail.tab) >= 0
+       ? record.detail.tab : "overview";
+   }
++  if(record.tree){
++    out.treeQuery = workReadingSafeString(record.tree.query, 120);
++    var continuityWidth = typeof record.tree.width === "number" ? record.tree.width : parseInt(record.tree.width, 10);
++    if(!isFinite(continuityWidth)) continuityWidth = 280;
++    if(continuityWidth < 200) continuityWidth = 200;
++    if(continuityWidth > 420) continuityWidth = 420;
++    out.treeWidth = Math.round(continuityWidth);
++    out.treeScope = record.tree.scope === "history" ? "history" : "now";
++  }
++  if(record.pane === "file" || record.pane === "detail" || record.pane === "tree"){
++    out.mobilePane = record.pane;
++  }
+   return out;
+ }
+ function workApplySavedReadingContext(){
+@@ -7712,6 +8331,18 @@ function workApplySavedReadingContext(){
+   S.workFilterDraft = savedDraft;
+   S.workOneOffSearch = workReadingSafeString(record.search && record.search.oneOff, 120);
+   S.workOneOffSearchDraft = workReadingSafeString(record.search && record.search.draft, 120);
++  if(record.tree){
++    S.workTreeQuery = workReadingSafeString(record.tree.query, 120);
++    var savedWidth = typeof record.tree.width === "number" ? record.tree.width : parseInt(record.tree.width, 10);
++    if(!isFinite(savedWidth)) savedWidth = 280;
++    if(savedWidth < 200) savedWidth = 200;
++    if(savedWidth > 420) savedWidth = 420;
++    S.workTreeWidth = Math.round(savedWidth);
++    S.workTreeScope = record.tree.scope === "history" ? "history" : "now";
++  }
++  if(record.pane === "file" || record.pane === "detail" || record.pane === "tree"){
++    S.workMobilePane = record.pane;
++  }
+   /* FL-112E9: restore the bounded outcome draft, the selected intake, the open
+    * confirmation step, and any valid created-navigation intent. Every value is
+    * checked against the canonical intake list before it becomes visible. */
+@@ -7872,7 +8503,13 @@ function workVisibleTruthSnapshot(){
+     selectedIntakeId: S.selectedIntakeId || null,
+     confirmingIntakeId: S.outcomeConfirmingId || null,
+     createdNavigate: workStableTruthClone(S.outcomeCreatedNavigate, 0),
+-    createdTaskDrawer: workStableTruthClone(S.outcomeCreatedTaskDrawer, 0)
++    createdTaskDrawer: workStableTruthClone(S.outcomeCreatedTaskDrawer, 0),
++    treeScope: S.workTreeScope === "history" ? "history" : "now",
++    treeQuery: String(S.workTreeQuery || ""),
++    mobilePane: S.workMobilePane || "tree",
++    /* Route is part of visible truth so Work and Decision Center cannot share
++     * one live mount when hierarchy cards are otherwise unchanged. */
++    tab: S.tab || "work"
+   };
+   try {
+     return JSON.stringify(payload);
+@@ -7880,13 +8517,20 @@ function workVisibleTruthSnapshot(){
+     return "unserializable";
+   }
+ }
+-/* True when the current #fl-view still holds a live Work mount (not another
+- * page and not a loading/unavailable placeholder that wiped the board). */
++/* True when #fl-view still holds the live mount for the current route, not
++ * another page and not a loading/unavailable placeholder that wiped it. */
+ function workDomIsLive(){
+   if(!viewEl) return false;
+   try {
++    var tab = S.tab || "work";
++    if(tab === "decisions"){
++      return !!(viewEl.querySelector('[data-fl-role="decision-center"]')
++        || viewEl.querySelector('[data-fl-role="work-hierarchy-error"]'));
++    }
++    if(tab !== "work") return false;
+     return !!(viewEl.querySelector('[data-fl-role="work-board"]')
+       || viewEl.querySelector('[data-fl-role="workbench-layout"]')
++      || viewEl.querySelector('[data-fl-role="goal-tree"]')
+       || viewEl.querySelector('[data-fl-role="work-filters"]')
+       || viewEl.querySelector('[data-fl-role="outcome-section"]')
+       || viewEl.querySelector('[data-fl-role="work-hierarchy-error"]'));
+@@ -7894,9 +8538,10 @@ function workDomIsLive(){
+     return false;
+   }
+ }
+-/* Keep Work DOM when presentation truth is unchanged and the mount is live. */
++/* Keep the live mount when route and presentation truth are unchanged. */
+ function workShouldRetainDom(){
+-  if((S.tab || "work") !== "work") return false;
++  var tab = S.tab || "work";
++  if(tab !== "work" && tab !== "decisions") return false;
+   if(!workDomIsLive()) return false;
+   if(S.workRenderSnapshot == null) return false;
+   try {
+@@ -7938,6 +8583,12 @@ function workSemanticFocusKey(el){
+     return "workspace:" + String(el.getAttribute("data-workspace-kind") || "")
+       + ":" + String(el.getAttribute("data-workspace-id") || "");
+   }
++  if(role === "goal-tree-search-input") return "goal-tree-search";
++  if(role === "goal-tree-now") return "goal-tree-now";
++  if(role === "goal-tree-history") return "goal-tree-history";
++  if(role === "goal-tree-resize") return "goal-tree-resize";
++  if(role === "mobile-back") return "mobile-back";
++  if(role === "goal-file-open-decisions") return "goal-file-open-decisions";
+   if(role === "work-filter-project") return "filter-project";
+   if(role === "work-filter-column") return "filter-column";
+   if(role === "work-filter-worker") return "filter-worker";
+@@ -8059,7 +8710,13 @@ function workFindFocusTarget(key){
+       "oneoff-current-toggle": "work-oneoff-current-toggle",
+       "oneoff-attention-toggle": "work-oneoff-attention-toggle",
+       "oneoff-history-toggle": "work-oneoff-history-toggle",
+-      "page-story-toggle": "page-story-disclosure-toggle"
++      "page-story-toggle": "page-story-disclosure-toggle",
++      "goal-tree-search": "goal-tree-search-input",
++      "goal-tree-now": "goal-tree-now",
++      "goal-tree-history": "goal-tree-history",
++      "goal-tree-resize": "goal-tree-resize",
++      "mobile-back": "mobile-back",
++      "goal-file-open-decisions": "goal-file-open-decisions"
+     };
+     var role = roleMap[key];
+     if(role) return viewEl.querySelector('[data-fl-role="' + role + '"]');
+@@ -8105,7 +8762,20 @@ function workCaptureWorkbenchContext(){
+     detailOpen: false,
+     detailTaskId: null,
+     detailTab: null,
+-    detailScrollTop: 0
++    detailScrollTop: 0,
++    treeWidth: (function(px){
++      var n = typeof px === "number" ? px : parseInt(px, 10);
++      if(!isFinite(n)) return 280;
++      if(n < 200) return 200;
++      if(n > 420) return 420;
++      return Math.round(n);
++    })(S && S.workTreeWidth),
++    treeQuery: String((S && S.workTreeQuery) || ""),
++    treeScope: (S && S.workTreeScope) === "history" ? "history" : "now",
++    mobilePane: (S && S.workMobilePane) || "tree",
++    goalFileEvidenceOpen: false,
++    treeScrollTop: 0,
++    fileScrollTop: 0
+   };
+   if(!viewEl) return ctx;
+   try {
+@@ -8133,6 +8803,12 @@ function workCaptureWorkbenchContext(){
+     if(oadv) ctx.outcomeAdvancedOpen = !!oadv.open;
+     var shapeGuide = viewEl.querySelector('[data-fl-role="work-shape-guide"]');
+     if(shapeGuide) ctx.shapeGuideOpen = !!shapeGuide.open;
++    var evidence = viewEl.querySelector('[data-fl-role="goal-file-evidence"]');
++    if(evidence) ctx.goalFileEvidenceOpen = !!evidence.open;
++    var tree = viewEl.querySelector('[data-fl-role="goal-tree"]');
++    if(tree) ctx.treeScrollTop = tree.scrollTop || 0;
++    var fileHost = viewEl.querySelector('[data-fl-role="goal-file-host"]');
++    if(fileHost) ctx.fileScrollTop = fileHost.scrollTop || 0;
+     var board = viewEl.querySelector('[data-fl-role="work-board"]');
+     if(board){
+       ctx.boardScrollCaptured = true;
+@@ -8219,6 +8895,42 @@ function workRestoreWorkbenchContext(ctx){
+     if(shapeGuide && hasCaptured("shapeGuideOpen")){
+       shapeGuide.open = !!ctx.shapeGuideOpen;
+     }
++    var evidence = viewEl.querySelector('[data-fl-role="goal-file-evidence"]');
++    if(evidence && hasCaptured("goalFileEvidenceOpen")){
++      evidence.open = !!ctx.goalFileEvidenceOpen;
++    }
++    if(hasCaptured("treeWidth")){
++      var restoredWidth = typeof ctx.treeWidth === "number" ? ctx.treeWidth : parseInt(ctx.treeWidth, 10);
++      if(!isFinite(restoredWidth)) restoredWidth = 280;
++      if(restoredWidth < 200) restoredWidth = 200;
++      if(restoredWidth > 420) restoredWidth = 420;
++      restoredWidth = Math.round(restoredWidth);
++      if(S) S.workTreeWidth = restoredWidth;
++      var treeWidthNode = viewEl.querySelector('[data-fl-role="goal-tree"]');
++      if(treeWidthNode && treeWidthNode.setAttribute){
++        treeWidthNode.setAttribute("style", "--goal-tree-width:" + restoredWidth + "px");
++      }
++      var layoutWidthNode = viewEl.querySelector('[data-fl-role="workbench-layout"]');
++      if(layoutWidthNode && layoutWidthNode.setAttribute){
++        layoutWidthNode.setAttribute("style", "--goal-tree-width:" + restoredWidth + "px");
++      }
++    }
++    if(hasCaptured("treeQuery") && S) S.workTreeQuery = String(ctx.treeQuery || "");
++    if(hasCaptured("treeScope") && S && (ctx.treeScope === "now" || ctx.treeScope === "history")){
++      S.workTreeScope = ctx.treeScope;
++    }
++    if(hasCaptured("mobilePane") && S){
++      S.workMobilePane = (ctx.mobilePane === "file" || ctx.mobilePane === "detail")
++        ? ctx.mobilePane : "tree";
++    }
++    var tree = viewEl.querySelector('[data-fl-role="goal-tree"]');
++    if(tree && typeof ctx.treeScrollTop === "number") tree.scrollTop = ctx.treeScrollTop || 0;
++    var fileHost = viewEl.querySelector('[data-fl-role="goal-file-host"]');
++    if(fileHost && typeof ctx.fileScrollTop === "number") fileHost.scrollTop = ctx.fileScrollTop || 0;
++    var searchInput = viewEl.querySelector('[data-fl-role="goal-tree-search-input"]');
++    if(searchInput && hasCaptured("treeQuery") && document.activeElement !== searchInput){
++      searchInput.value = String(ctx.treeQuery || "");
++    }
+     /* 3. Scroll hosts: main.content page scroll, then board horizontal. */
+     var content = workContentScrollEl();
+     if(content){
+@@ -8414,6 +9126,83 @@ function rWork(){
+   workRememberRenderSnapshot();
+ }
+ 
++function renderDecisionItem(item){
++  var card = h("article", "decision-item");
++  card.setAttribute("data-fl-role", "decision-item");
++  card.setAttribute("data-task-id", String(item.taskId || ""));
++  card.appendChild(h("h4", "decision-item-title", item.name || t("taskUntitled")));
++  card.appendChild(h("p", "decision-item-fact", t("decisionFact", { text: item.fact || t("workNoneYet") })));
++  card.appendChild(h("p", "decision-item-reason", t("decisionReason", { text: item.reason || t("workNoNext") })));
++  if(item.retained){
++    card.appendChild(h("p", "decision-item-retained", t("decisionRetained", { text: item.retained })));
++  }
++  card.appendChild(h("p", "decision-item-impact", t("decisionImpact", { text: item.impact || t("workPlacementUnknown") })));
++  var actions = h("div", "decision-item-actions");
++  var open = h("button", "btn primary sm", t("decisionOpen"));
++  open.type = "button";
++  open.setAttribute("data-fl-role", "decision-open");
++  open.addEventListener("click", function(){
++    if(workIsNarrowViewport()) workApplyMobilePane(workNextMobilePane(S.workMobilePane, "open-detail"));
++    showTask(item.taskId, item.card && item.card.breadcrumb);
++  });
++  actions.appendChild(open);
++  if(item.card) actions.appendChild(renderWorkMoveActControl(item.card));
++  card.appendChild(actions);
++  return card;
++}
++function renderDecisionCenter(view){
++  var model = collectDecisionGroups(view);
++  var root = h("section", "decision-center");
++  root.setAttribute("data-fl-role", "decision-center");
++  root.appendChild(h("h2", "decision-center-title", t("navDecisions")));
++  root.appendChild(h("p", "decision-center-hint", t("decisionCenterHint")));
++  if(!model.total){
++    root.appendChild(stateMsg("empty", t("decisionCenterEmpty")));
++    return root;
++  }
++  model.groups.forEach(function(group){
++    var section = h("section", "decision-group");
++    section.setAttribute("data-fl-role", "decision-group");
++    section.setAttribute("data-goal-id", String(group.goalId || ""));
++    section.appendChild(h("h3", "decision-group-title", group.goalName || t("workUntitledGoal")));
++    group.items.forEach(function(item){ section.appendChild(renderDecisionItem(item)); });
++    root.appendChild(section);
++  });
++  if(model.parentless.length){
++    var parentless = h("section", "decision-group decision-parentless");
++    parentless.setAttribute("data-fl-role", "decision-parentless");
++    parentless.appendChild(h("h3", "decision-group-title", t("decisionParentless")));
++    model.parentless.forEach(function(item){ parentless.appendChild(renderDecisionItem(item)); });
++    root.appendChild(parentless);
++  }
++  return root;
++}
++function rDecisions(){
++  var continuity = workCaptureWorkbenchContext();
++  viewEl.textContent = "";
++  if(!S.hadOk){
++    showDisconnected();
++    workRememberRenderSnapshot();
++    return;
++  }
++  var view;
++  try {
++    view = normalizeWorkHierarchy(S.workHierarchy);
++  } catch(err){
++    var errBox = h("div", "error-box");
++    errBox.setAttribute("data-fl-role", "work-hierarchy-error");
++    errBox.appendChild(document.createTextNode(t("workUnsupportedHierarchy")));
++    viewEl.appendChild(errBox);
++    workRestoreWorkbenchContext(continuity);
++    workRememberRenderSnapshot();
++    return;
++  }
++  viewEl.appendChild(renderDecisionCenter(view));
++  workRestoreWorkbenchContext(continuity);
++  workUpdateMobileBack();
++  workRememberRenderSnapshot();
++}
++
+ /* Task Detail breadcrumb. Renders only parents that actually exist in the
+  * clicked hierarchy card; a direct link without ancestry shows the plain
+  * "Task report" label and never invents a Goal or Plan. */
+@@ -12798,13 +13587,8 @@ function switchTab(name, opts){
+     var leavingDraft = workerCaptureDraftFromDom();
+     if(leavingDraft) S.workerDraft = leavingDraft;
+   }
+-  $$("#fl-tabs button").forEach(function(b){
+-    var tab = b.getAttribute("data-tab");
+-    var active = tab === effective
+-      || (tab === "work" && effective !== "work" && LEGACY_TAB_REDIRECT[effective] === "work");
+-    b.classList.toggle("active", active);
+-  });
+   S.tab = effective;
++  updateProductNav();
+   if(S.tab !== "worker"){ S.workerFormActive = false; S.workerFormRendered = false; }
+   if(S.tab !== "work") S.outcomeFormActive = false;
+   hideDetail();
+@@ -13637,6 +14421,11 @@ function hideDetail(){
+   workMarkSelectedCard(null);
+   /* Closing the drawer is an explicit close for any pending-action handoff. */
+   workPendingHandoffReset();
++  if(workIsNarrowViewport()){
++    workApplyMobilePane(workNextMobilePane("detail", "back"));
++  } else {
++    workUpdateMobileBack();
++  }
+   var target = S.detailReturnFocus;
+   S.detailReturnFocus = null;
+   if(target && document.contains(target) && typeof target.focus === "function") target.focus();
+@@ -18006,6 +18795,7 @@ function showTask(id, crumb){
+   S.detailTaskId = String(id || "");
+   workMarkSelectedCard(S.detailTaskId);
+   S.taskCrumb = resolveTaskBreadcrumb(S.taskCrumb, id, crumb);
++  if(workIsNarrowViewport()) workApplyMobilePane(workNextMobilePane(S.workMobilePane, "open-detail"));
+   workScheduleReadingContextSave();
+   loadingDetail(t("taskDetailLoading"));
+   fetchJSON("/api/ops/tasks/" + encodeURIComponent(id)).then(function(task){
+@@ -18999,7 +19789,7 @@ function render(){
+   // FL-112A: identical Work presentation truth keeps the live Work DOM so
+   // polling updates connection chrome without a hard page-like rebuild.
+   // Real hierarchy/intake/filter/language changes still fall through to rWork.
+-  if(tab === "work" && workShouldRetainDom()){
++  if((tab === "work" || tab === "decisions") && workShouldRetainDom()){
+     if(!S.detail){
+       detailEl.hidden = true;
+       detailEl.textContent = "";
+@@ -19013,6 +19803,7 @@ function render(){
+   switch(tab){
+     case "overview": rOverview(); break;
+     case "work": rWork(); break;
++    case "decisions": rDecisions(); break;
+     case "plans": rPlans(); break;
+     case "goals": rGoals(); break;
+     case "tasks": rTasks(); break;
+@@ -19044,11 +19835,18 @@ function init(){
+   scrimEl = document.getElementById("fl-scrim");
+   workReadingContextPending = workReadSessionContext();
+   if(!S.token){ showUnauthenticated(); return; }
+-  $$("#fl-tabs button").forEach(function(btn){
++  $$("#fl-tabs [data-tab]").forEach(function(btn){
+     btn.addEventListener("click", function(){
+-      switchTab(btn.getAttribute("data-tab"));
++      var tab = btn.getAttribute("data-tab");
++      var system = document.getElementById("fl-system-menu");
++      if(system && SYSTEM_TABS.indexOf(tab) >= 0) system.open = false;
++      switchTab(tab);
+     });
+   });
++  var mobileBack = document.getElementById("fl-mobile-back");
++  if(mobileBack){
++    mobileBack.addEventListener("click", function(){ workMobileBack(); });
++  }
+   document.addEventListener("keydown", function(e){
+     if(e.key==="Escape"&&S.detail) hideDetail();
+   });
+diff --git a/baseline/src/hub/public/i18n.js b/workspace/src/hub/public/i18n.js
+index d5df331..6e87892 100644
+--- a/baseline/src/hub/public/i18n.js
++++ b/workspace/src/hub/public/i18n.js
+@@ -1,10 +1,10 @@
+-/* ForkLight Hub i18n — zh / en. No storage of secrets. */
++/* ForkLight Hub i18n: zh / en. No storage of secrets. */
+ (function (global) {
+   "use strict";
+ 
+   var STRINGS = {
+     en: {
+-      brandSub: "Local control panel",
++      brandSub: "Execution workspace",
+       navConfigure: "Configure",
+       navOperate: "Operate",
+       navModels: "Models",
+@@ -13,6 +13,46 @@
+       navDelivery: "Delivery",
+       navOverview: "Overview",
+       navWork: "Work",
++      navDecisions: "Decision Center",
++      navSystem: "System",
++      navLimits: "Limits",
++      mobileBack: "Back",
++      goalTreeLabel: "Goal Tree",
++      goalTreeSearch: "Search Goals",
++      goalTreeNow: "Now",
++      goalTreeHistory: "History",
++      goalTreeEmptyNow: "No current Goals. Describe a result to start.",
++      goalTreeEmptyHistory: "No completed Goals in History yet.",
++      goalTreeResize: "Resize Goal Tree",
++      goalFileResult: "Desired result",
++      goalFileResultMissing: "This Goal does not yet record a desired result.",
++      goalFileTruth: "What is true now",
++      goalFileDecision: "Decision needed",
++      goalFileDecisionYes: "You have {count} item(s) waiting in Decision Center.",
++      goalFileDecisionNo: "No decision is needed on this Goal right now.",
++      goalFileOpenDecisions: "Open Decision Center",
++      goalFilePhase: "Current phase and checkpoint",
++      goalFileTask: "Current Task",
++      goalFileBlockers: "Blockers",
++      goalFileNoBlockers: "No current blocker.",
++      goalFileDelivery: "Delivery and History",
++      goalFileDeliveryLive: "Delivery is still in progress for this Goal.",
++      goalFileDeliveryDone: "This Goal is {status}. History stays readable.",
++      goalFileEvidence: "Technical evidence",
++      goalFileFact: "Fact: {text}",
++      goalFileReason: "Reason: {text}",
++      goalFileRetained: "Retained work: {text}",
++      goalFileNext: "Next: {text}",
++      setupBlockerReason: "Setup is blocking current work: {text}",
++      setupBlockerNext: "Open {action}",
++      decisionCenterHint: "Every pending decision is listed here by Goal. Nothing has been executed until you confirm.",
++      decisionCenterEmpty: "No decisions are waiting. Continue from the current Goal file.",
++      decisionParentless: "Tasks without a parent Goal",
++      decisionFact: "What happened: {text}",
++      decisionReason: "Why a decision is needed: {text}",
++      decisionRetained: "Already retained: {text}",
++      decisionImpact: "Impact of acting: {text}",
++      decisionOpen: "Open confirmed actions",
+       navBoard: "Board",
+       navPlans: "Plans",
+       navGoals: "Goals",
+@@ -71,7 +111,7 @@
+       taskResume: "Continue normally",
+       taskRevise: "Refine passed candidate",
+       taskCorrect: "Reuse failed candidate and fix",
+-      taskCorrectTitle: "Main correction — reuse this candidate",
++      taskCorrectTitle: "Main correction: reuse this candidate",
+       taskCorrectHint: "This asks the Worker to fix the same workspace instead of rebuilding from scratch, then reruns every original check. Its allowance is separate from ordinary continuation and extra-attempt limits.",
+       taskCorrectFeedback: "Correction feedback (required)",
+       taskCorrectFeedbackPh: "What specific issue should the Worker fix in its existing work?",
+@@ -129,7 +169,7 @@
+       taskCorrectRevisionValue: "Attempt {ordinal}, {files} file(s), {lines} line(s), digest {digest}",
+       taskReverify: "Reverify only",
+       taskReverifyTitle: "Reverify the retained candidate (no Worker)",
+-      taskReverifyHint: "Rerun every original acceptance command against the retained candidate without calling the model again. Available for a failed behavior-only candidate, a machine-successful candidate after Main records an exact revise and repairs the retained workspace, or a Worker that really started but ended unexpectedly before verification — its retained files are then checked independently. No Worker is launched and no new Attempt is created; the original Attempt record and status are preserved. Local verification still takes wall time. A fresh Main accept is still required before Integration.",
++      taskReverifyHint: "Rerun every original acceptance command against the retained candidate without calling the model again. Available for a failed behavior-only candidate, a machine-successful candidate after Main records an exact revise and repairs the retained workspace, or a Worker that really started but ended unexpectedly before verification: its retained files are then checked independently. No Worker is launched and no new Attempt is created; the original Attempt record and status are preserved. Local verification still takes wall time. A fresh Main accept is still required before Integration.",
+       taskReverifyReason: "Why reverify only (required)",
+       taskReverifyReasonPh: "Why is the retained candidate worth a verification-only rerun?",
+       taskReverifyReasonRequired: "Reverify requires a reason",
+@@ -142,7 +182,7 @@
+       taskReverifyThreeWay: "Options without another Worker: reverify a failed behavior-only candidate, reverify a machine-successful candidate after Main revise + local repair, or independently recheck files a Worker left behind when it ended unexpectedly before verification. Worker correction and a new Task remain separate choices.",
+       taskReverifyJourneyTitle: "Candidate reverification (no Worker)",
+       taskReverifyJourneyIntro: "Main reran the retained candidate's original acceptance suite without calling the Worker again. The original Attempt record and status are preserved; this is a separate verification-only pass.",
+-      taskReverifyRuntimeHint: "The Worker ended before independent verification completed. ForkLight reruns the original acceptance checks against the files it left behind — no Worker is launched and no new Attempt is created. The original Attempt record and status are preserved. A fresh Main accept is still required before Integration.",
++      taskReverifyRuntimeHint: "The Worker ended before independent verification completed. ForkLight reruns the original acceptance checks against the files it left behind: no Worker is launched and no new Attempt is created. The original Attempt record and status are preserved. A fresh Main accept is still required before Integration.",
+       taskReverifyRuntimeJourneyIntro: "The Worker ended unexpectedly; its retained files were independently checked without launching a Worker or creating a new Attempt. The original Task/Attempt history is preserved.",
+       taskReverifyJourneyOutcome: "Reverification outcome: {status}",
+       taskReverifyJourneyCommands: "Acceptance commands: {passed} of {count} passed ({duration}ms)",
+@@ -220,7 +260,7 @@
+       taskJudgeAggregateTitle: "What the judges show together",
+       taskJudgeAggregateState: "Evidence state: {state}",
+       taskJudgeAggregateCounts: "{usable} usable · {unusable} unusable · {pending} pending · {total} total",
+-      taskJudgeDispositionCounts: "Suggested dispositions — accept {accept}, revise {revise}, reject {reject}",
++      taskJudgeDispositionCounts: "Suggested dispositions: accept {accept}, revise {revise}, reject {reject}",
+       taskJudgeAggPending: "Still waiting for judges",
+       taskJudgeAggSingle: "One usable opinion",
+       taskJudgeAggAgreement: "Agreement among usable judges",
+@@ -251,7 +291,7 @@
+       taskJudgeSuggestion: "Judge suggestion: {disposition}",
+       taskJudgeSummary: "Judge summary",
+       taskJudgeFindings: "Findings ({count})",
+-      taskJudgeFindingLine: "[{severity}] {path}: {behavior} — {recommendation}",
++      taskJudgeFindingLine: "[{severity}] {path}: {behavior}: {recommendation}",
+       taskJudgeNoFindings: "No findings reported",
+       taskJudgeMainDecides: "Main decides. Judge output is evidence, not a vote and not automatic acceptance.",
+       taskJudgeNext: "Next action: {action}",
+@@ -272,7 +312,7 @@
+       taskJudgeReasonPh: "What should the judges focus on?",
+       taskJudgeReasonRequired: "A reason is required to assign judges",
+       taskJudgeAssign: "Assign read-only judges",
+-      taskJudgeConfirm: "Assign 1–3 independent read-only judges to the current exact Candidate Revision? Judges cannot edit files, integrate, commit, push, vote, or retry. Main remains the final authority.",
++      taskJudgeConfirm: "Assign 1-3 independent read-only judges to the current exact Candidate Revision? Judges cannot edit files, integrate, commit, push, vote, or retry. Main remains the final authority.",
+       taskJudgeNone: "No judge review has been assigned for this Candidate yet.",
+       taskJudgeWaitingRevision: "A current Candidate Revision is required before a judge can be assigned.",
+       taskIntegration: "Integration",
+@@ -311,7 +351,8 @@
+       offline: "Offline",
+       page: {
+         overview: { title: "Overview", sub: "What is running and what needs you" },
+-        work: { title: "Work", sub: "Follow a Goal, independent Plan, or one-off Task workspace and the work inside it" },
++        work: { title: "Work", sub: "Read the current Goal: desired result, present fact, and the next checkpoint" },
++        decisions: { title: "Decision Center", sub: "Confirm the next action for work that is waiting on you" },
+         tasks: { title: "Board", sub: "Tasks as a Kanban board - click a card for the full story" },
+         plans: { title: "Plans", sub: "Multi-step work plans and their live progress" },
+         goals: { title: "Goals", sub: "Durable multi-task goals with milestone gates and next Main action" },
+@@ -458,7 +499,7 @@
+       workersReadinessReasonNativeGoalUnsupported: "This Worker forces native Goal execution, but the selected Runtime cannot prove a verifiable native Goal yet.",
+       workersReadinessNextExecutionMode: "Choose auto, one normal run, or a Runtime-native Goal.",
+       workersExecutionLabel: "Execution mode",
+-      workersExecutionAuto: "Auto — prefer a real Goal",
++      workersExecutionAuto: "Auto: prefer a real Goal",
+       workersExecutionSingleRun: "One normal run",
+       workersExecutionNativeGoal: "Native Goal (requires support)",
+       workersExecutionInherited: "Follow the system default",
+@@ -482,8 +523,8 @@
+       workersDurationMinutesUnit: "minutes",
+       workersDurationSecondsUnit: "seconds",
+       workersDurationMsUnit: "ms",
+-      workersRecoveryNarrative: "After a failed build or test, a repair continues the same Task with the execution mode frozen when the Task was created. Codex native-Goal work resumes the same native Goal, thread, and workspace. Other Runtimes resume the same real Session/workspace when the Runtime supports it — never described as a native Goal. Repairs are limited to the configured count, and ForkLight independently verifies every result again.",
+-      workersRecoverySeparateNote: "Main corrections, verification-only reruns, and adaptation are separate finite mechanisms — not one endless retry loop.",
++      workersRecoveryNarrative: "After a failed build or test, a repair continues the same Task with the execution mode frozen when the Task was created. Codex native-Goal work resumes the same native Goal, thread, and workspace. Other Runtimes resume the same real Session/workspace when the Runtime supports it: never described as a native Goal. Repairs are limited to the configured count, and ForkLight independently verifies every result again.",
++      workersRecoverySeparateNote: "Main corrections, verification-only reruns, and adaptation are separate finite mechanisms: not one endless retry loop.",
+       workersSafetyTitle: "ForkLight safety rules (fixed)",
+       workersSafetyIntro: "These rules always apply. The flexible limits above cannot weaken them.",
+       workersSafetyWorkspace: "Every Task runs in its own isolated workspace.",
+@@ -509,7 +550,7 @@
+       workersConsequenceNoProgress: "No-progress stop",
+       workersConsequenceFileLimit: "Files changed",
+       workersConsequenceLineLimit: "Lines changed",
+-      workersExecutionSingleRunHint: "One normal run only. No Goal is used; the Task runs once and, if repair is allowed, a repair continues the same real Session/workspace when the Runtime supports it — never a native Goal.",
++      workersExecutionSingleRunHint: "One normal run only. No Goal is used; the Task runs once and, if repair is allowed, a repair continues the same real Session/workspace when the Runtime supports it: never a native Goal.",
+       workersExecutionNativeGoalHint: "Forces a Runtime-native Goal. Choose this only when the Runtime can prove native Goal support. Codex can; Claude Code and Grok cannot yet.",
+       workersGroupTokenSummary: "Token {value}",
+       workersGroupFileSummary: "files {value}",
+@@ -659,14 +700,14 @@
+       taskSubmitClassFactClass: "taskClass",
+       taskSubmitClassFactFamily: "taskFamily",
+       taskSubmitClassMissing: "not filled in",
+-      taskSubmitClassNew: "new — no finished task uses it yet",
++      taskSubmitClassNew: "new: no finished task uses it yet",
+       taskSubmitClassExisting: "already used in {count} finished task(s)",
+       taskSubmitClassExistingComplete: "{complete} with a complete selection record",
+       taskSubmitFamilyChoices: "Established families",
+-      taskSubmitFamilyChoice: "{family} — {terminal} finished task(s), {complete} complete, {classes} class(es)",
++      taskSubmitFamilyChoice: "{family}: {terminal} finished task(s), {complete} complete, {classes} class(es)",
+       taskSubmitFamilyChoicesEmpty: "No established families yet",
+       taskSubmitClassChoices: "Existing classes in this family",
+-      taskSubmitClassChoice: "{taskClass} — {terminal} finished task(s), {complete} complete",
++      taskSubmitClassChoice: "{taskClass}: {terminal} finished task(s), {complete} complete",
+       taskSubmitClassChoicesHint: "Judge by meaning. ForkLight never replaces, renames, or merges a class automatically.",
+       taskSubmitClassReuseBtn: "Use this type",
+       taskSubmitClassReuseConfirm: "Apply this exact existing type to the draft? Only the taskClass field changes. The Task is not submitted and no Worker starts.",
+@@ -766,7 +807,7 @@
+       workersAdvRepairConsequenceWorker: "Set for this Worker: after a failed build or test, the same Worker automatically repairs up to {count} time(s).",
+       workersAdvRepairConsequenceTask: "Overridden for this Task: {count} automatic repair(s).",
+       workersQualityGroup: "Task Contract Quality",
+-      workersQualityGroupHint: "These settings check whether the Task description is clear — not how many files or lines the Worker may produce at runtime. Changing them does not cap Worker output.",
++      workersQualityGroupHint: "These settings check whether the Task description is clear: not how many files or lines the Worker may produce at runtime. Changing them does not cap Worker output.",
+       workersQualityGroupOpen: "Hide Contract Quality settings",
+       workersQualityMode: "Quality enforcement mode",
+       workersQualityInherit: "Use global setting",
+@@ -1021,7 +1062,7 @@
+       statsFinalDeliveryHint: "Verified: {repaired} Main-repaired, {checks} remediation check(s)",
+       statsAcceptedDeliveryLine: "Main accepted {accepted} of {sample} comparable outcomes ({rate}%)",
+       statsFinalDeliveryUnavailable: "{count} finished Tasks still lack a current Main or delivery decision",
+-      statsProviderCaveat: "Machine outcome preserves Worker success and failure. Final delivery is separate and counts only Main accept, verified Main repair, or applied Integration — never machine success alone. It does not rewrite the Worker result.",
++      statsProviderCaveat: "Machine outcome preserves Worker success and failure. Final delivery is separate and counts only Main accept, verified Main repair, or applied Integration: never machine success alone. It does not rewrite the Worker result.",
+       taskFinalDeliveryBadge: "verified delivery",
+       taskFinalDeliveryBadgeHint: "Main later verified the repaired product as delivered",
+       taskDualOutcome: "Outcome",
+@@ -1315,8 +1356,8 @@
+       journeyNoChangedFiles: "No changed files are recorded yet.",
+       journeyVerifAvailable: "Verification completed",
+       journeyVerifUnavailable: "Verification has not run yet for this task.",
+-      journeyVerifPassed: "All independent checks passed — the result matches acceptance criteria.",
+-      journeyVerifFailed: "Independent checks found issues — see each check below for what failed.",
++      journeyVerifPassed: "All independent checks passed: the result matches acceptance criteria.",
++      journeyVerifFailed: "Independent checks found issues: see each check below for what failed.",
+       journeyVerifFailedCount: "{failed} of {total} checks failed.",
+       journeyCheckPassed: "passed",
+       journeyCheckFailed: "failed",
+@@ -1360,7 +1401,7 @@
+       journeyCauseWhyRepairedAfterMachinePass: "Passing machine checks did not end Main's review. Main corrected specific issues and independently verified the final delivery.",
+       journeyCauseWhatAmended: "The Worker completed its run, but Main's original acceptance definition was wrong.",
+       journeyCauseWhyAmended: "Main corrected its own acceptance definition. The Worker was not rerun. The original machine result remains visible, and current source independently passed the amended checks.",
+-      journeyCauseWhyAuth: "The Provider rejected the API credentials — the Worker could not start meaningful work. Check the Keychain entry and endpoint settings.",
++      journeyCauseWhyAuth: "The Provider rejected the API credentials: the Worker could not start meaningful work. Check the Keychain entry and endpoint settings.",
+       journeyCauseWhyBudget: "A Token, budget, or account usage limit stopped the run before it finished. If the Provider account quota is exhausted, wait for recovery or switch Worker; if this Task hit its own configured limit, adjust that Task's limits or scope.",
+       journeyCauseWhyRuntime: "The coding runtime crashed or exited with an error. Examine the runtime setup and logs.",
+       journeyCauseWhyConnectivity: "The Worker could not reach the Provider service over the network. A working interactive Grok TUI can still coexist with a failing Daemon Worker because they may use different network or proxy environments. This is infrastructure connectivity, not model quality.",
+@@ -1411,10 +1452,10 @@
+       pageGuideTasks: "Your task board. Click any card to see the full collaboration journey: assignment, execution, checks, and outcome.",
+       pageGuidePlans: "Multi-step work plans and their live progress. Each plan lists its tasks as a board.",
+       pageGuideCompetitions: "Model competitions that compare candidates on the same work. Run a compare to see recommendations.",
+-      pageGuideInsights: "Evidence from completed work — what you spent, what the Worker used, and what can be estimated. Every number states what it counts and what it cannot prove.",
++      pageGuideInsights: "Evidence from completed work: what you spent, what the Worker used, and what can be estimated. Every number states what it counts and what it cannot prove.",
+       pageGuideModels: "Named model configurations (Provider + model id + endpoint). API keys stay in Keychain. Workers pick from this list.",
+       pageGuideWorkers: "Each Worker bundles a runtime, a model, and its own budget and advanced limits. The default Worker runs tasks that don't specify one.",
+-      pageGuideMains: "Connect your Main client (Claude Code, Codex, Grok Build) to ForkLight. Install MCP, Skill, or Plugin — choose what you prefer.",
++      pageGuideMains: "Connect your Main client (Claude Code, Codex, Grok Build) to ForkLight. Install MCP, Skill, or Plugin: choose what you prefer.",
+       pageGuideLimits: "System-wide hard ceilings for budget and concurrency. Per-Worker budgets live on the Workers page.",
+       pageStoryLabelPurpose: "This page",
+       pageStoryLabelInput: "Input",
+@@ -1982,7 +2023,7 @@
+       competitionProgressCreated: "{candidates} candidates; {terminal} of {total} finished. Created {created}.",
+       planProgressCompact: "{completed} of {total} finished; {active} currently active.",
+       planProgressFull: "Waiting {queued} · Prerequisites {waiting} · Active {active} · Blocked {blocked} · Failed {failed} · Finished {completed} ({percent}%)",
+-      noGoals: "No durable Goals yet. Submit a Goal file that supervises a 4–8 Task Plan.",
++      noGoals: "No durable Goals yet. Submit a Goal file that supervises a 4-8 Task Plan.",
+       goalProgressCompact: "{satisfied} of {total} milestones satisfied ({percent}%).",
+       goalWaitingLine: "Waiting: {text}",
+       goalNextLine: "Next: {text}",
+@@ -2130,10 +2171,10 @@
+       journeyStageImplementing: "The Worker is implementing the assignment",
+       journeyStageWorkerFinished: "The Worker finished; waiting for ForkLight verification",
+       journeyStageVerifying: "ForkLight is independently verifying the result",
+-      journeyStageRepairing: "The same Worker is repairing — round {round} of {total}",
++      journeyStageRepairing: "The same Worker is repairing: round {round} of {total}",
+       journeyStageAwaitingMainReview: "Waiting for Main review",
+       journeyStageMainAccepted: "Main approved the result; the next step is yours",
+-      journeyStageStopped: "Stopped — the reason and next step are below",
++      journeyStageStopped: "Stopped: the reason and next step are below",
+       journeyStageQueued: "Waiting to start",
+       journeyStageUnknown: "Current stage is not yet clear",
+       journeyStageRepairHint: "After this repair finishes, ForkLight independently verifies the result again.",
+@@ -2150,7 +2191,7 @@
+       journeyRepairSourceGlobal: "inherited global default",
+       journeyRepairSourceWorker: "set for this Worker",
+       journeyRepairSourceTask: "set for this Task",
+-      journeyRepairInProgress: "The same Worker is repairing now — round {round} of {total}. ForkLight will independently verify again afterward.",
++      journeyRepairInProgress: "The same Worker is repairing now: round {round} of {total}. ForkLight will independently verify again afterward.",
+       journeyRepairDisabled: "Automatic repair is off; after a failed build or test, Main decides the next step.",
+       journeyRepairExhausted: "All {total} automatic repair(s) have been used; Main decides the next step.",
+       journeyRepairConsumed: "{consumed} of {total} automatic repair(s) used; Main will review the final result.",
+@@ -2490,7 +2531,7 @@
+       decUnavailable: "Unavailable",
+       /* --- Model routing (Models page) --- */
+       mrSectionTitle: "Model routing advice",
+-      mrSectionBody: "ForkLight compares historical evidence across provider/model pairs. The result is advice for Main — Main still chooses. No automatic selection, no settings mutation, and no billable request runs.",
++      mrSectionBody: "ForkLight compares historical evidence across provider/model pairs. The result is advice for Main: Main still chooses. No automatic selection, no settings mutation, and no billable request runs.",
+       mrWhatIsDecided: "What is being decided",
+       mrWhatIsDecidedBody: "Give similar work the same short name. ForkLight then looks only at finished work with that name and compares the selected models using independently checked results.",
+       mrPolicyAdvancedTitle: "Advanced: change how evidence is weighed",
+@@ -2498,7 +2539,7 @@
+       mrPolicyMinSamples: "Minimum relevant samples",
+       mrPolicyMinSamplesHint: "Fewer than this → no recommendation; evidence is reported but is too thin to compare. Must be ≥ 1.",
+       mrPolicyUncertainty: "Uncertainty threshold",
+-      mrPolicyUncertaintyHint: "Score gap between top two must be larger than this fraction. 0 means any gap produces a recommendation; 1 means never recommend. Must be 0.0–1.0.",
++      mrPolicyUncertaintyHint: "Score gap between top two must be larger than this fraction. 0 means any gap produces a recommendation; 1 means never recommend. Must be 0.0-1.0.",
+       mrPolicyCompetition: "Competition on uncertainty",
+       mrPolicyCompetitionHint: "When evidence is insufficient or scores are too close, suggest a competition instead of picking a winner.",
+       mrPolicyWeightsTitle: "Factor weights",
+@@ -2508,7 +2549,7 @@
+       mrAcceptedDeliveryFact: "Main accepted {accepted} of {sample} comparable final-delivery outcomes ({rate}%).",
+       mrAcceptedDeliveryNoComparable: "No comparable Main or delivery decisions yet for this candidate.",
+       mrAcceptedDeliveryUnavailable: "{count} finished Tasks still lack a current Main or delivery decision and are not scored here.",
+-      mrAcceptedDeliveryNotMachine: "Machine success without Main accept, verified repair, or applied Integration is unavailable — never treated as accepted delivery. This factor never disables a model; Main remains free to override the advice.",
++      mrAcceptedDeliveryNotMachine: "Machine success without Main accept, verified repair, or applied Integration is unavailable: never treated as accepted delivery. This factor never disables a model; Main remains free to override the advice.",
+       mrPolicyVerifiedBehavior: "Verified behavior",
+       mrPolicyVerifiedBehaviorHint: "How much independently-checked correct behavior counts. Higher values prefer models whose results pass verification.",
+       mrPolicyModelQualityFailure: "Model-quality failure penalty",
+@@ -2523,7 +2564,7 @@
+       mrPolicyDurationHint: "How much runtime duration evidence influences the choice. 0 = visible but does not affect ranking. Only works when all candidates have complete duration samples.",
+       mrPolicyBudgetReliability: "Reached review before hitting the limit",
+       mrPolicyBudgetReliabilityHint: "How much to prefer a model that reaches a reviewable result before its USD or Token limit. 0 means it does not affect ranking. Runs are compared only when the same limits were actually enforced. An uncapped success is not proof that it can finish under a limit. This is not model quality and not a Provider bill.",
+-      mrWeightZeroNote: "This factor is recorded as evidence but set to zero weight — it does not affect the recommendation.",
++      mrWeightZeroNote: "This factor is recorded as evidence but set to zero weight: it does not affect the recommendation.",
+       mrCostUnavailable: "Official cost is unavailable for one or more candidates (different currencies, missing quotes, or incomplete coverage). It does not affect the recommendation even at non-zero weight.",
+       mrDurationUnavailable: "Duration is not available for one or more candidates (incomplete coverage). It does not affect the recommendation even at non-zero weight.",
+       mrBudgetReliabilityUnavailable: "This cannot be compared yet because the runs do not share enough trustworthy evidence under the same enforced USD or Token limits.",
+@@ -2544,7 +2585,7 @@
+       mrFirstPassExcluded: "Excluded {count} finished Tasks where the cause or evidence was not comparable (missing verification, credentials, Provider, budget, workspace, interruption, policy-only, or amended acceptance).",
+       mrFirstPassNotFinalQuality: "This is separate from eventual accepted delivery and correction effort. It never disables a model; Main remains free to override the advice.",
+       mrCandidatesTitle: "Candidates to compare",
+-      mrCandidatesHint: "Select 2–10 saved Worker Profiles. Profiles with the same executable identity remain separate choices, but their shared history counts as one comparison point.",
++      mrCandidatesHint: "Select 2-10 saved Worker Profiles. Profiles with the same executable identity remain separate choices, but their shared history counts as one comparison point.",
+       mrTaskClassLabel: "Work type",
+       mrTaskClassHint: "Use the same short name for similar work, up to 200 characters. Only completed work with exactly this name is compared.",
+       mrTaskClassPlaceholder: "e.g. hub-ui, workspace-observability",
+@@ -2566,10 +2607,10 @@
+       mrWorkerProfileId: "Worker Profile: {profileId}",
+       mrCandidateWorker: "{worker} ({provider} / {model})",
+       mrRecommendationConfidence: "Evidence separation: {confidence}%. A larger value means the compared records distinguish the top model more clearly.",
+-      mrRecommendationOverride: "Main may override this — routing is advisory only.",
++      mrRecommendationOverride: "Main may override this: routing is advisory only.",
+       mrNoRecommendation: "No recommendation is available for this task class.",
+       mrNoRecommendationReason: "Why: {reason}",
+-      mrInsufficientSamples: "Insufficient evidence — at least one candidate has fewer than {min} completed Tasks for this task class. More completed work is needed before a reliable comparison.",
++      mrInsufficientSamples: "Insufficient evidence: at least one candidate has fewer than {min} completed Tasks for this task class. More completed work is needed before a reliable comparison.",
+       mrNoExactHistory: "There is no exact task type history yet for this work type.",
+       mrNoFamilyHistory: "There are no broader-category records yet for the supplied family.",
+       mrIncompleteFamilyComparison: "Related history exists in this broader category, but every candidate needs at least {min} usable records before they can be compared fairly. Sample counts are not model quality, and they do not by themselves start a Competition.",
+@@ -2632,13 +2673,13 @@
+       mrKnowledge: "What ForkLight knows",
+       mrKnowledgeRecommendation: "ForkLight has enough comparable evidence to offer a recommendation.",
+       mrKnowledgeUnknown: "ForkLight does not yet have enough comparable evidence to tell which model is better for this kind of work.",
+-      mrUnknownExplanation: "Main chose {provider}/{model} based on {reason}. ForkLight does not yet know which model is better — missing evidence does not mean 'should compete'.",
++      mrUnknownExplanation: "Main chose {provider}/{model} based on {reason}. ForkLight does not yet know which model is better: missing evidence does not mean 'should compete'.",
+       mrRecommendationExplanation: "Existing evidence favours {provider}/{model} with a confidence of {confidence}%. {scopeText}",
+       mrFamilyEvidenceNote: "This recommendation uses broader category records ({family}) because exact task type evidence is still too thin.",
+       mrCompetitionDecisionTitle: "Competition decision",
+       mrCompetitionNotAdvised: "No competition is advised for this task.",
+       mrCompetitionNotAdvisedReason: "Main's competition intent is '{intent}' and no competition trigger matched the enabled settings.",
+-      mrCompetitionAdvised: "Competition advised — Main's intent is '{intent}' with matching trigger(s): {triggers}.",
++      mrCompetitionAdvised: "Competition advised: Main's intent is '{intent}' with matching trigger(s): {triggers}.",
+       mrCompetitionAdvisedHint: "A competition may produce direct comparison data for this combination. It is suggested because Main explicitly asked, not because evidence is described as unknown.",
+       mrCompetitionRequired: "Main requires a competition. Up to {count} candidates will be compared.",
+       mrPolicyFamilyMinSamples: "Family evidence threshold",
+@@ -2980,11 +3021,11 @@
+       /* --- Token usage reconciliation --- */
+       tokRecTitle: "Token usage reconciliation (diagnostic)",
+       tokRecTitleSimple: "Token usage reconciliation",
+-      tokRecIntro: "Top-level terminal Token counters are compared to the summed per-model breakdown reported by the Worker runtime. A mismatch is a soft telemetry-quality warning — it does not change Worker volume, cost, Task status, or model scores.",
+-      tokRecStateMatched: "Matched — all compared attempts have identical top-level and per-model counters.",
+-      tokRecStateMismatch: "Mismatch — at least one compared attempt has a difference between top-level and per-model counters.",
+-      tokRecStatePartial: "Partial — some attempts were compared, while others lack usable usage, breakdown, or counter evidence.",
+-      tokRecStateUnavailable: "Unavailable — no Attempt has two usable counter families to compare.",
++      tokRecIntro: "Top-level terminal Token counters are compared to the summed per-model breakdown reported by the Worker runtime. A mismatch is a soft telemetry-quality warning: it does not change Worker volume, cost, Task status, or model scores.",
++      tokRecStateMatched: "Matched: all compared attempts have identical top-level and per-model counters.",
++      tokRecStateMismatch: "Mismatch: at least one compared attempt has a difference between top-level and per-model counters.",
++      tokRecStatePartial: "Partial: some attempts were compared, while others lack usable usage, breakdown, or counter evidence.",
++      tokRecStateUnavailable: "Unavailable: no Attempt has two usable counter families to compare.",
+       tokRecCompared: "Compared attempts",
+       tokRecMatched: "Matched",
+       tokRecMismatched: "Mismatched",
+@@ -3010,7 +3051,7 @@
+       tokRecDeltaNegative: "{delta} (perModel reported less)"
+     },
+     zh: {
+-      brandSub: "本地控制台",
++      brandSub: "执行工作台",
+       navConfigure: "配置",
+       navOperate: "运行",
+       navModels: "模型",
+@@ -3019,6 +3060,46 @@
+       navDelivery: "交付",
+       navOverview: "总览",
+       navWork: "工作",
++      navDecisions: "决定中心",
++      navSystem: "系统",
++      navLimits: "限额",
++      mobileBack: "返回",
++      goalTreeLabel: "Goal 树",
++      goalTreeSearch: "搜索 Goal",
++      goalTreeNow: "当前",
++      goalTreeHistory: "历史",
++      goalTreeEmptyNow: "还没有进行中的 Goal。先描述一个要完成的结果。",
++      goalTreeEmptyHistory: "历史上还没有已完成的 Goal。",
++      goalTreeResize: "调整 Goal 树宽度",
++      goalFileResult: "期望结果",
++      goalFileResultMissing: "这个 Goal 还没有记录期望结果。",
++      goalFileTruth: "现在的事实",
++      goalFileDecision: "是否需要决定",
++      goalFileDecisionYes: "决定中心有 {count} 项等待你处理。",
++      goalFileDecisionNo: "这个 Goal 现在不需要你决定。",
++      goalFileOpenDecisions: "打开决定中心",
++      goalFilePhase: "当前阶段和下一个检查点",
++      goalFileTask: "当前 Task",
++      goalFileBlockers: "阻塞",
++      goalFileNoBlockers: "当前没有阻塞。",
++      goalFileDelivery: "交付与历史",
++      goalFileDeliveryLive: "这个 Goal 的交付仍在进行。",
++      goalFileDeliveryDone: "这个 Goal 已处于「{status}」。历史仍可阅读。",
++      goalFileEvidence: "技术证据",
++      goalFileFact: "事实：{text}",
++      goalFileReason: "原因：{text}",
++      goalFileRetained: "已保留：{text}",
++      goalFileNext: "下一步：{text}",
++      setupBlockerReason: "配置正在挡住当前工作：{text}",
++      setupBlockerNext: "打开{action}",
++      decisionCenterHint: "所有待你决定的事项按 Goal 列在这里。在你确认之前，不会执行任何动作。",
++      decisionCenterEmpty: "现在没有待决定事项。请回到当前 Goal 文件继续。",
++      decisionParentless: "没有所属 Goal 的 Task",
++      decisionFact: "发生了什么：{text}",
++      decisionReason: "为什么需要决定：{text}",
++      decisionRetained: "已经保留：{text}",
++      decisionImpact: "采取动作的影响：{text}",
++      decisionOpen: "打开确认操作",
+       navBoard: "看板",
+       navPlans: "计划",
+       navGoals: "目标",
+@@ -3077,7 +3158,7 @@
+       taskResume: "普通续跑",
+       taskRevise: "继续打磨已通过候选",
+       taskCorrect: "复用失败候选继续修",
+-      taskCorrectTitle: "Main 修正 — 复用现有候选成果",
++      taskCorrectTitle: "Main 修正: 复用现有候选成果",
+       taskCorrectHint: "让 Worker 直接修原工作区，不从头重做，然后重新运行全部原始检查。它有独立的次数额度，不占用普通续跑和额外尝试额度。",
+       taskCorrectFeedback: "修正反馈（必填）",
+       taskCorrectFeedbackPh: "Worker 应在现有工作中修复的具体问题是什么？",
+@@ -3135,7 +3216,7 @@
+       taskCorrectRevisionValue: "第 {ordinal} 次 Attempt，{files} 个文件，{lines} 行变更，摘要 {digest}",
+       taskReverify: "仅重新验收",
+       taskReverifyTitle: "重新验收保留的候选（不调用 Worker）",
+-      taskReverifyHint: "对保留的候选重新运行全部原始验收命令，不再调用模型。适用于行为验收失败的候选、机器检查已通过且 Main 已精确记录 revise 并在本地修好后的候选，或确实已启动但意外结束于验收之前的 Worker——其保留文件会被独立检查。不启动 Worker，也不新建 Attempt；原 Attempt 的记录和状态保持不变。本地验收仍会占用时间。通过后仍需一次全新的 Main 接受才能合入。",
++      taskReverifyHint: "对保留的候选重新运行全部原始验收命令，不再调用模型。适用于行为验收失败的候选、机器检查已通过且 Main 已精确记录 revise 并在本地修好后的候选，或确实已启动但意外结束于验收之前的 Worker：其保留文件会被独立检查。不启动 Worker，也不新建 Attempt；原 Attempt 的记录和状态保持不变。本地验收仍会占用时间。通过后仍需一次全新的 Main 接受才能合入。",
+       taskReverifyReason: "为何仅重新验收（必填）",
+       taskReverifyReasonPh: "为什么保留的候选值得只做一次验收重跑？",
+       taskReverifyReasonRequired: "仅重新验收需要填写原因",
+@@ -3148,7 +3229,7 @@
+       taskReverifyThreeWay: "不必再调 Worker 的选项：对行为失败候选仅重新验收，在 Main revise 并本地修好后对机器成功候选重新验收，或对在验收前意外结束的 Worker 留下的文件独立复查。用 Worker 修正、或用新 Task 重来仍是独立选择。",
+       taskReverifyJourneyTitle: "候选重新验收（不调用 Worker）",
+       taskReverifyJourneyIntro: "Main 对保留的候选重新运行了原始验收命令，没有再次调用 Worker。原 Attempt 的记录和状态保持不变；这是一次独立的仅验收过程。",
+-      taskReverifyRuntimeHint: "Worker 在独立验收完成前意外结束。ForkLight 会对它留下的文件重新运行原始验收检查——不启动 Worker，也不新建 Attempt。原 Attempt 的记录和状态保持不变。合入前仍需一次全新的 Main 接受。",
++      taskReverifyRuntimeHint: "Worker 在独立验收完成前意外结束。ForkLight 会对它留下的文件重新运行原始验收检查：不启动 Worker，也不新建 Attempt。原 Attempt 的记录和状态保持不变。合入前仍需一次全新的 Main 接受。",
+       taskReverifyRuntimeJourneyIntro: "Worker 意外结束；它的保留文件已在未启动 Worker、未新建 Attempt 的情况下被独立检查。原 Task/Attempt 历史保持不变。",
+       taskReverifyJourneyOutcome: "重新验收结果：{status}",
+       taskReverifyJourneyCommands: "验收命令：{passed}/{count} 通过（{duration}ms）",
+@@ -3226,7 +3307,7 @@
+       taskJudgeAggregateTitle: "多位裁判的综合证据",
+       taskJudgeAggregateState: "证据状态：{state}",
+       taskJudgeAggregateCounts: "可用 {usable} · 不可用 {unusable} · 进行中 {pending} · 共 {total}",
+-      taskJudgeDispositionCounts: "建议处置 — 接受 {accept}，修订 {revise}，拒绝 {reject}",
++      taskJudgeDispositionCounts: "建议处置: 接受 {accept}，修订 {revise}，拒绝 {reject}",
+       taskJudgeAggPending: "仍在等待裁判",
+       taskJudgeAggSingle: "仅一份可用意见",
+       taskJudgeAggAgreement: "可用裁判意见一致",
+@@ -3257,7 +3338,7 @@
+       taskJudgeSuggestion: "裁判建议：{disposition}",
+       taskJudgeSummary: "裁判摘要",
+       taskJudgeFindings: "发现（{count}）",
+-      taskJudgeFindingLine: "[{severity}] {path}：{behavior} — {recommendation}",
++      taskJudgeFindingLine: "[{severity}] {path}：{behavior}: {recommendation}",
+       taskJudgeNoFindings: "未报告发现",
+       taskJudgeMainDecides: "由 Main 做最终决定。裁判输出是证据，不是投票，也不是自动接受。",
+       taskJudgeNext: "下一步：{action}",
+@@ -3278,7 +3359,7 @@
+       taskJudgeReasonPh: "希望裁判重点关注什么？",
+       taskJudgeReasonRequired: "指派裁判需要填写原因",
+       taskJudgeAssign: "指派只读裁判",
+-      taskJudgeConfirm: "为当前精确候选版本指派 1–3 位独立只读裁判？裁判不能编辑文件、合入、提交、推送、投票或自动重试。最终决定仍由 Main 作出。",
++      taskJudgeConfirm: "为当前精确候选版本指派 1-3 位独立只读裁判？裁判不能编辑文件、合入、提交、推送、投票或自动重试。最终决定仍由 Main 作出。",
+       taskJudgeNone: "尚未为该候选指派裁判审查。",
+       taskJudgeWaitingRevision: "需要当前候选版本后才能指派裁判。",
+       taskIntegration: "集成 Integration",
+@@ -3317,7 +3398,8 @@
+       offline: "离线",
+       page: {
+         overview: { title: "总览", sub: "当前运行状态与需要你关注的事项" },
+-        work: { title: "工作", sub: "查看 Goal、独立 Plan 或一次性 Task 工作区，以及其中的工作" },
++        work: { title: "工作", sub: "先看当前 Goal 的期望结果、现在的事实和下一个检查点" },
++        decisions: { title: "决定中心", sub: "确认等待你处理的下一步动作" },
+         tasks: { title: "看板", sub: "任务看板 - 点击卡片查看完整详情" },
+         plans: { title: "计划", sub: "多步骤工作计划与实时进度" },
+         goals: { title: "目标", sub: "带里程碑闸门的持久多任务目标，以及下一步 Main 动作" },
+@@ -3349,7 +3431,7 @@
+       modelsImportedCodex: "已导入 {count} 个 Codex 模型",
+       workersGuideTitle: "Worker",
+       workersGuideBody: "每个 Worker 是完整的执行预设：运行时 + 模型（来自「模型」页）+ 自己的预算/effort。Main 可通过 workerProfileId 指定，否则用默认 Worker。",
+-      workersEmpty: "暂无 Worker — 请先添加模型，再创建 Worker。",
++      workersEmpty: "暂无 Worker: 请先添加模型，再创建 Worker。",
+       workersFormTitle: "添加或更新 Worker",
+       workersId: "Worker 标识（ForkLight 内部使用）",
+       workersLabel: "显示名称",
+@@ -3464,7 +3546,7 @@
+       workersReadinessReasonNativeGoalUnsupported: "此 Worker 强制使用原生 Goal 执行，但所选 Runtime 还无法证明存在可验证的原生 Goal。",
+       workersReadinessNextExecutionMode: "请选择自动、单次执行或 Runtime 原生 Goal。",
+       workersExecutionLabel: "执行方式",
+-      workersExecutionAuto: "自动 —— 优先使用真实 Goal",
++      workersExecutionAuto: "自动：优先使用真实 Goal",
+       workersExecutionSingleRun: "单次执行",
+       workersExecutionNativeGoal: "原生 Goal（需要 Runtime 支持）",
+       workersExecutionInherited: "跟随系统默认",
+@@ -3583,7 +3665,7 @@
+       needsAttention: "需要关注",
+       noFailed: "当前没有失败或中断的任务。",
+       noPlans: "尚无提交的计划",
+-      noGoals: "尚无持久目标。请提交一份监督 4–8 个 Task 的 Goal 文件。",
++      noGoals: "尚无持久目标。请提交一份监督 4-8 个 Task 的 Goal 文件。",
+       noCompetitions: "尚无竞赛",
+       noTasks: "尚无任务 - 从 CLI 或 MCP 提交后会显示在此",
+       noStats: "尚无已完成任务的统计",
+@@ -3666,14 +3748,14 @@
+       taskSubmitClassFactClass: "精确工作类型（taskClass）",
+       taskSubmitClassFactFamily: "稳定大类（taskFamily）",
+       taskSubmitClassMissing: "未填写",
+-      taskSubmitClassNew: "首次出现——还没有已结束任务使用过",
++      taskSubmitClassNew: "首次出现：还没有已结束任务使用过",
+       taskSubmitClassExisting: "已使用过 {count} 个已结束任务",
+       taskSubmitClassExistingComplete: "{complete} 个带完整选择记录",
+       taskSubmitFamilyChoices: "已有的大类",
+-      taskSubmitFamilyChoice: "{family} — {terminal} 个已结束任务，{complete} 个完整记录，{classes} 种 class",
++      taskSubmitFamilyChoice: "{family}: {terminal} 个已结束任务，{complete} 个完整记录，{classes} 种 class",
+       taskSubmitFamilyChoicesEmpty: "还没有已建立的大类",
+       taskSubmitClassChoices: "同一大类里已有的工作类型",
+-      taskSubmitClassChoice: "{taskClass} — {terminal} 个已结束任务，{complete} 个完整记录",
++      taskSubmitClassChoice: "{taskClass}: {terminal} 个已结束任务，{complete} 个完整记录",
+       taskSubmitClassChoicesHint: "请按真实含义判断。ForkLight 不会自动替换、改名或合并 class。",
+       taskSubmitClassReuseBtn: "使用这个类型",
+       taskSubmitClassReuseConfirm: "确定把这个已有类型应用到草稿？只会修改 taskClass 字段，不会提交任务，也不会启动 Worker。",
+@@ -3773,7 +3855,7 @@
+       workersAdvRepairConsequenceWorker: "为此 Worker 单独设置：构建或测试失败后，自动交给同一个 Worker 修复 {count} 次。",
+       workersAdvRepairConsequenceTask: "此任务覆盖：自动修复 {count} 次。",
+       workersQualityGroup: "任务说明质量",
+-      workersQualityGroupHint: "这些设置检查任务说明是否清晰 —— 它们不限制 Worker 在运行时能产出多少文件或代码行。修改这些值不会限制 Worker 的输出范围。",
++      workersQualityGroupHint: "这些设置检查任务说明是否清晰：它们不限制 Worker 在运行时能产出多少文件或代码行。修改这些值不会限制 Worker 的输出范围。",
+       workersQualityGroupOpen: "收起任务说明质量设置",
+       workersQualityMode: "质量检查执行方式",
+       workersQualityInherit: "沿用全局设置",
+@@ -4322,8 +4404,8 @@
+       journeyNoChangedFiles: "尚未记录代码文件变更。",
+       journeyVerifAvailable: "核验已完成",
+       journeyVerifUnavailable: "此任务尚未运行核验。",
+-      journeyVerifPassed: "所有独立检查均已通过 — 结果符合验收标准。",
+-      journeyVerifFailed: "独立检查发现问题 — 请查看下方各项检查失败的详情。",
++      journeyVerifPassed: "所有独立检查均已通过: 结果符合验收标准。",
++      journeyVerifFailed: "独立检查发现问题: 请查看下方各项检查失败的详情。",
+       journeyVerifFailedCount: "{total} 项检查中有 {failed} 项失败。",
+       journeyCheckPassed: "通过",
+       journeyCheckFailed: "失败",
+@@ -4367,7 +4449,7 @@
+       journeyCauseWhyRepairedAfterMachinePass: "机器检查通过不代表 Main 评审结束。Main 发现并修正了具体问题，随后独立核验了最终交付。",
+       journeyCauseWhatAmended: "Worker 已完成执行，但 Main 原先写的验收定义有误。",
+       journeyCauseWhyAmended: "Main 修正了自己的验收定义。没有重跑 Worker。原始机器结果仍然可见，当前源码已通过修正后的独立检查。",
+-      journeyCauseWhyAuth: "Provider 拒绝了 API 凭证 — Worker 无法启动有意义的工作。请检查 Keychain 中的凭证和端点设置。",
++      journeyCauseWhyAuth: "Provider 拒绝了 API 凭证: Worker 无法启动有意义的工作。请检查 Keychain 中的凭证和端点设置。",
+       journeyCauseWhyBudget: "Token、预算或账户额度上限使运行中止。若是 Provider 账户额度耗尽，请等待恢复或切换 Worker；若是本任务触达了自身配置上限，再调整该任务的限额或缩小范围。",
+       journeyCauseWhyRuntime: "编码运行时崩溃或报错退出。请检查运行时配置与日志。",
+       journeyCauseWhyConnectivity: "Worker 无法通过网络访问 Provider 服务。交互式 Grok TUI 正常，并不代表 Daemon 里的 Worker 也能连通，因为两者的网络或代理环境可能不同。这是基础设施连通性问题，不是模型质量问题。",
+@@ -4418,7 +4500,7 @@
+       pageGuideTasks: "你的任务看板。点击任意卡片查看完整的协作过程：任务分配、执行、检查和结果。",
+       pageGuidePlans: "多步骤工作计划与实时进度。每个计划以看板形式列出任务。",
+       pageGuideCompetitions: "模型竞赛，比较不同候选模型在相同工作上的表现。运行评估可查看推荐结果。",
+-      pageGuideInsights: "已完成工作的证据 — 你花了什么、Worker 用了什么、可以估算什么。每个数字都说明自己统计了什么、不能证明什么。",
++      pageGuideInsights: "已完成工作的证据: 你花了什么、Worker 用了什么、可以估算什么。每个数字都说明自己统计了什么、不能证明什么。",
+       pageGuideModels: "命名的模型配置（厂商 + 模型 id + 端点）。API 密钥仅存储在 Keychain 中。Worker 从此列表选择。",
+       pageGuideWorkers: "每个 Worker 组合了运行时、模型以及自己的预算和高级限制。未指定的任务使用默认 Worker。",
+       pageGuideMains: "将你的 Main 客户端（Claude Code、Codex、Grok Build）连接到 ForkLight。可按需安装 MCP、Skill 或 Plugin。",
+@@ -4468,7 +4550,7 @@
+       pageStoryPlansOutput: "带进度条和阶段计数的计划卡片。",
+       pageStoryPlansNext: "打开计划查看其看板，处理被阻塞或失败的步骤。",
+       pageStoryGoalsPurpose: "查看一个复用 Plan 调度、可跨重启持续推进的持久目标。",
+-      pageStoryGoalsInput: "一份带 4–8 个里程碑闸门、指向 Work Plan 的 Goal 文件。",
++      pageStoryGoalsInput: "一份带 4-8 个里程碑闸门、指向 Work Plan 的 Goal 文件。",
+       pageStoryGoalsProcess: "Task 按普通路径执行；Main 接受与合入闸门等待精确证据。",
+       pageStoryGoalsOutput: "目标、当前里程碑、阻塞原因，以及下一步唯一 Main 动作。",
+       pageStoryGoalsNext: "接受、合入、继续推进或停止 - 绝不会自动替你决定。",
+@@ -5155,7 +5237,7 @@
+       journeyRepairSourceGlobal: "继承全局默认",
+       journeyRepairSourceWorker: "为此 Worker 设置",
+       journeyRepairSourceTask: "此任务覆盖",
+-      journeyRepairInProgress: "同一个 Worker 正在修复 —— 第 {round}/{total} 次。修复后 ForkLight 会再次独立验收。",
++      journeyRepairInProgress: "同一个 Worker 正在修复：第 {round}/{total} 次。修复后 ForkLight 会再次独立验收。",
+       journeyRepairDisabled: "自动修复已关闭；构建或测试失败后，下一步由 Main 决定。",
+       journeyRepairExhausted: "已用尽 {total} 次自动修复配额；下一步由 Main 决定。",
+       journeyRepairConsumed: "已使用 {consumed}/{total} 次自动修复；最终结果将由 Main 审查。",
+@@ -5218,7 +5300,7 @@
+       liveStageMeaningWaiting: "等待是正常的",
+       liveStageMeaningCompleted: "Worker 的工作已完成",
+       liveStageMeaningProcessing: "运行环境仍在报告模型活动，但还不能说明已经产出有效结果",
+-      liveStageMeaningQuiet: "暂时看不到新的更新——这不等于失败",
++      liveStageMeaningQuiet: "暂时看不到新的更新：这不等于失败",
+       liveStageMeaningAttention: "已出现明确失败证据并停止",
+       liveStageMeaningFollowUp: "原任务结果没有改变；当前只是在做本地后续检查",
+       liveStageMeaningFollowUpQuiet: "原任务结果没有改变；这次检查还没有新的完成记录",
+@@ -5495,7 +5577,7 @@
+       decUnavailable: "不可用",
+       /* --- Model routing (Models page) --- */
+       mrSectionTitle: "模型路由建议",
+-      mrSectionBody: "ForkLight 比较各 Provider/模型对的历史证据。结果是给 Main 的建议 — Main 仍然最终决策。不会自动选择，不会修改设置，也不会发起计费请求。",
++      mrSectionBody: "ForkLight 比较各 Provider/模型对的历史证据。结果是给 Main 的建议: Main 仍然最终决策。不会自动选择，不会修改设置，也不会发起计费请求。",
+       mrWhatIsDecided: "正在决策什么",
+       mrWhatIsDecidedBody: "先给相似工作一个固定的短名称。ForkLight 只查看这个名称下已经完成的工作，再依据独立验收结果比较所选模型。",
+       mrPolicyAdvancedTitle: "高级设置：调整各类证据的重要程度",
+@@ -5503,7 +5585,7 @@
+       mrPolicyMinSamples: "最少相关样本数",
+       mrPolicyMinSamplesHint: "低于此数 → 不出推荐；证据会报告但样本太少无法比较。必须 ≥ 1。",
+       mrPolicyUncertainty: "不确定性阈值",
+-      mrPolicyUncertaintyHint: "前两名得分差距必须超过此比例。0 表示任何差距都出推荐；1 表示永不推荐。必须 0.0–1.0。",
++      mrPolicyUncertaintyHint: "前两名得分差距必须超过此比例。0 表示任何差距都出推荐；1 表示永不推荐。必须 0.0-1.0。",
+       mrPolicyCompetition: "不确定时建议竞赛",
+       mrPolicyCompetitionHint: "证据不足或得分太接近时，建议用竞赛来获取直接比较数据，而非直接选胜者。",
+       mrPolicyWeightsTitle: "因子权重",
+@@ -5528,7 +5610,7 @@
+       mrPolicyDurationHint: "运行时耗时证据对选择的影响。0 = 可见但不影响排序。仅当所有候选都有完整耗时采样时生效。",
+       mrPolicyBudgetReliability: "在触顶前跑到可验收结果",
+       mrPolicyBudgetReliabilityHint: "控制这项证据对模型排序的影响。0 表示不参与排序。只有每次任务使用相同、且确认真正生效的金额或 Token 上限时才公平比较；没设上限的成功不能证明它能在某个上限内跑完。这不是模型质量，也不是 Provider 账单。",
+-      mrWeightZeroNote: "该因子已记录证据，但权重为零 — 对推荐无影响。",
++      mrWeightZeroNote: "该因子已记录证据，但权重为零: 对推荐无影响。",
+       mrCostUnavailable: "一个或多个候选缺少可比官方成本证据（币种不同、缺少报价或覆盖不全）。即使权重非零也不影响推荐。",
+       mrDurationUnavailable: "一个或多个候选的耗时数据不完整。即使权重非零也不影响推荐。",
+       mrBudgetReliabilityUnavailable: "暂时不能比较这项：这些运行没有在相同且确认生效的金额或 Token 上限下积累足够证据。",
+@@ -5549,7 +5631,7 @@
+       mrFirstPassExcluded: "有 {count} 个已完成 Task 因原因或证据不可比而未计入（缺少验证、凭证、Provider、预算、工作区、中断、仅策略失败或正式修订验收）。",
+       mrFirstPassNotFinalQuality: "这与最终已接受交付、以及修正轮次是分开统计的。它不会禁用模型；Main 仍可覆盖建议。",
+       mrCandidatesTitle: "对比候选",
+-      mrCandidatesHint: "选择 2–10 个已保存的 Worker Profile。执行身份相同的 Profile 仍可分别选择，但它们共享的历史只算一个独立比较对象。",
++      mrCandidatesHint: "选择 2-10 个已保存的 Worker Profile。执行身份相同的 Profile 仍可分别选择，但它们共享的历史只算一个独立比较对象。",
+       mrTaskClassLabel: "工作类型",
+       mrTaskClassHint: "给相似工作使用同一个短名称，最长 200 个字符。这里只比较名称完全相同的已完成工作。",
+       mrTaskClassPlaceholder: "例如 hub-ui、workspace-observability",
+@@ -5571,10 +5653,10 @@
+       mrWorkerProfileId: "Worker Profile：{profileId}",
+       mrCandidateWorker: "{worker}（{provider} / {model}）",
+       mrRecommendationConfidence: "证据区分度：{confidence}%。数值越大，表示现有可比记录越能把第一名与其他模型区分开。",
+-      mrRecommendationOverride: "Main 可以推翻此建议 — 路由仅为建议，不做自动选择。",
++      mrRecommendationOverride: "Main 可以推翻此建议: 路由仅为建议，不做自动选择。",
+       mrNoRecommendation: "该任务类暂无可用推荐。",
+       mrNoRecommendationReason: "原因：{reason}",
+-      mrInsufficientSamples: "证据不足 — 至少一个候选在此任务类下完成的 Task 数不足 {min} 个。需要更多已完成工作才能进行可靠比较。",
++      mrInsufficientSamples: "证据不足: 至少一个候选在此任务类下完成的 Task 数不足 {min} 个。需要更多已完成工作才能进行可靠比较。",
+       mrNoExactHistory: "此工作类型还没有精确任务类型的历史记录。",
+       mrNoFamilyHistory: "所给大类下还没有任何可用的相关记录。",
+       mrIncompleteFamilyComparison: "这个大类已有相关历史，但每个候选都需要至少 {min} 条可用记录后才能公平比较。样本数量不是模型质量，也不会单独启动 Competition。",
+@@ -5637,13 +5719,13 @@
+       mrKnowledge: "ForkLight 知道什么",
+       mrKnowledgeRecommendation: "ForkLight 有足够的可比证据来提供推荐。",
+       mrKnowledgeUnknown: "ForkLight 暂时没有足够的可比证据来判断哪个模型更适合这类工作。",
+-      mrUnknownExplanation: "Main 基于 {reason} 选择了 {provider}/{model}。目前还不知道哪个模型更好 — 缺少样本不代表'应该竞争'。",
++      mrUnknownExplanation: "Main 基于 {reason} 选择了 {provider}/{model}。目前还不知道哪个模型更好: 缺少样本不代表'应该竞争'。",
+       mrRecommendationExplanation: "现有证据更支持 {provider}/{model}，区分度为 {confidence}%。{scopeText}",
+       mrFamilyEvidenceNote: "此推荐使用了更广泛的大类记录（{family}），因为精确任务类型的证据仍然太少。",
+       mrCompetitionDecisionTitle: "竞争决策",
+       mrCompetitionNotAdvised: "本任务不建议竞争。",
+       mrCompetitionNotAdvisedReason: "Main 的竞争意图是'{intent}'，且没有竞争触发条件匹配已启用的设置。",
+-      mrCompetitionAdvised: "建议竞争 — Main 的意图是'{intent}'，匹配的触发条件：{triggers}。",
++      mrCompetitionAdvised: "建议竞争: Main 的意图是'{intent}'，匹配的触发条件：{triggers}。",
+       mrCompetitionAdvisedHint: "竞争可以为这种组合产生直接比较数据。建议竞争是因为 Main 明确表达了原因，而不是因为证据被标注为未知。",
+       mrCompetitionRequired: "Main 要求进行竞争。最多比较 {count} 个候选。",
+       mrPolicyFamilyMinSamples: "大类证据样本门槛",
+@@ -5818,7 +5900,7 @@
+       deliveryInvalidDuplicateId: "Profile id 已经存在",
+       deliveryInvalidEmptyProfile: "保存前至少需要一个 Profile",
+       deliveryInvalidInvalidId: "Profile id 格式不符合要求",
+-      deliveryInvalidLabel: "显示名称需要包含 1–80 个字符",
++      deliveryInvalidLabel: "显示名称需要包含 1-80 个字符",
+       deliveryInvalidTooManyCommands: "每组最多可以配置 16 条命令",
+       deliveryInvalidTooManyProfiles: "最多可以保存 32 个交付配置",
+       deliveryInvalidBadPath: "项目绑定路径必须是规范绝对路径",
+@@ -5871,7 +5953,7 @@
+       taskPreflightTitle: "预检结果",
+       taskPreflightHeadlineOk: "可以应用",
+       taskPreflightHeadlineWarn: "可以应用，但有一处需要你看一下",
+-      taskPreflightHeadlineReject: "应用会失败 — 不会改动源码",
++      taskPreflightHeadlineReject: "应用会失败: 不会改动源码",
+       taskPreflightSummaryOk: "ForkLight 已确认源码更新可以开始，目前还没有改动原项目。下方会明确列出哪些步骤会执行、哪些不会执行。",
+       taskPreflightSummaryWarn: "应用前检查提到了一个非阻断的注意点，仍可继续应用；下文列出四个阶段。",
+       taskPreflightSummaryReject: "应用前检查在任何修改发生前拒绝了本次源码。请看下文原因与四个阶段。",
+@@ -5888,7 +5970,7 @@
+       taskPreflightApplicabilityMeaning: "可能意味着：源码可能在 Candidate 产生之后发生了变化，或者补丁存在冲突。ForkLight 没有判断具体原因。",
+       taskPreflightApplicabilityNext: "下一步：对照当前源码与 Candidate，决定保留哪些改动，再重新发起预检。具体冲突尚未确定，不要认定是 Candidate 出错。",
+       taskPreflightNextStageOk: "上一阶段通过后才会执行本阶段；任一阶段失败都会终止应用。",
+-      taskPreflightNextStageNotConfigured: "本阶段不会运行 — Profile 没有为它配置命令。",
++      taskPreflightNextStageNotConfigured: "本阶段不会运行: Profile 没有为它配置命令。",
+       taskPreflightNextStageUnknown: "ForkLight 暂时无法判断本阶段是否已配置。",
+       taskPreflightReceiptDetails: "Receipt id 与时限",
+       taskPreflightReceiptId: "Receipt id",
+@@ -5985,11 +6067,11 @@
+       /* --- Token usage reconciliation --- */
+       tokRecTitle: "Token 用量对账（仅诊断）",
+       tokRecTitleSimple: "Token 用量对账",
+-      tokRecIntro: "将顶层终端 Token 计数与 Worker 运行时报告的逐模型汇总进行比较。差异仅作为软遥测质量警告——不会改变 Worker 用量、成本、任务状态或模型评分。",
+-      tokRecStateMatched: "一致——所有已比较 Attempt 的顶层和逐模型计数完全相同。",
+-      tokRecStateMismatch: "不一致——至少一个已比较 Attempt 的顶层和逐模型计数存在差异。",
+-      tokRecStatePartial: "部分覆盖——部分 Attempt 已完成对比，其他 Attempt 缺少可用的用量、逐模型明细或安全计数。",
+-      tokRecStateUnavailable: "不可用——没有任何 Attempt 同时提供两套可安全比较的计数。",
++      tokRecIntro: "将顶层终端 Token 计数与 Worker 运行时报告的逐模型汇总进行比较。差异仅作为软遥测质量警告：不会改变 Worker 用量、成本、任务状态或模型评分。",
++      tokRecStateMatched: "一致：所有已比较 Attempt 的顶层和逐模型计数完全相同。",
++      tokRecStateMismatch: "不一致：至少一个已比较 Attempt 的顶层和逐模型计数存在差异。",
++      tokRecStatePartial: "部分覆盖：部分 Attempt 已完成对比，其他 Attempt 缺少可用的用量、逐模型明细或安全计数。",
++      tokRecStateUnavailable: "不可用：没有任何 Attempt 同时提供两套可安全比较的计数。",
+       tokRecCompared: "已比较 Attempt 数",
+       tokRecMatched: "一致",
+       tokRecMismatched: "不一致",
+diff --git a/baseline/src/hub/public/index.html b/workspace/src/hub/public/index.html
+index 0d62a35..31073b8 100644
+--- a/baseline/src/hub/public/index.html
++++ b/workspace/src/hub/public/index.html
+@@ -1,17 +1,17 @@
+ <!--
+-THESIS: One Goal owns one working canvas. Refuse the global flat board that makes hierarchy look like telemetry.
+-OWN-WORLD: A quiet local workbench in bone, graphite, muted teal, and restrained status color; controls feel precise, not decorative.
+-STORY: Describe an outcome, let Main explain the right work shape, choose a Goal workspace, then follow its current phase and Task movement without losing context.
+-FIRST VIEWPORT: A compact outcome entry leads into a Goal rail and one focused board; one-off work and history remain nearby but secondary, with the next decision always visible.
+-FORM: Focused Goal workspace with a left context rail, fourth grounded structure, staged as one stable operating surface; seed 31d3080b.
+-FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, and DESIGN.md
++THESIS: ForkLight opens on Goal truth: the desired result, what is true now, whether a decision is needed, and the next checkpoint.
++OWN-WORLD: A light GoalBoard-family workbench on a cool near-white field, white paper, graphite ink, and action blue. Surfaces stay flat; status color always has text.
++STORY: Choose a Goal from the Now or History tree, read one continuous execution file, and take confirmed actions only from the one Decision Center.
++FIRST VIEWPORT: A compact product bar with Work and Decision Center; a searchable Goal Tree beside the selected Goal file. Configuration stays in quiet System access.
++FORM: Compact product bar, resizable Goal Tree, one Goal file, one Decision Center, auxiliary System.
++FINISH: Coherent desktop and mobile panes, preserved reading context, and DESIGN.md written from this built world.
+ -->
+ <!DOCTYPE html>
+ <html lang="zh-CN">
+ <head>
+ <meta charset="utf-8">
+ <meta name="viewport" content="width=device-width,initial-scale=1">
+-<meta name="color-scheme" content="light dark">
++<meta name="color-scheme" content="light">
+ <meta name="referrer" content="no-referrer">
+ <title>ForkLight</title>
+ <link rel="stylesheet" href="app.css">
+@@ -19,50 +19,67 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
+ <body>
+ <a class="skip" href="#main" data-i18n="skip">跳到主要内容</a>
+ <div class="shell">
+-  <aside class="sidebar" aria-label="Primary">
++  <header class="product-bar">
+     <div class="brand">
+-      <div class="brand-mark" aria-hidden="true">FL</div>
++      <div class="brand-mark" aria-hidden="true">
++        <svg class="brand-mark-icon" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
++          <path d="M3 3.5h4.2v9H3.8V6.8H3V3.5zm5.8 0H13v2.2H9.8v1.6H13v2.2H9.8V12.5H8.8V3.5z" fill="currentColor"/>
++        </svg>
++      </div>
+       <div class="brand-text">
+         <div class="brand-name">ForkLight</div>
+-        <div class="brand-sub" data-i18n="brandSub">控制中心</div>
++        <div class="brand-sub" data-i18n="brandSub">执行工作台</div>
+       </div>
+     </div>
+ 
+-    <div class="nav-group-label" data-i18n="navConfigure">配置</div>
+-    <nav id="fl-tabs" class="nav" aria-label="Sections">
+-      <button type="button" data-tab="model" class="nav-item">
+-        <span class="nav-icon" aria-hidden="true">1</span>
+-        <span class="nav-label" data-i18n="navModels">模型</span>
+-      </button>
+-      <button type="button" data-tab="worker" class="nav-item">
+-        <span class="nav-icon" aria-hidden="true">2</span>
+-        <span class="nav-label" data-i18n="navWorkers">Worker</span>
+-      </button>
+-      <button type="button" data-tab="mains" class="nav-item">
+-        <span class="nav-icon" aria-hidden="true">3</span>
+-        <span class="nav-label" data-i18n="navMain">Main</span>
+-      </button>
+-      <button type="button" data-tab="delivery" class="nav-item">
+-        <span class="nav-icon" aria-hidden="true">4</span>
+-        <span class="nav-label" data-i18n="navDelivery">Delivery</span>
+-      </button>
+-
+-      <div class="nav-group-label" data-i18n="navOperate">运行</div>
++    <nav id="fl-tabs" class="nav" aria-label="Primary">
+       <button type="button" data-tab="work" class="nav-item active">
+-        <span class="nav-icon" aria-hidden="true">&#9638;</span>
++        <span class="nav-icon" aria-hidden="true">
++          <svg viewBox="0 0 16 16" width="14" height="14"><path d="M2.5 3.5h11v2h-11zm0 3.5h7v2h-7zm0 3.5h11v2h-11z" fill="currentColor"/></svg>
++        </span>
+         <span class="nav-label" data-i18n="navWork">工作</span>
+       </button>
+-      <button type="button" data-tab="competitions" class="nav-item">
+-        <span class="nav-icon" aria-hidden="true">&#9733;</span>
+-        <span class="nav-label" data-i18n="navCompete">竞赛</span>
+-      </button>
+-      <button type="button" data-tab="stats" class="nav-item">
+-        <span class="nav-icon" aria-hidden="true">&#9641;</span>
+-        <span class="nav-label" data-i18n="navInsights">洞察</span>
++      <button type="button" data-tab="decisions" class="nav-item">
++        <span class="nav-icon" aria-hidden="true">
++          <svg viewBox="0 0 16 16" width="14" height="14"><path d="M3 3.5h10v2H3zm0 3.5h7v2H3zm0 3.5h10v2H3z" fill="currentColor"/></svg>
++        </span>
++        <span class="nav-label" data-i18n="navDecisions">决定中心</span>
+       </button>
++      <details id="fl-system-menu" class="system-menu">
++        <summary class="nav-item system-summary">
++          <span class="nav-icon" aria-hidden="true">
++            <svg viewBox="0 0 16 16" width="14" height="14"><path d="M3 4h10v1.4H3zm0 3.3h10v1.4H3zm0 3.3h10V12H3z" fill="currentColor"/></svg>
++          </span>
++          <span class="nav-label" data-i18n="navSystem">系统</span>
++        </summary>
++        <div class="system-menu-list" role="group" aria-label="System">
++          <button type="button" data-tab="model" class="nav-item">
++            <span class="nav-label" data-i18n="navModels">模型</span>
++          </button>
++          <button type="button" data-tab="worker" class="nav-item">
++            <span class="nav-label" data-i18n="navWorkers">Worker</span>
++          </button>
++          <button type="button" data-tab="mains" class="nav-item">
++            <span class="nav-label" data-i18n="navMain">Main</span>
++          </button>
++          <button type="button" data-tab="delivery" class="nav-item">
++            <span class="nav-label" data-i18n="navDelivery">Delivery</span>
++          </button>
++          <button type="button" data-tab="limits" class="nav-item">
++            <span class="nav-label" data-i18n="navLimits">限额</span>
++          </button>
++          <button type="button" data-tab="competitions" class="nav-item">
++            <span class="nav-label" data-i18n="navCompete">竞赛</span>
++          </button>
++          <button type="button" data-tab="stats" class="nav-item">
++            <span class="nav-label" data-i18n="navInsights">洞察</span>
++          </button>
++        </div>
++      </details>
+     </nav>
+ 
+-    <div class="sidebar-foot">
++    <div class="product-utils">
++      <button type="button" id="fl-mobile-back" class="btn sm mobile-back" hidden data-fl-role="mobile-back" data-i18n="mobileBack">返回</button>
+       <div class="theme-switch" role="group" aria-label="Theme">
+         <span class="theme-label" data-i18n="theme">主题</span>
+         <button type="button" class="theme-btn" data-theme-set="light" id="fl-theme-light">Light</button>
+@@ -75,13 +92,13 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
+       </div>
+       <div id="fl-status-bar" class="conn-pill" aria-live="polite"></div>
+     </div>
+-  </aside>
++  </header>
+ 
+   <div class="workspace">
+     <header class="topbar">
+       <div class="topbar-copy">
+         <h1 id="fl-page-title" class="page-title">工作</h1>
+-        <p id="fl-page-sub" class="page-sub">查看 Goal、独立 Plan 或一次性 Task 工作区，以及其中的工作</p>
++        <p id="fl-page-sub" class="page-sub">先看当前 Goal 的结果、事实和需要你决定的事</p>
+       </div>
+       <div id="fl-top-meta" class="top-meta"></div>
+     </header>
+diff --git a/baseline/tests/hub-responsive-layout.test.ts b/workspace/tests/hub-responsive-layout.test.ts
+index 54d2018..18728c5 100644
+--- a/baseline/tests/hub-responsive-layout.test.ts
++++ b/workspace/tests/hub-responsive-layout.test.ts
+@@ -1,11 +1,6 @@
+ /**
+- * FL-112B responsive topology for the focused hierarchical workbench.
+- *
+- * Desktop keeps one canonical seven-column Task board beside a concise
+- * portfolio rail; narrow screens stack the rail and focused workspace and show
+- * readable status groups without leaking page-level horizontal scroll. These
+- * are deterministic source/CSS assertions that Main's two-viewport browser
+- * audit then confirms.
++ * Goal-first Hub layout: Goal Tree, continuous Goal file, one Decision Center,
++ * live-refresh continuity, and the 760px single-pane Back flow.
+  */
+ import assert from "node:assert/strict";
+ import { readFile } from "node:fs/promises";
+@@ -32,6 +27,376 @@ function extractFunctionSource(src: string, name: string): string {
+   throw new Error(`function ${name} is not balanced`);
+ }
+ 
++function emptyColumns() {
++  return {
++    "not-started": [],
++    ready: [],
++    running: [],
++    "waiting-verification": [],
++    "waiting-user-decision": [],
++    completed: [],
++    "stopped-failed": [],
++  };
++}
++
++function hierarchyFixture() {
++  const runningCard = {
++    taskId: "t-run",
++    name: "Implement Hub file",
++    column: "running",
++    placementReason: "lifecycle-running",
++    whatCompleted: "Worker is editing the Goal file",
++    nextAction: "Wait for verification",
++    blockers: [],
++    breadcrumb: { goalId: "g-active", goalName: "Hub redesign", planId: "p-now", planName: "Build" },
++  };
++  const decisionCard = {
++    taskId: "t-decide",
++    name: "Accept Candidate",
++    column: "waiting-user-decision",
++    placementReason: "awaiting-main-decision",
++    whatCompleted: "Verification passed and a Candidate is retained",
++    nextAction: "Main must accept or return the Candidate",
++    blockers: [],
++    breadcrumb: { goalId: "g-active", goalName: "Hub redesign", planId: "p-now", planName: "Build" },
++  };
++  const blockedCard = {
++    taskId: "t-block",
++    name: "Repair failed check",
++    column: "stopped-failed",
++    placementReason: "stopped-or-failed",
++    whatCompleted: "Verification failed; the Candidate workspace is retained",
++    nextAction: "Open the confirmed repair action",
++    blockers: [{ label: "acceptance failed" }],
++    breadcrumb: { goalId: "g-active", goalName: "Hub redesign", planId: "p-now", planName: "Build" },
++  };
++  const doneCard = {
++    taskId: "t-done",
++    name: "Ship DESIGN.md",
++    column: "completed",
++    placementReason: "delivered-outcome",
++    whatCompleted: "DESIGN.md was written from the built interface",
++    nextAction: "No further action",
++    blockers: [],
++    breadcrumb: { goalId: "g-done", goalName: "Finished Goal", planId: "p-old", planName: "Done" },
++  };
++  const parentlessDecision = {
++    taskId: "t-orphan",
++    name: "Standalone decision",
++    column: "waiting-user-decision",
++    placementReason: "awaiting-main-decision",
++    whatCompleted: "A parentless Task is waiting",
++    nextAction: "Decide whether to continue",
++    blockers: [],
++    breadcrumb: {},
++  };
++  const nowColumns = {
++    ...emptyColumns(),
++    running: [runningCard],
++    "waiting-user-decision": [decisionCard],
++    "stopped-failed": [blockedCard],
++  };
++  const historyColumns = { ...emptyColumns(), completed: [doneCard] };
++  return {
++    schemaVersion: 1,
++    columns: [
++      { code: "not-started", order: 0 },
++      { code: "ready", order: 1 },
++      { code: "running", order: 2 },
++      { code: "waiting-verification", order: 3 },
++      { code: "waiting-user-decision", order: 4 },
++      { code: "completed", order: 5 },
++      { code: "stopped-failed", order: 6 },
++    ],
++    goals: [
++      {
++        goalId: "g-active",
++        name: "Hub redesign",
++        objective: "Open on Goal truth and one Decision Center",
++        status: "active",
++        currentPlanId: "p-now",
++        summary: {
++          whatCompleted: "The Goal file is being rebuilt",
++          nextAction: "Decide on the retained Candidate",
++          blocker: "No current blocker.",
++        },
++        plans: [{ planId: "p-now", name: "Build", objective: "Replace the Hub shell", columns: nowColumns }],
++      },
++      {
++        goalId: "g-done",
++        name: "Finished Goal",
++        objective: "A completed Goal stays in History",
++        status: "completed",
++        summary: { whatCompleted: "Every gate is satisfied", nextAction: "No further action" },
++        plans: [{ planId: "p-old", name: "Done", columns: historyColumns }],
++      },
++    ],
++    independentPlans: [],
++    oneOffTasks: { columns: { ...emptyColumns(), "waiting-user-decision": [parentlessDecision] } },
++  };
++}
++
++function loadPresentationApi(src: string) {
++  const names = [
++    "workGoalIsTerminalStatusForSelection",
++    "workGoalDecisionCount",
++    "workColumnsCardCount",
++    "workGoalTaskCount",
++    "workPlanTaskCount",
++    "workOneOffCardCount",
++    "workLaneIsTerminalHistory",
++    "workSafeNarrativeParams",
++    "workNarrativeText",
++    "workLaneHasRealBlocker",
++    "workLaneNextActionText",
++    "workPortfolioCue",
++    "workSummaryWhat",
++    "workSummaryNext",
++    // workLaneNextActionText is required: composeGoalTreeModel and
++    // composeGoalFileModel call it through workPortfolioCue / workSummaryNext.
++    "workGoalCurrentIndex",
++    "workGoalPhaseState",
++    "workGoalCurrentPlan",
++    "workSafeCardBlockerLabel",
++    "workPlacementLabel",
++    "workNormalizeTreeWidth",
++    "workNextMobilePane",
++    "workTreeItemMatches",
++    "composeGoalTreeModel",
++    "composeGoalFileModel",
++    "collectDecisionGroups",
++  ];
++  const helpers = names.map((name) => extractFunctionSource(src, name)).join("\n");
++  return new Function(
++    "t",
++    "WORK_COLUMN_CODES",
++    "WORK_LIVE_COLUMN_CODES",
++    "WORK_NARRATIVE_I18N_KEYS",
++    "WORK_NARRATIVE_EMPTY_BLOCKER_CODES",
++    "GOAL_TREE_WIDTH_MIN",
++    "GOAL_TREE_WIDTH_MAX",
++    "GOAL_TREE_WIDTH_DEFAULT",
++    "GOAL_FILE_CURRENT_CODES",
++    "GOAL_FILE_BLOCKED_CODES",
++    "GOAL_FILE_HISTORY_CODES",
++    `${helpers}
++     return {
++       composeGoalTreeModel: composeGoalTreeModel,
++       composeGoalFileModel: composeGoalFileModel,
++       collectDecisionGroups: collectDecisionGroups,
++       workLaneNextActionText: workLaneNextActionText,
++       workNormalizeTreeWidth: workNormalizeTreeWidth,
++       workNextMobilePane: workNextMobilePane
++     };`,
++  )(
++    (key: string, vars?: Record<string, string>) => {
++      if (!vars) return key;
++      return Object.keys(vars).reduce((out, name) => out.split("{" + name + "}").join(vars[name]), key);
++    },
++    ["not-started", "ready", "running", "waiting-verification", "waiting-user-decision", "completed", "stopped-failed"],
++    ["not-started", "ready", "running", "waiting-verification", "waiting-user-decision"],
++    {},
++    { "lane-blocker-none": true, "goal-wait-all-gates-satisfied": true, "goal-wait-nothing": true },
++    200,
++    420,
++    280,
++    ["waiting-user-decision", "running", "waiting-verification", "ready", "not-started"],
++    ["stopped-failed"],
++    ["completed"],
++  ) as {
++    composeGoalTreeModel: (view: unknown, query?: string, scope?: string) => {
++      now: Array<{ id: string; kind: string; terminal: boolean }>;
++      history: Array<{ id: string; kind: string; terminal: boolean }>;
++      visible: Array<{ id: string; kind: string }>;
++      scope: string;
++    };
++    composeGoalFileModel: (goal: unknown, viewedPlan?: unknown) => {
++      desiredResult: string;
++      currentTruth: string;
++      decisionNeeded: boolean;
++      decisionCount: number;
++      currentTask: { taskId: string } | null;
++      currentCards: Array<{ taskId: string }>;
++      blockedCards: Array<{ taskId: string }>;
++      historyCards: Array<{ taskId: string }>;
++      blockers: Array<{ text: string; fact?: string; next?: string }>;
++      terminal: boolean;
++      sectionOrder: string[];
++      nextAction: string;
++    };
++    collectDecisionGroups: (view: unknown) => {
++      groups: Array<{ goalId: string; items: Array<{ taskId: string; fact: string; reason: string }> }>;
++      parentless: Array<{ taskId: string }>;
++      total: number;
++    };
++    workLaneNextActionText: (summary: { nextAction?: string }, opts?: object) => string;
++    workNormalizeTreeWidth: (px: number) => number;
++    workNextMobilePane: (current: string, action: string) => string;
++  };
++}
++
++test("Goal-first shell, Goal Tree, Goal file and 760px Back styles ship", async () => {
++  const html = await readFile(path.join(hubPublic, "index.html"), "utf8");
++  const css = await readFile(path.join(hubPublic, "app.css"), "utf8");
++  const js = await readFile(path.join(hubPublic, "app.js"), "utf8");
++  assert.ok(html.includes("product-bar") && html.includes('data-tab="work"') && html.includes('data-tab="decisions"'));
++  assert.ok(html.includes("fl-system-menu") && html.includes('data-tab="model"') && html.includes('data-tab="limits"'));
++  assert.ok(html.includes('data-fl-role="mobile-back"'));
++  assert.ok(css.includes("#f6f7f9") && css.includes("#ffffff") && css.includes("#171a21") && css.includes("#1677ff"));
++  assert.match(css, /@media\s*\(max-width:\s*760px\)/, "single-pane breakpoint is 760px");
++  assert.match(css, /@media\s*\(max-width:\s*760px\)[\s\S]*?\.mobile-back/, "narrow Back control is styled");
++  assert.match(css, /@media\s*\(max-width:\s*760px\)[\s\S]*?data-mobile-pane="tree"[\s\S]*?display:\s*none/,
++    "tree pane hides the Goal file on narrow screens");
++  assert.ok(js.includes("function composeGoalTreeModel(") && js.includes("function composeGoalFileModel("));
++  assert.ok(js.includes("function collectDecisionGroups(") && js.includes("function rDecisions("));
++  assert.ok(js.includes("function workNextMobilePane(") && js.includes("function workMobileBack("));
++  assert.ok(js.includes("function workApplyGoalFileStart("), "narrow Goal-file start helper ships");
++  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
++  for (const key of [
++    "navDecisions", "navSystem", "navLimits", "mobileBack", "goalTreeNow", "goalTreeHistory",
++    "goalFileResult", "goalFileTruth", "goalFileDecision", "decisionParentless",
++  ]) {
++    assert.equal((i18n.match(new RegExp(`${key}:`, "g")) ?? []).length, 2, `${key} is bilingual`);
++  }
++  const gridBlock = css.slice(css.indexOf(".work-col-grid"), css.indexOf(".work-col-head .work-cell"));
++  assert.match(gridBlock, /repeat\(7,\s*minmax\(150px,\s*1fr\)\)/, "folded evidence still has seven canonical columns");
++});
++
++test("Goal Tree places Now vs History and Decision Center groups by Goal", async () => {
++  const js = await readFile(path.join(hubPublic, "app.js"), "utf8");
++  const api = loadPresentationApi(js);
++  const view = hierarchyFixture();
++  const now = api.composeGoalTreeModel(view, "", "now");
++  const history = api.composeGoalTreeModel(view, "", "history");
++  assert.deepEqual(now.now.map((item) => item.id), ["g-active", "inbox"]);
++  assert.deepEqual(history.history.map((item) => item.id), ["g-done"]);
++  assert.ok(now.visible.every((item) => item.id !== "g-done"), "History Goals do not crowd Now");
++  const searched = api.composeGoalTreeModel(view, "Finished", "history");
++  assert.deepEqual(searched.visible.map((item) => item.id), ["g-done"]);
++
++  const goal = view.goals[0];
++  if(!goal || !goal.plans[0]) throw new Error("fixture is missing the active Goal and phase");
++  const file = api.composeGoalFileModel(goal, goal.plans[0]);
++  assert.deepEqual(file.sectionOrder, [
++    "desired-result", "current-truth", "decision", "phase",
++    "current-task", "blockers", "delivery", "evidence",
++  ]);
++  assert.equal(file.desiredResult, "Open on Goal truth and one Decision Center");
++  assert.equal(file.decisionNeeded, true);
++  assert.equal(file.currentTask?.taskId, "t-decide");
++  assert.ok(file.blockedCards.some((card) => card.taskId === "t-block"));
++  assert.ok(!file.historyCards.some((card) => card.taskId === "t-block"));
++  assert.ok(file.blockers.some((blocker) => /acceptance failed|Repair|failed/i.test(blocker.text)));
++  assert.ok(file.nextAction);
++  assert.equal(
++    api.workLaneNextActionText({ nextAction: "Wait for verification" }),
++    "Wait for verification",
++    "fixture drives the shipped next-action helper",
++  );
++
++  const blockedOnly = {
++    goalId: "g-blocked",
++    name: "Blocked only",
++    objective: "Keep the failed Candidate readable",
++    status: "active",
++    currentPlanId: "p-block",
++    summary: {
++      whatCompleted: "Verification failed",
++      nextAction: "Open the confirmed repair",
++    },
++    plans: [{
++      planId: "p-block",
++      name: "Repair",
++      columns: {
++        ...emptyColumns(),
++        "stopped-failed": [{
++          taskId: "t-only-fail",
++          name: "Failed check",
++          column: "stopped-failed",
++          placementReason: "stopped-or-failed",
++          whatCompleted: "Verification failed; the Candidate workspace is retained",
++          nextAction: "Open the confirmed repair action",
++          blockers: [{ label: "acceptance failed" }],
++          breadcrumb: { goalId: "g-blocked", goalName: "Blocked only" },
++        }],
++      },
++    }],
++  };
++  const blockedPhase = blockedOnly.plans[0];
++  if(!blockedPhase) throw new Error("fixture is missing the blocked-only phase");
++  const blockedFile = api.composeGoalFileModel(blockedOnly, blockedPhase);
++  assert.equal(blockedFile.currentTask?.taskId, "t-only-fail",
++    "a Goal whose only live work is stopped-failed still has a current Task");
++  assert.ok(blockedFile.blockedCards.some((card) => card.taskId === "t-only-fail"));
++  assert.ok(!blockedFile.historyCards.some((card) => card.taskId === "t-only-fail"),
++    "stopped-failed work is not filed as completed History");
++  assert.ok(blockedFile.blockers.some((blocker) => blocker.fact || blocker.next || /failed/i.test(blocker.text)),
++    "blocked work exposes fact, reason, retained work, and next action");
++
++  const decisions = api.collectDecisionGroups(view);
++  assert.equal(decisions.total, 2);
++  assert.equal(decisions.groups[0]?.goalId, "g-active");
++  assert.equal(decisions.groups[0]?.items[0]?.taskId, "t-decide");
++  assert.match(decisions.groups[0]?.items[0]?.fact || "", /Candidate is retained/);
++  assert.equal(decisions.parentless[0]?.taskId, "t-orphan");
++  assert.equal(api.workNormalizeTreeWidth(120), 200);
++  assert.equal(api.workNormalizeTreeWidth(500), 420);
++  assert.equal(api.workNextMobilePane("tree", "open-file"), "file");
++  assert.equal(api.workNextMobilePane("file", "open-detail"), "detail");
++  assert.equal(api.workNextMobilePane("detail", "back"), "file");
++  assert.equal(api.workNextMobilePane("file", "back"), "tree");
++});
++
++test("narrow already-selected Goal still opens the Goal file pane", async () => {
++  const js = await readFile(path.join(hubPublic, "app.js"), "utf8");
++  const helpers = [
++    extractFunctionSource(js, "workMakeSelection"),
++    extractFunctionSource(js, "workSelectionKey"),
++    extractFunctionSource(js, "workSelectionEqual"),
++    extractFunctionSource(js, "workNextMobilePane"),
++    extractFunctionSource(js, "workApplyMobilePane"),
++    extractFunctionSource(js, "workSelectWorkspace"),
++  ].join("\n");
++  const factory = new Function(
++    `${helpers}
++     var WORKSPACE_SELECTION_KINDS = ["goal", "plan", "one-off"];
++     var S = {
++       workSelection: { kind: "goal", id: "g-active" },
++       workMobilePane: "tree",
++       tab: "work",
++       detail: null
++     };
++     var viewEl = { querySelector: function(){ return null; } };
++     var document = {
++       body: { setAttribute: function(){} },
++       getElementById: function(){ return { hidden: true }; }
++     };
++     function workIsNarrowViewport(){ return true; }
++     function workUpdateMobileBack(){}
++     function workScheduleReadingContextSave(){}
++     function workActionChooserReset(){}
++     function workPendingHandoffReset(){}
++     function hideDetail(){}
++     function workApplyGoalFileStart(){ S.fileStart = true; }
++     function render(){ S.rendered = true; }
++     return { S: S, select: workSelectWorkspace };`,
++  );
++  const api = factory() as {
++    S: {
++      workMobilePane: string;
++      workSelection: { kind: string; id: string };
++      rendered?: boolean;
++      fileStart?: boolean;
++    };
++    select: (kind: string, id: string) => void;
++  };
++  api.select("goal", "g-active");
++  assert.equal(api.S.workSelection.id, "g-active", "already-selected Goal stays selected");
++  assert.equal(api.S.workMobilePane, "file", "narrow tree pane still opens the Goal file");
++  assert.equal(api.S.fileStart, true, "narrow file entry starts at the Goal header");
++  assert.equal(api.S.rendered, undefined, "already-selected tap does not rebuild Work");
++});
++
+ test("Work board keeps seven columns with contained horizontal scroll on wide screens", async () => {
+   const css = await readFile(path.join(hubPublic, "app.css"), "utf8");
+   const gridBlock = css.slice(css.indexOf(".work-col-grid"), css.indexOf(".work-col-head .work-cell"));
+@@ -249,6 +614,105 @@ test("FL-112E5 restores captured closed disclosures without lazy materialization
+   assert.equal(nodes.board.scrollLeft, 64, "board reading position is restored");
+ });
+ 
++test("Goal file reading order and Decision Center reuse existing Task actions", async () => {
++  const js = await readFile(path.join(hubPublic, "app.js"), "utf8");
++  const goal = extractFunctionSource(js, "renderWorkFocusedGoal");
++  const roles = [
++    "goal-file-result",
++    "goal-file-truth",
++    "goal-file-decision",
++    "goal-file-phase",
++    "goal-file-task",
++    "goal-file-blockers",
++    "goal-file-delivery",
++    "goal-file-evidence",
++  ];
++  let last = -1;
++  for (const role of roles) {
++    const at = goal.indexOf(role);
++    assert.ok(at > last, `${role} appears in the Goal file reading order`);
++    last = at;
++  }
++  assert.ok(goal.includes("switchTab(\"decisions\")"), "decision-needed states link to Decision Center");
++  assert.ok(goal.includes("renderWorkCard"), "current Task reuses the canonical card");
++  const decisions = extractFunctionSource(js, "renderDecisionCenter");
++  const item = extractFunctionSource(js, "renderDecisionItem");
++  assert.ok(decisions.includes("collectDecisionGroups") && decisions.includes("decision-parentless"));
++  assert.ok(item.includes("showTask") && item.includes("renderWorkMoveActControl"),
++    "Decision Center reuses the existing confirmed action path");
++  assert.doesNotMatch(item, /postJSON\s*\(/, "Decision Center has no second mutation path");
++});
++
++test("live refresh restores Goal Tree width, query, pane and does not steal focus", async () => {
++  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
++  const capture = extractFunctionSource(src, "workCaptureWorkbenchContext");
++  const restore = extractFunctionSource(src, "workRestoreWorkbenchContext");
++  for (const key of ["treeWidth", "treeQuery", "treeScope", "mobilePane", "goalFileEvidenceOpen"]) {
++    assert.ok(capture.includes(key) && restore.includes(key), `${key} survives a Work rebuild`);
++  }
++  assert.ok(restore.includes("preventScroll") || restore.includes("workFindFocusTarget"),
++    "focus restore stays semantic and does not jump the page");
++  const tree = { scrollTop: 0, styleAttr: "" };
++  const fileHost = { scrollTop: 0 };
++  const searchInput = { value: "" };
++  const layout = { pane: "tree", styleAttr: "" };
++  const viewEl = {
++    querySelector(selector: string) {
++      if (selector.includes("goal-tree-search-input")) return searchInput;
++      if (selector.includes("goal-file-host")) return fileHost;
++      if (selector.includes("workbench-layout")) return layout;
++      if (selector.includes("goal-tree") && !selector.includes("search") && !selector.includes("resize")) return tree;
++      return null;
++    },
++  };
++  const content = { scrollTop: 0, scrollLeft: 0 };
++  const documentObj = {
++    createEvent() { return { initEvent() {} }; },
++    querySelector() { return content; },
++    getElementById() { return { hidden: true }; },
++    body: { setAttribute() {} },
++  };
++  const state = { workTreeWidth: 280, workTreeQuery: "", workTreeScope: "now", workMobilePane: "tree", tab: "work" };
++  const factory = new Function(
++    "viewEl",
++    "document",
++    "content",
++    "S",
++    `${restore}
++     function workNormalizeTreeWidth(px){
++       if (px < 200) return 200;
++       if (px > 420) return 420;
++       return px;
++     }
++     function workApplyTreeWidth(px){ S.workTreeWidth = workNormalizeTreeWidth(px); }
++     function workApplyMobilePane(pane){ S.workMobilePane = pane; }
++     function workUpdateMobileBack(){}
++     function workFindFocusTarget(){ return null; }
++     function workContentScrollEl(){ return content; }
++     function workMaterializeOpenFinishedBody(){}
++     return function(ctx){ workRestoreWorkbenchContext(ctx); };`,
++  );
++  const restoreContext = factory(viewEl, documentObj, content, state) as (ctx: Record<string, unknown>) => void;
++  restoreContext({
++    treeWidth: 360,
++    treeQuery: "Hub",
++    treeScope: "history",
++    mobilePane: "file",
++    treeScrollTop: 40,
++    fileScrollTop: 88,
++    contentScrollTop: 12,
++    detailOpen: false,
++    focusKey: null,
++  });
++  assert.equal(state.workTreeWidth, 360, "tree width is restored");
++  assert.equal(state.workTreeQuery, "Hub", "tree query is restored");
++  assert.equal(state.workTreeScope, "history", "Now/History scope is restored");
++  assert.equal(state.workMobilePane, "file", "narrow pane is restored");
++  assert.equal(tree.scrollTop, 40, "tree reading position is restored");
++  assert.equal(fileHost.scrollTop, 88, "Goal file reading position is restored");
++  assert.equal(searchInput.value, "Hub", "search field keeps the surviving query");
++});
++
+ test("Narrow screens keep the portfolio rail and one focused Goal workspace readable", async () => {
+   const css = await readFile(path.join(hubPublic, "app.css"), "utf8");
+   // The workbench narrow block is the 900px media query whose first rule is
+@@ -353,11 +817,11 @@ test("Long-lived Work summaries stay bounded without losing hierarchy", async ()
+   const js = await readFile(path.join(hubPublic, "app.js"), "utf8");
+   assert.ok(js.includes("function workResolveSelection("), "selection resolver ships");
+   assert.ok(js.includes("function workPresentProjectOptions("), "project presentation helper ships");
+-  const portfolio = extractFunctionSource(js, "renderWorkPortfolio");
++  const portfolio = extractFunctionSource(js, "renderWorkGoalTree");
+   const finished = extractFunctionSource(js, "renderWorkFinishedGoals");
+   const oneOff = extractFunctionSource(js, "renderWorkOneOffGroup");
+-  assert.ok(portfolio.includes("activeGoals"), "active Goals remain in the portfolio rail");
+-  assert.ok(portfolio.includes("independentPlans"), "independent Plans remain in the portfolio rail");
++  assert.ok(portfolio.includes("composeGoalTreeModel"), "Goal Tree consumes the Now/History model");
++  assert.ok(js.includes("function composeGoalTreeModel("), "Now vs History placement is a shipped helper");
+   assert.ok(finished.includes("ensureFinishedBody"), "finished Goal history is lazy");
+   assert.ok(oneOff.includes("definition.limit"), "one-off groups have bounded first-paint limits");
+   assert.ok(oneOff.includes('limit !== "all"'), "one-off history can be reached without flooding the DOM");
+@@ -410,6 +874,8 @@ test("FL-112A Work continuity preserves composition order and does not invent la
+   const truth = extractFunctionSource(js, "workVisibleTruthSnapshot");
+   assert.ok(truth.includes("viewedGoal") && truth.includes("viewedPlan"),
+     "selected Goal and viewed phase participate in refresh continuity truth");
++  assert.ok(truth.includes("tab:") && truth.includes("S.tab"),
++    "Work and Decision Center do not share one retain snapshot");
+   // Page scroll host is main.content (index.html), not window.
+   assert.ok(capture.includes("workContentScrollEl") && restore.includes("content.scrollTop"),
+     "content container scroll is captured and restored at every width");
+@@ -465,10 +931,8 @@ test("FL-112B desktop composition reaches one focused board; narrow layout stays
+     "390px-class narrow layout still avoids board horizontal overflow");
+   assert.match(narrowBlock, /\.work-col-grid\s*\{[\s\S]*?flex-direction:\s*column/,
+     "status groups still stack on narrow screens");
+-  assert.match(narrowBlock, /\.work-focus\s*\{\s*order:\s*1/,
+-    "selected workspace leads the narrow workbench");
+-  assert.match(narrowBlock, /\.work-portfolio\s*\{\s*order:\s*2/,
+-    "portfolio history follows the selected narrow workspace");
++  assert.match(css, /@media\s*\(max-width:\s*760px\)[\s\S]*?data-mobile-pane="file"[\s\S]*?\.goal-tree/,
++    "narrow file pane hides the Goal Tree");
+   assert.match(css, /\.work-intro\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*1\.05fr\)\s*minmax\(0,\s*1fr\)/,
+     "desktop intro uses a balanced two-column band");
+   assert.match(narrowBlock, /\.work-intro\s*\{[\s\S]*?grid-template-columns:\s*1fr/,
+@@ -487,10 +951,10 @@ test("FL-112B desktop composition reaches one focused board; narrow layout stays
+   assert.ok(composer.includes('data-fl-role", "outcome-context"'), "context field is not deleted");
+   assert.ok(composer.includes('data-fl-role", "outcome-shape"'), "shape field is not deleted");
+   const selectWorkspace = extractFunctionSource(js, "workSelectWorkspace");
+-  assert.ok(selectWorkspace.includes('matchMedia("(max-width: 900px)")'),
+-    "only a deliberate narrow-screen selection moves the reader to the focused workspace");
+-  assert.ok(selectWorkspace.includes('scrollIntoView({ block: "start" })'),
+-    "selected narrow workspace is revealed past long portfolio history");
++  assert.ok(selectWorkspace.includes("workIsNarrowViewport") && selectWorkspace.includes("open-file"),
++    "only a deliberate narrow-screen selection opens the Goal file pane");
++  assert.ok(selectWorkspace.includes("workApplyGoalFileStart"),
++    "narrow Goal entry starts at the header and result");
+   assert.match(css, /\.nav\s*\{[\s\S]*?overflow-y:\s*auto;[\s\S]*?overflow-x:\s*hidden;/,
+     "desktop navigation cannot drift sideways");
+ });
+@@ -712,10 +1176,10 @@ test("FL-112E10 narrow New work bridge stays narrow-only with practical touch an
+   const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+ 
+   // Selected workspace stays first on narrow screens; portfolio (composer) follows.
+-  assert.match(css, /@media\s*\(max-width:\s*900px\)[\s\S]*?\.work-focused-column\s*\{[\s\S]*?order:\s*1/,
+-    "narrow screens keep the selected workspace first");
+-  assert.match(css, /@media\s*\(max-width:\s*900px\)[\s\S]*?\.work-portfolio\s*\{[\s\S]*?order:\s*2/,
+-    "narrow screens keep the portfolio rail after the focused workspace");
++  assert.match(css, /@media\s*\(max-width:\s*760px\)[\s\S]*?\.mobile-back[\s\S]*?min-height:\s*44px/,
++    "narrow screens keep a visible Back control");
++  assert.match(css, /@media\s*\(max-width:\s*760px\)[\s\S]*?data-mobile-pane="tree"[\s\S]*?display:\s*none/,
++    "narrow screens show one primary pane at a time");
+ 
+   // Desktop hides the bridge; narrow reveals it with a practical touch target.
+   const desktopRule = css.match(/\.work-context-new-entry\s*\{[^}]*\}/);
+@@ -898,7 +1362,7 @@ test("FL-112E3 real Work leads the first screen; empty keeps creation primary",
+   const realFiltersAppend = rw.lastIndexOf("viewEl.appendChild(renderWorkFilters())");
+   assert.ok(boardAppend > firstFiltersAppend && boardAppend < realFiltersAppend,
+     "real Work leads the first screen; filters stay optional");
+-  const portfolio = extractFunctionSource(js, "renderWorkPortfolio");
++  const portfolio = extractFunctionSource(js, "renderWorkGoalTree");
+   const entry = extractFunctionSource(js, "renderWorkNewEntry");
+   assert.ok(portfolio.includes("renderWorkNewEntry")
+     && entry.includes("renderOutcomeSection()")
+@@ -941,7 +1405,7 @@ test("FL-113 hierarchy-first entry, sparse states, and one-off search stay bound
+     readFile(path.join(hubPublic, "i18n.js"), "utf8"),
+   ]);
+ 
+-  const portfolio = extractFunctionSource(js, "renderWorkPortfolio");
++  const portfolio = extractFunctionSource(js, "renderWorkGoalTree");
+   const entry = extractFunctionSource(js, "renderWorkNewEntry");
+   assert.ok(portfolio.includes("renderWorkNewEntry"), "existing Work keeps one compact creation entry near navigation");
+   assert.ok(entry.includes("renderOutcomeSection()") && entry.includes("renderWorkShapeGuide()"),
+@@ -1064,3 +1528,128 @@ test("FL-116A compact Worker rows and flat previews stay usable near 390px", asy
+   assert.doesNotMatch(css, /\.worker-safety\s*\{[^}]*border-left:\s*3px/,
+     "safety box has no thick side bar");
+ });
++
++test("narrow Goal file starts at the header and Back restores the tree", async () => {
++  const js = await readFile(path.join(hubPublic, "app.js"), "utf8");
++  assert.ok(js.includes("function workApplyGoalFileStart("), "Goal-file start helper ships");
++  const helpers = [
++    extractFunctionSource(js, "workMakeSelection"),
++    extractFunctionSource(js, "workSelectionKey"),
++    extractFunctionSource(js, "workSelectionEqual"),
++    extractFunctionSource(js, "workNextMobilePane"),
++    extractFunctionSource(js, "workApplyMobilePane"),
++    extractFunctionSource(js, "workApplyGoalFileStart"),
++    extractFunctionSource(js, "workMobileBack"),
++    extractFunctionSource(js, "workSelectWorkspace"),
++  ].join("\n");
++  const tree = { scrollTop: 90 };
++  const fileHost = { scrollTop: 80 };
++  const focused = {
++    scrollIntoView() {},
++    setAttribute() {},
++    focus() {},
++  };
++  const content = { scrollTop: 240, scrollLeft: 12 };
++  const layout = {
++    pane: "tree",
++    setAttribute(_name: string, value: string) { layout.pane = value; },
++  };
++  const viewEl = {
++    querySelector(selector: string) {
++      if (selector.includes("goal-file-host")) return fileHost;
++      if (selector.includes("work-focus")) return focused;
++      if (selector.includes("workbench-layout")) return layout;
++      if (selector.includes("goal-tree")) return tree;
++      return null;
++    },
++  };
++  const factory = new Function(
++    "viewEl",
++    `${helpers}
++     var WORKSPACE_SELECTION_KINDS = ["goal", "plan", "one-off"];
++     var S = {
++       workSelection: { kind: "goal", id: "g-active" },
++       workMobilePane: "tree",
++       tab: "work",
++       detail: null
++     };
++     var document = {
++       body: { setAttribute: function(){} },
++       getElementById: function(){ return { hidden: true }; }
++     };
++     function workIsNarrowViewport(){ return true; }
++     function workUpdateMobileBack(){}
++     function workScheduleReadingContextSave(){}
++     function workActionChooserReset(){}
++     function workPendingHandoffReset(){}
++     function hideDetail(){ S.detail = null; }
++     function render(){ S.rendered = true; }
++     function workContentScrollEl(){ return content; }
++     return {
++       S: S,
++       select: workSelectWorkspace,
++       back: workMobileBack
++     };`,
++  );
++  const api = factory(viewEl) as {
++    S: { workMobilePane: string; rendered?: boolean };
++    select: (kind: string, id: string) => void;
++    back: () => void;
++  };
++  api.select("goal", "g-active");
++  assert.equal(api.S.workMobilePane, "file", "Goal entry opens the file pane");
++  assert.equal(fileHost.scrollTop, 0, "Goal file starts at its header, not mid-page");
++  assert.equal(content.scrollTop, 0, "page scroll does not keep the tree offset");
++  assert.equal(tree.scrollTop, 90, "tree reading position is kept while the file is open");
++  assert.equal(api.S.rendered, undefined, "already-selected entry does not rebuild Work");
++
++  api.back();
++  assert.equal(api.S.workMobilePane, "tree", "Back restores the Goal Tree pane");
++  assert.equal(tree.scrollTop, 90, "Back keeps the tree reading position");
++  assert.equal(content.scrollTop, 0, "Back does not leave the page scrolled into the file");
++});
++
++test("narrow chrome stays compact, accents stay hairline, badges stay one line", async () => {
++  const css = await readFile(path.join(hubPublic, "app.css"), "utf8");
++  const mediaAt = css.indexOf("@media (max-width: 760px)");
++  assert.ok(mediaAt >= 0, "760px single-pane breakpoint ships");
++  const nextMedia = css.indexOf("@media", mediaAt + 10);
++  const narrow = css.slice(mediaAt, nextMedia > 0 ? nextMedia : css.length);
++  assert.doesNotMatch(narrow, /\.nav\s*\{[^}]*flex-basis:\s*100%/,
++    "narrow nav does not take a full-width row of its own");
++  assert.doesNotMatch(narrow, /\.product-utils\s*\{[^}]*width:\s*100%/,
++    "narrow utilities do not wrap onto a full-width third row");
++  assert.match(narrow, /\.brand-sub\s*\{\s*display:\s*none/,
++    "narrow chrome hides the brand subtitle");
++  assert.match(narrow, /\.page-sub\s*\{\s*display:\s*none/,
++    "narrow chrome hides the page subtitle");
++  assert.match(narrow, /\.conn-pill\s*\{/, "connection status remains in the compact bar");
++  assert.doesNotMatch(narrow, /\.conn-pill\s*\{[^}]*display:\s*none/,
++    "connection status is not hidden to save space");
++  assert.match(narrow, /\.work-portfolio[\s\S]*?max-height:\s*calc\(100dvh\s*-\s*132px\)/,
++    "narrow Goal Tree keeps its own scroll host");
++
++  assert.doesNotMatch(css, /border-left:\s*3px/,
++    "guide, conclusion and delivery rows no longer use a 3px left accent");
++  assert.match(css, /\.guide-card\s*\{[\s\S]*?border-left:\s*1px\s+solid/,
++    "guide uses a hairline accent");
++  assert.match(css, /\.mr-conclusion\s*\{[\s\S]*?border-left:\s*1px\s+solid/,
++    "Main conclusion uses a hairline accent");
++  assert.match(css, /\.mr-conclusion\.mr-no-result\s*\{[\s\S]*?border-left:\s*1px\s+solid/,
++    "no-result conclusion uses a hairline accent");
++  assert.match(css, /\.delivery-invalid-row\s*\{[\s\S]*?border-left:\s*1px\s+solid/,
++    "invalid delivery row uses a hairline accent");
++
++  const statusBlock = css.slice(css.indexOf(".work-card-status {"), css.indexOf(".work-card-status.tone-active"));
++  assert.match(statusBlock, /white-space:\s*nowrap/, "status badges stay on one line");
++  assert.doesNotMatch(statusBlock, /overflow-wrap:\s*anywhere/,
++    "status badges do not wrap mid-label");
++  assert.doesNotMatch(statusBlock, /max-width:\s*42%/,
++    "status badges are not squeezed to a wrapping fraction");
++  assert.match(css, /\.badge\s*\{[\s\S]*?white-space:\s*nowrap/,
++    "Goal status pills stay on one line");
++  assert.match(css, /\.goal-file-lead,[\s\S]*?max-width:\s*68ch/,
++    "Goal file narrative uses a readable measure");
++  assert.match(css, /\.decision-item-fact,[\s\S]*?max-width:\s*68ch/,
++    "Decision Center narrative uses a readable measure");
++});
+diff --git a/baseline/tests/hub-ui-assets.test.ts b/workspace/tests/hub-ui-assets.test.ts
+index d5e0522..983e744 100644
+--- a/baseline/tests/hub-ui-assets.test.ts
++++ b/workspace/tests/hub-ui-assets.test.ts
+@@ -27,11 +27,19 @@ test("Hub public assets exist with configure + operate chrome", async () => {
+   const css = await readFile(path.join(hubPublic, "app.css"), "utf8");
+   assert.ok(html.includes("<!DOCTYPE html>"));
+   assert.ok(html.includes('data-tab="model"') && html.includes('data-tab="work"'));
+-  assert.ok(html.includes('id="fl-detail"'));
+-  assert.ok(html.includes("THESIS: One Goal owns one working canvas."),
+-    "the binding Work direction comment remains intact");
++  assert.ok(html.includes('data-tab="worker"') && html.includes('data-tab="mains"'));
++  assert.ok(html.includes('data-tab="decisions"'), "Decision Center is a primary route");
++  assert.ok(html.includes('id="fl-view"') && html.includes('id="fl-detail"'));
++  assert.ok(html.includes("<script src=\"i18n.js\"></script>") && html.includes("<script src=\"app.js\"></script>"));
++  assert.ok(!html.includes('type="module"') && !html.includes("importmap"), "classic script tags only");
++  assert.ok(html.includes("THESIS: ForkLight opens on Goal truth:"),
++    "the Goal-first design contract comment remains intact");
++  assert.ok(html.includes("product-bar") && html.includes("fl-system-menu"),
++    "compact product bar and quiet System access ship");
++  assert.ok(!html.includes("class=\"sidebar\""), "the configuration-first sidebar is gone");
+   assert.ok(js.includes("X-ForkLight-Hub-Token"));
+   assert.ok(js.includes("function kanbanCard"));
++  assert.ok(css.includes("#f6f7f9") && css.includes("#171a21") && css.includes("#1677ff"));
+   assert.ok(css.length > 200);
+ });
+ 
+@@ -7907,10 +7915,10 @@ test("Hub explains execution preference bilingually without forcing protocol voc
+   assert.ok(src.includes("workersReadinessNextExecutionMode"), "readiness next action key is consumed");
+   assert.ok(src.includes("fl-wp-execution"), "the Worker editor has an execution preference control");
+   for (const phrase of [
+-    "Auto — prefer a real Goal",
++    "Auto: prefer a real Goal",
+     "One normal run",
+     "Native Goal (requires support)",
+-    "自动 —— 优先使用真实 Goal",
++    "自动：优先使用真实 Goal",
+     "单次执行",
+     "原生 Goal（需要 Runtime 支持）",
+   ]) {
+@@ -8024,20 +8032,22 @@ test("Hub authenticates onto Work as the only default work surface", async () =>
+   }
+   // Initial localized chrome matches Work page metadata (zh-CN default shell).
+   assert.ok(html.includes('id="fl-page-title"') && html.includes(">工作<"), "initial page title is Work");
+-  assert.ok(html.includes("查看 Goal、独立 Plan 或一次性 Task 工作区，以及其中的工作"),
+-    "initial page sub is workspace-neutral Work orientation");
++  assert.ok(html.includes("先看当前 Goal 的结果、事实和需要你决定的事"),
++    "initial page sub leads with Goal truth");
+   assert.ok(i18n.includes('work: { title: "Work"'), "English Work title remains truthful");
+   assert.ok(i18n.includes('work: { title: "工作"'), "Chinese Work title remains truthful");
+   // First refresh requests Work hierarchy/intake slices via the default tab fallback.
+   assert.ok(src.includes('requestPlan(S.tab || "work")'), "refresh falls back to Work deps");
+   assert.ok(src.includes('pageMeta(S.tab || "work")'), "chrome falls back to Work metadata");
+   assert.ok(src.includes('var tab = S.tab || "work"'), "render falls back to Work");
+-  // Keyboard/focus order follows visible primary nav: Work is the first Operate item.
+-  const operateLabel = html.indexOf('data-i18n="navOperate"');
++  // Keyboard/focus order: Work then Decision Center, then quiet System access.
+   const workBtn = html.indexOf('data-tab="work"');
++  const decisionBtn = html.indexOf('data-tab="decisions"');
++  const systemMenu = html.indexOf("fl-system-menu");
+   const competeBtn = html.indexOf('data-tab="competitions"');
+-  assert.ok(operateLabel > 0 && workBtn > operateLabel, "Work follows the Operate group label");
+-  assert.ok(competeBtn > workBtn, "Compete follows Work in focus order");
++  assert.ok(workBtn > 0 && decisionBtn > workBtn, "Decision Center follows Work");
++  assert.ok(systemMenu > decisionBtn, "System access follows the primary routes");
++  assert.ok(competeBtn > systemMenu, "Competition stays inside System, after the primary routes");
+ });
+ 
+ test("Hub legacy peer pages redirect to the single Work surface", async () => {
+@@ -8593,15 +8603,16 @@ test("FL-112B terminal Goals stay in one counted, lazy Finished history disclosu
+   assert.ok(finished.includes("renderWorkHistoryOption(goal)"), "history expands to selectable Goal summaries");
+   assert.ok(finished.includes("if(details.open) ensureFinishedBody()"),
+     "lanes render only after the disclosure opens");
+-  const portfolio = extractFunctionSource(src, "renderWorkPortfolio");
+-  assert.ok(portfolio.includes("workGoalIsTerminalStatusForSelection"),
+-    "portfolio partitions active and terminal Goals by canonical status");
++  const tree = extractFunctionSource(src, "composeGoalTreeModel");
++  const portfolio = extractFunctionSource(src, "renderWorkGoalTree");
++  assert.ok(tree.includes("workGoalIsTerminalStatusForSelection"),
++    "Goal Tree partitions Now and History by canonical Goal status");
+   assert.ok(portfolio.includes("renderWorkFinishedGoals(finishedGoals)"),
+-    "terminal Goal history is reachable from the rail");
+-  assert.ok(portfolio.indexOf("activeGoals") < portfolio.indexOf("independent"),
+-    "active Goal summaries precede independent Plans");
+-  assert.ok(portfolio.indexOf("independent") < portfolio.indexOf("oneOffTasks"),
+-    "one-off work remains a separate portfolio choice");
++    "terminal Goal history is reachable from the History tree");
++  assert.ok(tree.includes("if(item.terminal) history.push") && tree.includes("now.push"),
++    "Now Goals stay separate from History Goals");
++  assert.ok(tree.includes("oneOffTasks") && tree.includes("inbox"),
++    "one-off work remains a separate Goal Tree choice");
+   assert.ok(css.includes(".work-finished-group"), "finished group styles ship");
+   assert.ok(!/work-finished-group[\s\S]{0,240}(max-height:\s*\d+vh|overflow:\s*hidden)/.test(css),
+     "finished group does not clip or fix viewport height");
+@@ -10175,6 +10186,7 @@ test("FL-112E9 reload context restores the draft, selected intake, confirm step,
+     "workReadingOptionalNumber",
+     "workReadingSafeFilterPart",
+     "workReadingNormalizeFilter",
++    "workNormalizeTreeWidth",
+     "workReadingNormalizeRecord",
+   ].map((name) => extractFunctionSource(src, name)).join("\n");
+   const constants = `
+@@ -10185,6 +10197,9 @@ test("FL-112E9 reload context restores the draft, selected intake, confirm step,
+     var WORK_READING_CONTEXT_DISCLOSURES = ["finishedOpen", "advancedOpen", "expertDetailsOpen", "goalSummaryOpen", "filtersOpen", "oneOffCurrentOpen", "oneOffAttentionOpen", "oneOffHistoryOpen", "shapeGuideOpen", "pageStoryOpen", "outcomeAdvancedOpen"];
+     var WORK_READING_CONTEXT_TABS = ["overview", "instruction", "process", "result", "checks", "actions", "more"];
+     var WORK_COLUMN_CODES = ["not-started", "ready", "running", "waiting-verification", "waiting-user-decision", "completed", "stopped-failed"];
++    var GOAL_TREE_WIDTH_DEFAULT = 280;
++    var GOAL_TREE_WIDTH_MIN = 200;
++    var GOAL_TREE_WIDTH_MAX = 420;
+   `;
+   const api = new Function("sessionStorage", `${constants}\n${helpers}\nreturn {
+     normalize: workReadingNormalizeRecord,
+@@ -10306,17 +10321,17 @@ test("FL-112E10 Work orientation and Main handoff copy stay workspace-neutral an
+   const html = await readFile(path.join(hubPublic, "index.html"), "utf8");
+   const { enSection, zhSection } = splitI18n(i18n);
+ 
+-  // Page subtitle is true for Goal, independent Plan, and one-off Task.
+-  assert.match(enSection, /work:\s*\{\s*title:\s*"Work",\s*sub:\s*"[^"]*Goal[^"]*Plan[^"]*Task[^"]*"\s*\}/,
+-    "English Work subtitle names Goal, Plan, and Task workspaces");
+-  assert.match(zhSection, /work:\s*\{\s*title:\s*"工作",\s*sub:\s*"[^"]*Goal[^"]*Plan[^"]*Task[^"]*"\s*\}/,
+-    "Chinese Work subtitle names Goal, Plan, and Task workspaces");
+-  assert.ok(enSection.includes("independent Plan") || enSection.includes("one-off Task"),
+-    "English subtitle is not Goal-phase-only");
+-  assert.ok(zhSection.includes("独立 Plan") || zhSection.includes("一次性 Task"),
+-    "Chinese subtitle is not Goal-phase-only");
+-  assert.ok(html.includes("Goal") && html.includes("Plan") && html.includes("Task"),
+-    "initial static shell subtitle stays workspace-neutral");
++  // Page subtitle leads with Goal truth, then current fact and the next checkpoint.
++  assert.match(enSection, /work:\s*\{\s*title:\s*"Work",\s*sub:\s*"[^"]*Goal[^"]*"\s*\}/,
++    "English Work subtitle names the current Goal");
++  assert.match(zhSection, /work:\s*\{\s*title:\s*"工作",\s*sub:\s*"[^"]*Goal[^"]*"\s*\}/,
++    "Chinese Work subtitle names the current Goal");
++  assert.ok(enSection.includes("desired result") && enSection.includes("checkpoint"),
++    "English subtitle leads with result and the next checkpoint");
++  assert.ok(zhSection.includes("期望结果") && zhSection.includes("检查点"),
++    "Chinese subtitle leads with result and the next checkpoint");
++  assert.ok(html.includes("Goal") && html.includes("结果") && html.includes("决定"),
++    "initial static shell subtitle leads with Goal truth");
+   assert.ok(!html.includes("统一的目标 → 计划 → 任务看板"),
+     "initial shell drops the Goal-only hierarchy subtitle");
+ 
+@@ -10424,8 +10439,12 @@ test("FL-112A Work continuity helpers ship with keep-or-refresh wiring", async (
+   assert.ok(snap.includes("S.workSelection"), "focused workspace is part of visible truth");
+   assert.ok(snap.includes("S.intakes"), "intake evidence is snapshotted");
+   assert.ok(snap.includes("S.workFilter"), "applied filter is snapshotted");
++  assert.ok(snap.includes("S.tab"), "current route is part of visible truth");
+   assert.ok(!snap.includes("S.lastOk") && !snap.includes("Date.now"),
+     "snapshot ignores connection clock chrome");
++  const live = extractFunctionSource(src, "workDomIsLive");
++  assert.ok(live.includes('tab === "decisions"'), "Decision Center has its own live mount check");
++  assert.ok(live.includes('tab !== "work"'), "non-Work routes do not inherit the Work mount");
+ });
+ 
+ test("FL-112A three identical Work polls keep the same truth snapshot and skip DOM replace", async () => {
+@@ -10622,6 +10641,7 @@ test("FL-112A changed Work evidence forces one refresh and restores surviving co
+     extractFunctionSource(src, "workFindFocusTarget"),
+     extractFunctionSource(src, "workContentScrollEl"),
+     extractFunctionSource(src, "workMaterializeOpenFinishedBody"),
++    extractFunctionSource(src, "workNormalizeTreeWidth"),
+     extractFunctionSource(src, "workCaptureWorkbenchContext"),
+     extractFunctionSource(src, "workRestoreWorkbenchContext"),
+   ].join("\n");
+@@ -10913,6 +10933,87 @@ test("FL-112A changed Work evidence forces one refresh and restores surviving co
+   assert.equal(postNestedCard.focusCalls, 1, "missing target does not steal focus onto another Task");
+ });
+ 
++test("Work to Decision Center rebuilds the selected route while same-route polls retain", async () => {
++  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
++  const extraStart = src.indexOf("var WORK_TRUTH_VOLATILE_EXTRA = [");
++  assert.ok(extraStart >= 0, "private volatile extra-key array ships");
++  const extraEnd = src.indexOf("];", extraStart) + 2;
++  const helpers = [
++    src.slice(extraStart, extraEnd),
++    extractFunctionSource(src, "workIsVolatileTruthKey"),
++    extractFunctionSource(src, "workStableTruthClone"),
++    extractFunctionSource(src, "workSelectionKey"),
++    extractFunctionSource(src, "workVisibleTruthSnapshot"),
++    extractFunctionSource(src, "workDomIsLive"),
++    extractFunctionSource(src, "workShouldRetainDom"),
++  ].join("\n");
++
++  const workBoard = { id: "live-work-board" };
++  const decisionCenter = { id: "live-decision-center" };
++  const mounts = { work: workBoard, decisions: null as { id: string } | null };
++  const viewEl = {
++    querySelector(sel: string) {
++      if (sel.includes("work-board") || sel.includes("workbench-layout") || sel.includes("goal-tree")) {
++        return mounts.work;
++      }
++      if (sel.includes("decision-center")) return mounts.decisions;
++      return null;
++    },
++  };
++  const windowObj = { ForklightI18n: { getLang() { return "zh"; } } };
++  const factory = new Function(
++    "window",
++    "viewEl",
++    `${helpers}
++     var S = {
++       tab: "work",
++       workFilter: {},
++       workSelection: { kind: "goal", id: "g-active" },
++       workHierarchy: { goals: [{ goalId: "g-active", name: "Hub" }] },
++       workHierarchyError: null,
++       intakes: [],
++       intakesError: null,
++       workRenderSnapshot: null,
++       workTreeScope: "now",
++       workTreeQuery: "",
++       workMobilePane: "tree"
++     };
++     return {
++       S: S,
++       snapshot: workVisibleTruthSnapshot,
++       retain: workShouldRetainDom,
++       remember: function(s){ S.workRenderSnapshot = s; },
++       setTab: function(tab){ S.tab = tab; }
++     };`,
++  );
++  const api = factory(windowObj, viewEl) as {
++    S: { tab: string; workRenderSnapshot: string | null };
++    snapshot: () => string;
++    retain: () => boolean;
++    remember: (s: string) => void;
++    setTab: (tab: string) => void;
++  };
++
++  const workSnap = api.snapshot();
++  api.remember(workSnap);
++  assert.match(workSnap, /"tab":"work"/, "Work snapshot records the Work route");
++  assert.equal(api.retain(), true, "an identical Work poll keeps the live Work mount");
++
++  api.setTab("decisions");
++  assert.notEqual(api.snapshot(), workSnap, "switching to Decision Center changes visible truth");
++  assert.equal(api.retain(), false, "Work to Decision Center does not keep the Work mount");
++
++  mounts.work = null;
++  mounts.decisions = decisionCenter;
++  const decisionSnap = api.snapshot();
++  api.remember(decisionSnap);
++  assert.match(decisionSnap, /"tab":"decisions"/, "Decision Center snapshot records its route");
++  assert.equal(api.retain(), true, "an identical Decision Center poll keeps the live Decision mount");
++
++  api.setTab("work");
++  assert.equal(api.retain(), false, "Decision Center to Work rebuilds the selected route");
++});
++
+ // --- FL-108D1: Task Detail tells one clear input-to-delivery story ---
+ 
+ test("FL-108D1 Checks tab hint is total on all-pass, failed/total on failure, empty when unknown", async () => {
+@@ -11491,6 +11592,7 @@ test("FL-112F reload context is versioned, bounded, field-safe, and storage-fail
+     "workReadingOptionalNumber",
+     "workReadingSafeFilterPart",
+     "workReadingNormalizeFilter",
++    "workNormalizeTreeWidth",
+     "workReadingNormalizeRecord",
+     "workReadSessionContext",
+     "workWriteSessionContext",
+@@ -11504,6 +11606,9 @@ test("FL-112F reload context is versioned, bounded, field-safe, and storage-fail
+     var WORK_READING_CONTEXT_DISCLOSURES = ["finishedOpen", "advancedOpen", "expertDetailsOpen", "goalSummaryOpen", "filtersOpen", "oneOffCurrentOpen", "oneOffAttentionOpen", "oneOffHistoryOpen", "shapeGuideOpen", "pageStoryOpen", "outcomeAdvancedOpen"];
+     var WORK_READING_CONTEXT_TABS = ["overview", "instruction", "process", "result", "checks", "actions", "more"];
+     var WORK_COLUMN_CODES = ["not-started", "ready", "running", "waiting-verification", "waiting-user-decision", "completed", "stopped-failed"];
++    var GOAL_TREE_WIDTH_DEFAULT = 280;
++    var GOAL_TREE_WIDTH_MIN = 200;
++    var GOAL_TREE_WIDTH_MAX = 420;
+   `;
+   let raw = "";
+   let removed = 0;
+@@ -11694,9 +11799,13 @@ test("FL-112F terminal-Goal default phase is saved/restored so manual board scro
+     var WORK_COLUMN_CODES = ["not-started", "ready", "running", "waiting-verification", "waiting-user-decision", "completed", "stopped-failed"];
+     var WORK_READING_CONTEXT_DISCLOSURES = ["finishedOpen", "advancedOpen", "expertDetailsOpen", "goalSummaryOpen", "filtersOpen", "oneOffCurrentOpen", "oneOffAttentionOpen", "oneOffHistoryOpen", "shapeGuideOpen", "pageStoryOpen", "outcomeAdvancedOpen"];
+     var WORK_READING_CONTEXT_TABS = ["overview", "instruction", "process", "result", "checks", "actions", "more"];
++    var GOAL_TREE_WIDTH_DEFAULT = 280;
++    var GOAL_TREE_WIDTH_MIN = 200;
++    var GOAL_TREE_WIDTH_MAX = 420;
+   `;
+   const helpers = [
+     "workReadingSafeNumber",
++    "workNormalizeTreeWidth",
+     "normalizeWorkHierarchy",
+     "workMakeSelection",
+     "workSelectionKey",

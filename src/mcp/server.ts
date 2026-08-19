@@ -8,9 +8,18 @@ import type {
 } from "../core/statistics.js";
 import type { RoutingAdvisoryResponse } from "../core/model-routing.js";
 import type { DirectCodexPairedSample } from "../core/direct-codex-calibration.js";
+import {
+  MAX_MAIN_USAGE_EPISODE_SEGMENTS,
+  MIN_MAIN_USAGE_EPISODE_SEGMENTS,
+  type MainUsageSample,
+  type MainUsageStatus,
+} from "../core/main-token-usage.js";
+import type { MainPairAssessResult, MainPairReport } from "../core/main-token-pair.js";
+import type { MainTokenValueReport } from "../core/main-token-value-report.js";
 import type {
   AttemptRecord,
   EventRecord,
+  MainDecisionPacket,
   TaskDecisionView,
   TaskRecord,
 } from "../core/types.js";
@@ -21,6 +30,7 @@ import {
 import { assessIntegrationFeasibility } from "../core/integration-feasibility.js";
 import { buildCompactIntegrationOperationView } from "../core/integration-operation.js";
 import type { IntegrationOperationView } from "../core/types.js";
+import { projectSafeRoutingExplanation } from "../core/routing-explanation.js";
 import {
   isTaskPresentationLanguage,
   parseTaskSpec,
@@ -49,6 +59,19 @@ import { defaultExecutableForRuntime, SUPPORTED_RUNTIME_NAMES } from "../core/ru
 import { isPricingRouteId, resolveWorkerSelection } from "../core/worker-profiles.js";
 import { assessWorkspaceBoundary } from "../workspace/boundary-advice.js";
 import { createPathPolicy } from "../workspace/path-policy.js";
+import { formatStorageLifecycleHuman } from "../core/storage-lifecycle.js";
+import type {
+  StorageAuditView,
+  StoragePreviewView,
+  StorageReclaimView,
+  StorageRetainView,
+} from "../core/types.js";
+import {
+  createBackup,
+  formatBackupHuman,
+  inspectBackup,
+  previewBackup,
+} from "../core/backup.js";
 
 const SERVER_INSTRUCTIONS =
   "ForkLight runs bounded external coding Workers (runtimes: claude-code default, optional grok-build with provider xai). The Main agent may be Claude Code, Grok Build, OpenCode, Codex, or a human using CLI/Console — not Codex-only. Before submit, the Main agent must align the solution and provide a complete Task Contract covering outcome, scope, execution, modules, call chain, scenarios, risks, and independent acceptance. Validate first. Submit returns immediately. Prefer forklight_wait over tight-loop status. Use forklight_list for progress-aware boards. Status may include failureCategory authentication|budget|runtime|contract-infeasible. Worker runtime is chosen by task.runtime (or defaultRuntime), independent of which Main client is connected. Record taskId for continuity across Main sessions. The Main agent remains accountable for review and user approvals. Never call ForkLight a native subagent of the Main product, and never use it to commit or push.";
@@ -139,6 +162,49 @@ const routingDecisionSchema = z.object({
     settingsDigest: z.string().min(1).max(200).optional()
       .describe("Optional settings version fingerprint; never settings values"),
   }).strict(),
+  advisory: z.object({
+    overallResult: z.enum([
+      "recommended",
+      "cannot-determine",
+      "historical-best-not-launchable",
+    ]).describe("Frozen M3-A overallResult; parseTaskSpec enforces pairing with selection"),
+    selection: z.enum([
+      "followed-recommendation",
+      "manual-override",
+      "selected-after-cannot-determine",
+    ]).describe("Closed Main relationship to the frozen advisory"),
+    recommendedWorker: frozenWorkerIdentitySchema.optional()
+      .describe("Recommended identity when the advisory named one; required with confidence"),
+    confidence: z.number().min(0).max(1).optional()
+      .describe("Frozen advisory confidence in [0, 1]; present only with recommendedWorker"),
+    cannotDetermineReasons: z.array(z.enum([
+      "insufficient-relevant-samples",
+      "single-comparable-identity",
+      "no-active-factors",
+      "score-gap-too-small",
+      "positive-factor-unavailable",
+      "profile-identity-unavailable",
+    ])).min(1).optional()
+      .describe("Required by parseTaskSpec when overallResult is cannot-determine"),
+    selectedExecution: z.object({
+      resolvedExecutionMode: z.enum(["single-run", "persistent-session", "native-goal"])
+        .describe("Frozen selected resolved execution mode"),
+      readinessState: z.enum(["ready", "launchable", "needs-attention", "blocked"])
+        .describe("Frozen selected readiness state"),
+      canLaunch: z.boolean().describe("Frozen selected canLaunch"),
+      nextAction: z.enum([
+        "none",
+        "run-smoke-check",
+        "check-provider",
+        "configure-authentication",
+        "fix-runtime",
+        "change-pairing",
+        "choose-model",
+        "choose-execution-mode",
+      ]).describe("Frozen selected readiness next action"),
+    }).strict(),
+  }).strict().optional()
+    .describe("Optional frozen advisory/Main relationship; omitted on legacy decisions"),
 }).strict();
 
 const taskInputSchema = z.object({
@@ -176,7 +242,7 @@ const taskInputSchema = z.object({
   /** Immutable Main routing-decision snapshot. Optional for legacy callers;
    *  never auto-generated from workerProfileId. parseTaskSpec is the semantic authority. */
   routingDecision: routingDecisionSchema.optional()
-    .describe("Main routing-decision snapshot frozen before any Worker starts: shortlist, selectedWorker, selectedBecause, competition intent/triggers, evidenceSnapshot"),
+    .describe("Main routing-decision snapshot frozen before any Worker starts: shortlist, selectedWorker, selectedBecause, competition intent/triggers, evidenceSnapshot, optional advisory relationship"),
   provider: z.enum(["deepseek", "qwen", "minimax", "glm", "volcengine", "xai", "openai"]).optional(),
   model: z.string().min(1).optional(),
   endpoint: z.string().url().optional(),
@@ -368,6 +434,20 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
         projectDir: spec.project,
         policy: createPathPolicy(spec),
       });
+      const profileLabel = spec.workerProfileId === undefined
+        ? undefined
+        : settings.workerProfiles.profiles.find((profile) => profile.id === spec.workerProfileId)?.label;
+      const routingExplanation = projectSafeRoutingExplanation({
+        ...(spec.routingDecision === undefined ? {} : { routingDecision: spec.routingDecision }),
+        selectedWorker: {
+          provider: spec.provider.name,
+          model: spec.provider.model,
+          runtime: spec.runtime.name,
+          effort: spec.runtime.effort,
+        },
+        ...(spec.workerProfileId === undefined ? {} : { workerProfileId: spec.workerProfileId }),
+        ...(profileLabel === undefined ? {} : { workerProfileLabel: profileLabel }),
+      });
       return textAndData({
         ...report,
         budget: {
@@ -378,6 +458,7 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
         resolvedRuntimeMaxBudgetUsd: spec.runtime.maxBudgetUsd,
         integrationFeasibility,
         workspaceBoundaryAdvice,
+        routingExplanation,
       });
     },
   );
@@ -769,7 +850,7 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
     {
       title: "Inspect Worker result",
       description:
-        "Inspect a ForkLight task. Prefer summary=true (default) for main-thread supervision: compact attempts, bounded events, verification hints, and diff metrics without full diff text. Set summary=false only for deep audit (full events/diff, truncated at 120k).",
+        "Inspect a ForkLight task. Prefer summary=true (default) for main-thread supervision: compact attempts, bounded events, verification hints, the Main decision packet, and diff metrics without full diff text. Set summary=false only for deep audit (full events/diff, truncated at 120k).",
       inputSchema: z.object({
         taskId: z.string().uuid(),
         summary: z.boolean().default(true),
@@ -791,12 +872,14 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
             const attempts = result.attempts as AttemptRecord[];
             const events = result.events as EventRecord[];
             const decision = result.decision as TaskDecisionView;
+            const decisionPacket = result.decisionPacket as MainDecisionPacket | undefined;
             const diff = typeof result.diff === "string" ? result.diff : undefined;
             const compact = buildCompactInspection({
               task,
               attempts,
               events,
               decision,
+              ...(decisionPacket === undefined ? {} : { decisionPacket }),
               diff,
               eventLimit,
             });
@@ -1223,7 +1306,7 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
     {
       title: "Evidence-aware model routing advisory",
       description:
-        "Provide a read-only, evidence-aware routing advisory for an exact taskClass and two or more provider/model candidates. Recommends a model only when comparable historical evidence is sufficient; otherwise returns unknown. Competition advice is separate from evidence uncertainty and requires Main's explicit intent plus enabled triggers. Non-model failures (credentials, provider errors, policy, workspace, interruption) never penalize a model. Official-cost comparison is available only when all candidates have exact same-currency Provider-native quotes. Duration contributes zero weight by default. Never launches work, switches a Worker, disables a model, or mutates settings.",
+        "Provide a read-only, evidence-aware routing advisory for an exact taskClass and two or more saved Worker Profiles or legacy provider/model candidates. Returns one overall result: recommended (a currently launchable Profile with complete Runtime/model/effort/execution identity), historical-best-not-launchable (historical winner kept visible, no substitute), or cannot-determine with stable reasons. Historical scores stay independent of current readiness. Competition advice is separate from evidence uncertainty and requires Main's explicit intent plus enabled triggers. Never launches work, switches a Worker, disables a model, or mutates settings.",
       inputSchema: z.object({
         taskClass: z.string().trim().min(1).max(200)
           .describe("Exact task class identifier — never pattern-matched or inferred"),
@@ -1271,21 +1354,81 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
       );
       const rec = advisory.recommendation;
       const suggestions: string[] = [];
-      if (rec) {
+      if (advisory.overallResult === "recommended" && rec) {
         const recLabel = rec.workerLabel !== undefined
           ? `${rec.workerLabel} (${rec.provider}/${rec.model})`
           : `${rec.provider}/${rec.model}`;
-        suggestions.push(`Model routing recommends ${recLabel} (confidence ${rec.confidence}) for task class "${taskClass}".`);
+        const execution = rec.resolvedExecutionMode === undefined
+          ? ""
+          : ` execution=${rec.resolvedExecutionMode}`;
+        suggestions.push(
+          `Model routing overall result is recommended: ${recLabel} (confidence ${rec.confidence}, canLaunch=${rec.canLaunch === true}${execution}) for task class "${taskClass}".`,
+        );
         if (rec.workerProfileId !== undefined) {
           suggestions.push(`This recommendation points to Worker Profile ${rec.workerProfileId}.`);
         }
+        if (rec.nextAction !== undefined) {
+          suggestions.push(`Next action: ${rec.nextAction}.`);
+        }
+      } else if (advisory.overallResult === "historical-best-not-launchable" && rec) {
+        const recLabel = rec.workerLabel !== undefined
+          ? `${rec.workerLabel} (${rec.provider}/${rec.model})`
+          : `${rec.provider}/${rec.model}`;
+        suggestions.push(
+          `Model routing overall result is historical-best-not-launchable for "${taskClass}": historical best ${recLabel} cannot currently launch; no Worker was substituted.`,
+        );
       } else {
-        suggestions.push(`Model routing advice for "${taskClass}": evidence is unknown (scope=${advisory.evidenceScope}).`);
+        const reasons = advisory.cannotDetermineReasons.length > 0
+          ? ` (${advisory.cannotDetermineReasons.join(", ")})`
+          : "";
+        suggestions.push(
+          `Model routing overall result is cannot determine for "${taskClass}"${reasons}; evidence scope=${advisory.evidenceScope}.`,
+        );
       }
       if (advisory.shouldRunCompetition) {
         suggestions.push(`Competition advised: intent=${advisory.competition.intent}, matching triggers=${advisory.competition.matchingTriggers.join(", ") || "none"}.`);
       } else {
         suggestions.push(`Competition not advised (intent=${advisory.competition.intent}).`);
+      }
+      const strategyPolicy = advisory.strategyPolicy;
+      if (strategyPolicy !== undefined) {
+        const strategy = strategyPolicy.strategy;
+        if (strategy.determination === "recommendation" && strategy.recommendation) {
+          suggestions.push(
+            `Execution strategy ${strategy.recommendation.executionMode} is historically stronger; explanation only, nothing starts automatically.`,
+          );
+        } else {
+          suggestions.push(
+            `Execution strategy cannot determine (${strategy.reasons.join(", ") || "insufficient evidence"}); nothing starts automatically.`,
+          );
+        }
+        const competitionPolicy = strategyPolicy.competitionPolicy;
+        if (competitionPolicy.determination === "not-advised") {
+          suggestions.push("Competition policy remains not advised; history cannot override intent none.");
+        } else if (competitionPolicy.determination === "explained") {
+          suggestions.push(
+            `Competition history is explanation only (${competitionPolicy.matchingCompetitionCount} matching); Main still decides.`,
+          );
+        } else {
+          suggestions.push(
+            `Competition policy cannot determine (${competitionPolicy.reasons.join(", ")}).`,
+          );
+        }
+        const judge = strategyPolicy.judgePolicy;
+        if (judge.determination === "explained") {
+          suggestions.push(
+            `Judge policy history: declared ${judge.declaredRequiredJudges.depths.join(",")} usable=${judge.usableOutcomeCount} unusable=${judge.unusableOutcomeCount} identities=${judge.distinctUnderlyingIdentityCount}; no vote.`,
+          );
+        } else {
+          suggestions.push(
+            `Judge policy cannot determine (${judge.reasons.join(", ")}); no inferred requirement.`,
+          );
+        }
+        if (strategyPolicy.mainDirectHistory.present) {
+          suggestions.push(
+            `Main-direct history: ${strategyPolicy.mainDirectHistory.recordCount} record(s), not compared as Worker evidence.`,
+          );
+        }
       }
       return textAndData(advisory, suggestions.join(" "));
     },
@@ -2037,6 +2180,60 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
   );
 
   server.registerTool(
+    "forklight_review_graph_repair_result",
+    {
+      title: "Repair one otherwise-valid over-limit Judge summary",
+      description:
+        "Ask the same frozen Judge identity to shorten only an over-limit summary once. ForkLight keeps the original failed assignment immutable, does not rerun the Candidate, does not add a Judge, and counts the repaired JSON only after strict validation proves Revision, disposition, and findings did not change. Requires confirm: true. One-shot: a later request fails closed.",
+      inputSchema: z.object({
+        taskId: z.string().min(1),
+        assignmentId: z.string().min(1),
+        reason: z.string().trim().min(1).max(1000),
+        confirm: z.literal(true).describe(
+          "Explicit confirmation that Main wants one same-Judge schema-only summary repair. Must be true.",
+        ),
+      }).strict(),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ taskId, assignmentId, reason }) => {
+      return withMcpExchangeReceipt({
+        operation: "forklight_review_graph_repair_result",
+        home,
+        args: {
+          taskId,
+          assignmentId,
+          reasonLength: reason.length,
+          confirm: true,
+        },
+        taskId,
+        invoke: async () => {
+          await ensureDaemon(home);
+          const result = await daemonRequest<Record<string, unknown>>(
+            "review_graph_repair_result",
+            {
+              taskId,
+              assignmentId,
+              reason,
+              confirm: true,
+            },
+            home,
+          );
+          const graph = result.graph as Record<string, unknown> | undefined;
+          const aggregation = graph?.aggregation as Record<string, unknown> | undefined;
+          return textAndData(
+            result,
+            `Same-Judge schema-only summary repair ${result.created === true ? "created" : "rejected"} for assignment ${assignmentId}. ` +
+            `Original failure ${String(result.originalFailureCode ?? "schema-violation")} remains visible; ` +
+            `assignments ${Array.isArray(graph?.assignments) ? graph.assignments.length : 0}; ` +
+            (aggregation === undefined ? "" : `usable ${String(aggregation.usable)}/${String(aggregation.total)}; `) +
+            `next: ${String(graph?.nextAction ?? "")}. No Candidate rerun and no new Judge.`,
+          );
+        },
+      });
+    },
+  );
+
+  server.registerTool(
     "forklight_review_graph_status",
     {
       title: "Inspect read-only multi-judge review status",
@@ -2067,6 +2264,125 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
         (aggregation === undefined ? "" : `; aggregate=${String(aggregation.state)}`) +
         `; next: ${String(result.nextAction ?? "")}`,
       );
+    },
+  );
+
+  server.registerTool(
+    "forklight_delivery_prepare",
+    {
+      title: "Prepare a reviewed Candidate for Main decision",
+      description:
+        "One resumable prepare: submit a Task file or observe an existing Task, wait for independent verification, create or reuse the exact confirmed Review Graph, wait for every required Judge, and return one compact decision-ready checkpoint. Never records a Main decision, never integrates, and never repairs or replaces a Judge. Observation timeout ends only this wait.",
+      inputSchema: z.object({
+        taskFile: z.string().min(1).optional(),
+        taskId: z.string().min(1).optional(),
+        reviewerProfileIds: z.array(z.string().min(1).max(64)).max(3).default([]),
+        reason: z.string().trim().min(1).max(1000),
+        timeoutMs: z.number().int().positive().max(3_600_000),
+        confirm: z.literal(true),
+        includeDiffMaxBytes: z.number().int().min(0).max(1_000_000).optional(),
+      }).strict().refine(
+        (value) => (value.taskFile !== undefined) !== (value.taskId !== undefined),
+        { message: "Provide exactly one of taskFile or taskId" },
+      ),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ taskFile, taskId, reviewerProfileIds, reason, timeoutMs, includeDiffMaxBytes }) => {
+      let resolvedTaskId: string | undefined = taskId;
+      return withMcpExchangeReceipt({
+        operation: "forklight_delivery_prepare",
+        home,
+        args: {
+          ...(taskFile === undefined ? {} : { taskFile }),
+          ...(taskId === undefined ? {} : { taskId }),
+          reviewerProfileIds,
+          reasonLength: reason.length,
+          timeoutMs,
+          confirm: true,
+          ...(includeDiffMaxBytes === undefined ? {} : { includeDiffMaxBytes }),
+        },
+        taskId: () => resolvedTaskId,
+        invoke: async () => {
+          await ensureDaemon(home);
+          const checkpoint = await daemonRequest<Record<string, unknown>>(
+            "delivery_prepare",
+            {
+              ...(taskFile === undefined ? {} : { taskFile }),
+              ...(taskId === undefined ? {} : { taskId }),
+              reviewerProfileIds,
+              reason,
+              timeoutMs,
+              confirm: true,
+              ...(includeDiffMaxBytes === undefined ? {} : { includeDiffMaxBytes }),
+            },
+            home,
+          );
+          if (typeof checkpoint.task === "object" && checkpoint.task !== null) {
+            const id = (checkpoint.task as { id?: unknown }).id;
+            if (typeof id === "string") resolvedTaskId = id;
+          }
+          const next = String(checkpoint.nextActionCode ?? "");
+          return textAndData(
+            checkpoint,
+            `Delivery prepare ${String(checkpoint.observation === undefined ? "" : (checkpoint.observation as { outcome?: unknown }).outcome)} for Task ${resolvedTaskId ?? "unknown"}; next ${next}. ForkLight does not accept or integrate.`,
+          );
+        },
+      });
+    },
+  );
+
+  server.registerTool(
+    "forklight_delivery_decide",
+    {
+      title: "Record Main's exact delivery decision",
+      description:
+        "Exact-bind Main accept, revise, or reject to the current verified and fully reviewed Candidate. Revise and reject persist only that decision. Accept runs one fresh preflight and one Integration and observes it to terminal. Exact re-entry reuses the durable review, receipt, and operation. Never invents a decision.",
+      inputSchema: z.object({
+        taskId: z.string().min(1),
+        decision: z.enum(["accept", "revise", "reject"]),
+        revisionId: z.string().min(1),
+        digest: z.string().regex(/^[a-f0-9]{64}$/u),
+        reason: z.string().trim().min(1).max(1000),
+        timeoutMs: z.number().int().positive().max(3_600_000),
+        confirm: z.literal(true),
+      }).strict(),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ taskId, decision, revisionId, digest, reason, timeoutMs }) => {
+      return withMcpExchangeReceipt({
+        operation: "forklight_delivery_decide",
+        home,
+        args: {
+          taskId,
+          decision,
+          revisionId,
+          digest,
+          reasonLength: reason.length,
+          timeoutMs,
+          confirm: true,
+        },
+        taskId,
+        invoke: async () => {
+          await ensureDaemon(home);
+          const checkpoint = await daemonRequest<Record<string, unknown>>(
+            "delivery_decide",
+            {
+              taskId,
+              decision,
+              revisionId,
+              digest,
+              reason,
+              timeoutMs,
+              confirm: true,
+            },
+            home,
+          );
+          return textAndData(
+            checkpoint,
+            `Delivery decide ${decision} for Task ${taskId}; observation ${String((checkpoint.observation as { outcome?: unknown } | undefined)?.outcome ?? "")}; next ${String(checkpoint.nextActionCode ?? "")}.`,
+          );
+        },
+      });
     },
   );
 
@@ -2326,6 +2642,189 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
       return textAndData(
         result,
         `Direct Codex publication version ${(result.summary as Record<string, unknown>).version} registered for ${(result.publication as Record<string, unknown>).directCodexProfileId}.`,
+      );
+    },
+  );
+
+  server.registerTool(
+    "forklight_main_token_capture",
+    {
+      title: "Capture complete Main usage sample",
+      description:
+        "Record one complete role-aware Main Codex terminal usage sample. Identity is derived only from the stored Task. Count-only; never computes savings or creates work.",
+      inputSchema: z.object({
+        taskId: z.string().min(1).describe("Opaque ForkLight Task id"),
+        comparisonId: z.string().min(1).describe("Opaque comparison identity shared by both roles"),
+        role: z.enum(["direct-main", "delegated-main"]),
+        runRef: z.string().min(1).describe("Unique opaque Codex run reference"),
+        usage: codexTerminalUsageSchema,
+      }).strict(),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ taskId, comparisonId, role, runRef, usage }) => {
+      await ensureDaemon(home);
+      const sample = await daemonRequest<MainUsageSample>(
+        "main_token_capture",
+        { taskId, comparisonId, role, runRef, usage },
+        home,
+      );
+      return textAndData(
+        sample,
+        `Main usage sample ${sample.sampleId} captured for Task ${sample.forklightTaskId} as ${sample.role}.`,
+      );
+    },
+  );
+
+  server.registerTool(
+    "forklight_main_token_capture_episode",
+    {
+      title: "Capture complete Main usage episode",
+      description:
+        "Record one complete multi-session Main Codex usage episode as a single role sample. Each segment is one exact turn.completed event. Count-only; never computes savings or creates work.",
+      inputSchema: z.object({
+        taskId: z.string().min(1).describe("Opaque ForkLight Task id"),
+        comparisonId: z.string().min(1).describe("Opaque comparison identity shared by both roles"),
+        role: z.enum(["direct-main", "delegated-main"]),
+        runRef: z.string().min(1).describe("Unique opaque episode run reference"),
+        segments: z.array(z.object({
+          runRef: z.string().min(1).describe("Unique opaque Codex run reference for this segment"),
+          usage: codexTerminalUsageSchema,
+        }).strict()).min(MIN_MAIN_USAGE_EPISODE_SEGMENTS).max(MAX_MAIN_USAGE_EPISODE_SEGMENTS),
+      }).strict(),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ taskId, comparisonId, role, runRef, segments }) => {
+      await ensureDaemon(home);
+      const sample = await daemonRequest<MainUsageSample>(
+        "main_token_capture_episode",
+        { taskId, comparisonId, role, runRef, segments },
+        home,
+      );
+      const segmentCount = sample.segments?.length ?? 0;
+      return textAndData(
+        sample,
+        `Main usage episode ${sample.sampleId} captured for Task ${sample.forklightTaskId} as ${sample.role} with ${segmentCount} segments.`,
+      );
+    },
+  );
+
+  server.registerTool(
+    "forklight_main_token_status",
+    {
+      title: "Read Main usage comparison status",
+      description:
+        "Read-only count-only status for one Task/comparison. Reports captured and missing roles. Never mutates state, creates work, or computes savings.",
+      inputSchema: z.object({
+        taskId: z.string().min(1),
+        comparisonId: z.string().min(1),
+      }).strict(),
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ taskId, comparisonId }) => {
+      await ensureDaemon(home);
+      const status = await daemonRequest<MainUsageStatus>(
+        "main_token_status",
+        { taskId, comparisonId },
+        home,
+      );
+      return textAndData(
+        status,
+        `Main usage status for ${status.comparisonId}: captured ${status.capturedRoles.join(", ") || "(none)"}; missing ${status.missingRoles.join(", ") || "(none)"}; countComplete=${status.countComplete}.`,
+      );
+    },
+  );
+
+  server.registerTool(
+    "forklight_main_token_assess",
+    {
+      title: "Assess a Main Token pair",
+      description:
+        "Record one immutable accepted or rejected Main Token pair assessment. Requires explicit confirm true and the three comparison gates. Re-reads current delegated verification, Main accept and Integration. Never starts work.",
+      inputSchema: z.object({
+        taskId: z.string().min(1),
+        comparisonId: z.string().min(1),
+        confirm: z.literal(true),
+        sameScope: z.boolean(),
+        sameAcceptance: z.boolean(),
+        delegatedQualityNotLower: z.boolean(),
+        directVerificationRef: z.object({
+          referenceId: z.string().min(1),
+        }).strict(),
+        delegatedIntegrationOperationId: z.string().min(1),
+        reviewer: z.literal("main-codex"),
+        assessedAt: z.string().min(1),
+        schemaVersion: z.literal(1),
+      }).strict(),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async (input) => {
+      await ensureDaemon(home);
+      const result = await daemonRequest<MainPairAssessResult>(
+        "main_token_assess",
+        input as unknown as Record<string, unknown>,
+        home,
+      );
+      return textAndData(
+        result,
+        `Main pair assessment ${result.outcome} for ${input.comparisonId}: ${result.reasons.join(", ") || "accepted"}.`,
+      );
+    },
+  );
+
+  server.registerTool(
+    "forklight_main_token_pair_report",
+    {
+      title: "Read Main Token pair report",
+      description:
+        "Read-only signed Main Token change for one Task/comparison. Re-reads stored samples, assessment and current delegated delivery. Never mutates, creates work, or invents a saving.",
+      inputSchema: z.object({
+        taskId: z.string().min(1),
+        comparisonId: z.string().min(1),
+      }).strict(),
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ taskId, comparisonId }) => {
+      await ensureDaemon(home);
+      const report = await daemonRequest<MainPairReport>(
+        "main_token_pair_report",
+        { taskId, comparisonId },
+        home,
+      );
+      return textAndData(
+        report,
+        `Main pair report for ${report.comparisonId}: validity=${report.validity}; signedChange=${report.signedChange ?? "unavailable"}; saving=${report.saving.status}.`,
+      );
+    },
+  );
+
+  server.registerTool(
+    "forklight_main_token_value_report",
+    {
+      title: "Read family Main Token value report",
+      description:
+        "Read-only family Main Token value report for one to ten exact task families. Lists every in-scope accepted or rejected pair. Proves delegated Main Token lower only when every requested family has a current accepted strictly-positive pair. Never mutates, creates work, writes evidence, or mixes Worker Token with Main Token.",
+      inputSchema: z.object({
+        families: z.array(z.string().min(1).max(80)).min(1).max(10)
+          .describe("One to ten exact task-family names; no inferred family"),
+        comparisons: z.array(z.string().min(1).max(128)).max(64).optional()
+          .describe("Optional exact comparison-id filter"),
+      }).strict(),
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ families, comparisons }) => {
+      await ensureDaemon(home);
+      const report = await daemonRequest<MainTokenValueReport>(
+        "main_token_value_report",
+        {
+          families,
+          ...(comparisons === undefined ? {} : { comparisons }),
+        },
+        home,
+      );
+      const comparisonCount = report.families.reduce((count, family) => count + family.comparisons.length, 0);
+      return textAndData(
+        report,
+        `Main Token value report: overall=${report.overall}; families=${report.families.length}; comparisons=${comparisonCount}.`,
       );
     },
   );
@@ -2633,6 +3132,165 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
           receipt?.receiptId ?? "unknown",
         )} links every canonical id. Nothing is queued twice; identical retries return this same receipt.`,
       );
+    },
+  );
+
+  server.registerTool(
+    "forklight_storage_audit",
+    {
+      title: "Audit Task storage lifecycle",
+      description:
+        "Read-only audit of protected, reclaimable, reclaimed, retained, and unknown-orphan Task space. Joins current Store truth with bounded filesystem and process observations. Never mutates Store, files, Task state, or processes. Human and JSON views share one next action.",
+      inputSchema: z.object({}).strict(),
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async () => {
+      await ensureDaemon(home);
+      const view = await daemonRequest<StorageAuditView>("storage_audit", {}, home);
+      return textAndData(view, formatStorageLifecycleHuman(view));
+    },
+  );
+
+  server.registerTool(
+    "forklight_storage_preview",
+    {
+      title: "Preview reclaimable Task space",
+      description:
+        "Read-only preview of known regenerable targets for one Task or the current eligible set. Unknown and durable entries are preserved and reported. Never mutates Store, files, or processes.",
+      inputSchema: z.object({
+        taskId: z.string().min(1).max(128).optional(),
+      }).strict(),
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ taskId }) => {
+      await ensureDaemon(home);
+      const view = await daemonRequest<StoragePreviewView>(
+        "storage_preview",
+        taskId === undefined ? {} : { taskId },
+        home,
+      );
+      return textAndData(view, formatStorageLifecycleHuman(view));
+    },
+  );
+
+  server.registerTool(
+    "forklight_storage_reclaim",
+    {
+      title: "Reclaim eligible Task space",
+      description:
+        "Explicit confirmed reclaim of one Task or the current eligible set. Re-evaluates current Store truth immediately before deletion, refuses newly protected Tasks, stops only proven eligible-Task processes, and removes only canonical known regenerable targets. Durable and unknown content stay.",
+      inputSchema: z.object({
+        taskId: z.string().min(1).max(128).optional(),
+        allEligible: z.boolean().optional(),
+        confirm: z.literal(true).describe("Explicit confirmation required before any deletion."),
+      }).strict().refine(
+        (value) => (value.taskId !== undefined) !== (value.allEligible === true),
+        { message: "Provide exactly one of taskId or allEligible" },
+      ),
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+    },
+    async ({ taskId }) => {
+      return withMcpExchangeReceipt({
+        operation: "forklight_storage_reclaim",
+        home,
+        args: {
+          ...(taskId === undefined ? { allEligible: true } : { taskId }),
+          confirm: true,
+        },
+        taskId: taskId ?? (() => undefined),
+        invoke: async () => {
+          await ensureDaemon(home);
+          const view = await daemonRequest<StorageReclaimView>("storage_reclaim", {
+            confirm: true,
+            ...(taskId === undefined ? { allEligible: true } : { taskId }),
+          }, home);
+          return textAndData(view, formatStorageLifecycleHuman(view));
+        },
+      });
+    },
+  );
+
+  server.registerTool(
+    "forklight_storage_retain",
+    {
+      title: "Retain terminal Task space",
+      description:
+        "Explicitly keep full space for an otherwise reclaimable terminal Task. Records a bounded disposition event and does not delete paths or stop processes.",
+      inputSchema: z.object({
+        taskId: z.string().min(1).max(128),
+        reason: z.string().trim().min(1).max(1000),
+        confirm: z.literal(true).describe("Explicit confirmation required to record retention."),
+      }).strict(),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ taskId, reason }) => {
+      return withMcpExchangeReceipt({
+        operation: "forklight_storage_retain",
+        home,
+        args: { taskId, reasonLength: reason.length, confirm: true },
+        taskId,
+        invoke: async () => {
+          await ensureDaemon(home);
+          const view = await daemonRequest<StorageRetainView>("storage_retain", {
+            taskId,
+            reason,
+            confirm: true,
+          }, home);
+          return textAndData(view, formatStorageLifecycleHuman(view));
+        },
+      });
+    },
+  );
+
+  server.registerTool(
+    "forklight_backup_preview",
+    {
+      title: "Preview a ForkLight Home backup",
+      description:
+        "Read-only preview of a new local ForkLight Home backup destination. Reports included durable names, excluded transient/auth state, Store integrity, privacy impact, and the next action. Never starts or signals Daemon or Hub. Keychain and external Main/runtime auth are not included.",
+      inputSchema: z.object({
+        destination: z.string().min(1).describe("New directory path outside the active Home. Must not already exist."),
+      }).strict(),
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ destination }) => {
+      const view = await previewBackup(home, destination);
+      return textAndData(view, formatBackupHuman(view));
+    },
+  );
+
+  server.registerTool(
+    "forklight_backup_create",
+    {
+      title: "Create a ForkLight Home backup",
+      description:
+        "Create one new self-contained local backup directory of the current ForkLight Home. Requires confirm=true. Never follows external links, never copies Keychain or external Main/runtime auth, and never starts or signals Daemon or Hub. Keep the backup private.",
+      inputSchema: z.object({
+        destination: z.string().min(1).describe("New directory path outside the active Home. Must not already exist."),
+        confirm: z.literal(true).describe("Explicit confirmation required before creating a backup."),
+      }).strict(),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ destination }) => {
+      const view = await createBackup(home, destination);
+      return textAndData(view, formatBackupHuman(view));
+    },
+  );
+
+  server.registerTool(
+    "forklight_backup_inspect",
+    {
+      title: "Inspect a ForkLight Home backup",
+      description:
+        "Read-only inspection of an existing local ForkLight backup. Verifies the readable manifest, containment, entry types, and Store integrity. Never starts or signals Daemon or Hub and never replaces Home. Restore remains a direct stopped-owner CLI action.",
+      inputSchema: z.object({
+        backupPath: z.string().min(1).describe("Existing backup directory created by forklight backup create."),
+      }).strict(),
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ backupPath }) => {
+      const view = await inspectBackup(backupPath);
+      return textAndData(view, formatBackupHuman(view));
     },
   );
 

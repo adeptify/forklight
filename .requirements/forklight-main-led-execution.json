@@ -1,0 +1,283 @@
+{
+  "schema_version": "1.0",
+  "meta": {
+    "goal_id": "forklight-main-led-execution",
+    "title": "把 ForkLight 做成强 Main 主导的通用执行系统",
+    "status": "confirmed",
+    "mode": "long-run",
+    "runtime": "codex",
+    "clarity_score": 98,
+    "summary": "归档已完成 M1 的旧 Goal，建立一个新的唯一长期 Goal，从 M2 推进到 M5。Main 负责理解背景、设计 Goal/Plan/Task、拆分正交 Work Item、调度、审查和关键决策；Worker 通过真实 Runtime Goal 或诚实的持续执行策略完成研究、实现、验证和基于新证据的修正。项目优先通过 ForkLight 使用 Grok CLI 4.6 Xhigh，并利用独立 Judge Worker 提高质量；迭代以里程碑结果为中心，不为自证、测试数量或理论边角无限打磨。CLI/API 全部毕业后再统一设计 Hub，Task 工作空间必须有可审计的回收生命周期。",
+    "summary_confirmed": true,
+    "budget": "长期 Goal 不设总 Token 或墙钟上限；各 Worker Profile 和 Task 的预算、并发、无进展超时及修复安全上限可配置，不能自动无限续期",
+    "persist": "full",
+    "checkpoint": "evidence",
+    "created_at": "2026-08-14T01:18:08+08:00",
+    "updated_at": "2026-08-14T01:30:04+08:00",
+    "source": {
+      "seed": "为 ForkLight 建立一个干净、可停止、可并行的长期 Goal 和项目 AGENTS.md；优先 Grok CLI 4.6 Xhigh，使用持续 Goal 式执行与 Worker 互审，避免无休止自证和牛角尖迭代，并明确哪些能力应产品化。"
+    }
+  },
+  "context": {
+    "repo_scan": {
+      "branch": "main",
+      "stack": ["TypeScript", "Node.js 24+", "SQLite", "CLI", "local daemon", "MCP", "local Hub"],
+      "readme_summary": "ForkLight 是 local-first、Runtime 与模型无关的执行中枢；Main 掌握意图、合同、审查和授权，Worker 在隔离空间执行。",
+      "agents_files": ["AGENTS.md"],
+      "conventions": ["唯一 Goal 目录作为项目管理入口", "ForkLight 迭代使用 ForkLight dogfood", "Worker 不写原项目、不 commit、不 push", "CLI/API 先于 Hub"],
+      "scan_notes": [
+        "已确认：旧 Goal forklight-main-token-leverage 的 M1 已毕业，用户选择归档旧 Goal并建立新的唯一长期 Goal。",
+        "已确认：Grok CLI 1.0.3 可选择 grok-4.6、xhigh、Session ID和 resume/continue。",
+        "已确认：当前 ForkLight Grok Profile 仍是 grok-4.5/high/single-run，适配器把 nativeGoal 标为 unsupported；M2 必须先升级并诚实记录执行模式。",
+        "已确认：ForkLight 已有 Review Graph，可为 Candidate 指派一至三个独立只读 Judge Worker。",
+        "已确认：当前设置支持按 Worker/Task 配置时间、Token、文件、行数、Attempt、修复、Main修正和并发安全上限。",
+        "已确认：历史完整备份已压缩为一份421 MB数据库；旧Workspace增长证明Task空间生命周期属于产品能力。",
+        "已确认：ForkLight 当前只服务一骏的单人本地开发；不为假想多人协作或分布式协调增加 checksum、版本握手、锁和重复一致性校验。只保留防止数据损坏、协议不可读或 Candidate 错误合入所需的最小安全检查。"
+      ]
+    },
+    "terms": [
+      {
+        "term": "Main",
+        "definition": "负责理解背景、规划、拆分、调度、审查、冲突裁决和关键授权的强主控；节约Main Token不等于取消这些高价值工作。",
+        "source": "user",
+        "status": "confirmed"
+      },
+      {
+        "term": "正交 Work Item",
+        "definition": "在现有Plan/Task模型中，依赖、输入输出、允许修改范围和验收独立，可在隔离Workspace并行执行的工作单元；它不是新的产品数据类型。",
+        "source": "user",
+        "status": "confirmed"
+      },
+      {
+        "term": "Grok Goal式执行",
+        "definition": "当前使用ForkLight Goal合同加Grok持久Session和resume/continue实现持续交付，并标记为persistent-session；只有适配器能证明原生Goal身份、状态和恢复时才标记native-goal。",
+        "source": "code",
+        "status": "confirmed",
+        "evidence": "Grok CLI支持Session恢复；src/workers/grok.ts当前声明nativeGoal unsupported"
+      },
+      {
+        "term": "有效进展",
+        "definition": "产生新的可审计证据，例如完成验收项、形成可用产物、缩小失败范围、通过新增验证或得到明确的阻断事实；重复日志、测试数量增长和无行为变化的重写不算。",
+        "source": "user",
+        "status": "confirmed"
+      },
+      {
+        "term": "可产品化能力",
+        "definition": "能跨项目复用，有明确用户输入输出、可配置策略、持久真相和验收，并且是当前里程碑明确要求或已在至少两个真实场景重复出现的行为；一次性恢复和ForkLight自身开发偏好不进入核心产品。",
+        "source": "inferred",
+        "status": "assumed"
+      }
+    ]
+  },
+  "goal": {
+    "outcome": "在保留已毕业M1能力的基础上完成M2至M5：Main能把Coding和非Coding目标拆为有依赖的正交工作波次，ForkLight优先调度Grok CLI 4.6 Xhigh及其他合适Runtime，使Worker通过真实Goal或诚实持续策略完成执行、自检、独立验证、Judge审查、基于证据的修正、部分成果复用和安全Integration；CLI/API能够完成全部核心流程并管理Task空间生命周期；随后统一设计Hub。每个已毕业代表任务族都必须在交付质量不低于同范围直接Main基线时，用可审计成对证据证明Main Token下降，并单独透明报告Worker Token、费用、时间和修正成本。",
+    "verification": {
+      "commands": [
+        "npm install",
+        "npm run check",
+        "node dist/src/cli.js doctor --json",
+        "node dist/src/cli.js health --json",
+        "node dist/src/cli.js goal list --json",
+        "node dist/src/cli.js board --json",
+        "node dist/src/cli.js stats --json"
+      ],
+      "artifacts": [
+        "goals/forklight-main-led-execution/plan.md",
+        "goals/forklight-main-led-execution/progress.md",
+        "goals/forklight-main-led-execution/decisions.md",
+        "goals/forklight-main-led-execution/evidence/m2-delivery-graduation.md",
+        "goals/forklight-main-led-execution/evidence/m2-storage-lifecycle.md",
+        "goals/forklight-main-led-execution/evidence/m3-routing-graduation.md",
+        "goals/forklight-main-led-execution/evidence/main-token-pairs.json",
+        "goals/forklight-main-led-execution/evidence/clean-clone-run.md",
+        "最终Hub桌面/移动端验收截图与Impeccable结论"
+      ],
+      "evidence_sources": [
+        "真实Coding与非Coding长程dogfood的Task、Attempt、Candidate、验证、Judge、修正、Main决策和Integration链",
+        "Daemon或Runtime中断后的恢复与继续执行证据",
+        "Task空间保留理由、清理预览、回收结果、孤儿检测与Store完整性证据",
+        "三个代表任务族的真实路由、失败归因和人工覆盖证据",
+        "同范围同验收的直接Main与委派执行成对样本",
+        "陌生开发者clean-clone和最终Hub可用性观察"
+      ]
+    },
+    "constraints": [
+      "M1已经毕业，不重新实现或反复自证；旧Goal归档为历史证据，新Goal是唯一当前项目管理入口。",
+      "ForkLight当前按单人本地使用设计；不得为假想多人协同、分布式一致性或跨节点版本协调增加checksum、内容寻址、锁、租约、版本握手和重复校验。现有或新增校验必须能直接防止数据损坏、协议无法读取、Candidate基线失配或错误Integration，否则删除或不做。",
+      "Main拥有目标、Work Item依赖、验收、路由、审查、冲突裁决和Integration/commit/push授权；Worker拥有普通执行。",
+      "每个Milestone先拆正交Work Item和依赖波次；项目开发默认一波最多三个修改面不重叠的实现Worker，额外并发优先用于只读Reviewer/Judge；实际并发由配置和正交证据决定，Main串行Integration。",
+      "项目开发默认优先Grok CLI 4.6 Xhigh；只有健康检查和最小Smoke证明可运行后才使用。高风险Judge可使用不同Runtime减少共同盲区。",
+      "不伪装Runtime能力：当前Grok使用persistent-session；只有真实可观察、可恢复的原生Goal合同毕业后才使用native-goal标签。",
+      "Worker先自检，ForkLight独立验收；有意义的普通交付默认一个Judge，高风险核心链默认两个，最多三个且仅用于真实分歧。Judge只读，Main最终裁决。",
+      "修复次数、Attempt、时间、Token、文件和行数是Worker/Task可配置的安全保险，不是Goal写死的完成条件；文件和行数开发期默认只警告。",
+      "继续执行取决于有效进展而非固定轮次；验收通过立即停止，重复失败、无新增证据、补丁互相补偿或需要越过Spec边界时返回Main。",
+      "复用已通过的路径和部分成果，修剩余缺口；不得因为局部失败自动整项重做、换模型重跑或启动Competition。",
+      "每个Task必须有空间处置：执行/审查中保护完整Workspace，终态后保留必要证据并回收可再生Workspace、Runtime Home和缓存；不得删除未提取的Candidate或部分成果。",
+      "核心CLI/API、诊断和clean-clone先毕业；M5之前不零碎重做Hub，M5使用Impeccable一次统一设计。",
+      "只有跨项目可复用、用户可理解、可配置并可验收的重复行为进入ForkLight产品；ForkLight自身模型偏好、文档流程和一次性恢复留在AGENTS、Profile或Evidence。",
+      "不为增加测试数、制造dogfood数据、形成模型排名、证明系统复杂性或修复非阻断理论边角创建Work Item。",
+      "里程碑内可自动开始下一就绪波次；跨里程碑展示用户结果并等待一骏确认。",
+      "不得reset、覆盖其他任务成果、读取或改写Provider凭据，也不得未经授权commit或push。"
+    ],
+    "boundaries": {
+      "in_scope": [
+        "M2持续高质量交付：Runtime策略、依赖波次、恢复、自检、独立验证、Review Graph、证据驱动修正、复用、交接、安全Integration和Task空间生命周期",
+        "M3证据驱动智能委派：任务族、路由建议、可信度、人工覆盖、例外Competition、失败归因和模型/执行策略历史",
+        "M4 Main Token杠杆：公平成对样本、质量门槛、Main Token变化以及Worker Token/费用/时间透明报告",
+        "M5产品毕业：CLI/API clean-clone、配置诊断、备份恢复、最后的Impeccable Hub和30分钟首次交付",
+        "ForkLight自身通过ForkLight完成有意义的实现与独立审查"
+      ],
+      "out_of_scope": [
+        "多人组织权限、云同步和托管SaaS控制面",
+        "为单人本地开发引入分布式协调、多人并发控制、普遍checksum/content hash、跨节点版本握手或重复一致性证明",
+        "正式开源治理、社区运营、签名App、自动更新和App Store",
+        "在CLI/API毕业前继续零碎Hub视觉修补",
+        "为了统计而重放任务、默认Competition、无限Judge对话和自动无限重试",
+        "为正交Work Item新建一套与Goal/Plan/Task平行的数据模型",
+        "只服务ForkLight自身开发的元协调、元证明或复杂状态系统"
+      ],
+      "allowed_paths": [
+        "/Users/yijunwang/code/forklight",
+        "/Users/yijunwang/Library/Application Support/ForkLight（只按已批准的Task运行、空间预览、备份和清理边界）"
+      ],
+      "forbidden_paths": [
+        "其他产品仓库",
+        "Provider凭据和Keychain内容",
+        "未形成保留/删除判定的活动Task Workspace",
+        "远端Git仓库（未经明确授权）"
+      ]
+    },
+    "metrics": [
+      {
+        "name": "总体里程碑",
+        "baseline": "M1已毕业，整体1/5",
+        "target": "M2、M3、M4、M5逐项满足独立退出条件，整体5/5",
+        "unit": "milestone",
+        "measurement": "progress.md只在对应证据文件、真实命令和Main审查全部通过后更新"
+      },
+      {
+        "name": "M2端到端交付",
+        "baseline": "已有大量基础能力，但持续执行、互审、复用和空间回收尚未作为统一产品闭环毕业",
+        "target": "至少一项Coding和一项Non-Coding长程任务在中断恢复后由Worker完成并通过独立验证、Judge和Main审查，Main不接管普通执行",
+        "unit": "representative journey",
+        "measurement": "同一Task lineage、恢复事件、Candidate、验证、Judge、修正和Integration证据"
+      },
+      {
+        "name": "Task空间生命周期",
+        "baseline": "历史Task与完整快照曾产生大规模Workspace和孤儿进程",
+        "target": "所有终态Task都有明确保留理由或已回收可再生空间；活动/待审成果零误删；空间审计无未知孤儿",
+        "unit": "task workspace",
+        "measurement": "清理预览与结果、进程/目录归属、Store quick_check和外键检查"
+      },
+      {
+        "name": "M3路由证据",
+        "baseline": "已有统计和路由基础，但证据覆盖不完整",
+        "target": "至少三个代表任务族有可审查建议、可信度和人工覆盖；证据不足时明确cannot determine",
+        "unit": "task family",
+        "measurement": "真实交付、失败归因、Judge/Main决策和路由投影"
+      },
+      {
+        "name": "M4 Main Token杠杆",
+        "baseline": "现有少量成对样本不足以形成一般结论",
+        "target": "每个已毕业代表任务族都有同范围同验收有效对照，委派质量不低于直接Main且Main Token更低",
+        "unit": "validated pair",
+        "measurement": "direct Main usage减去Main编排/审查usage；Worker Token、费用、时间和修正次数单列"
+      },
+      {
+        "name": "M5首次交付",
+        "baseline": "尚无完整clean-clone用户证据",
+        "target": "陌生开发者在30分钟内完成安装配置、真实Task、Main审查和安全Integration，不查数据库、不手改配置文件",
+        "unit": "minutes",
+        "measurement": "clean-clone观察记录、CLI/API证据和最终Hub验收"
+      }
+    ],
+    "iteration_policy": "每个Milestone先由Main基于现状审计建立依赖图，把现有Plan中的Task作为正交Work Item，按就绪波次并行执行并配置独立Judge；不另建Work Item数据类型。默认一波最多三个实现Writer，实际并发通过配置和正交证据调整。每个Work Item有自包含Spec、允许修改范围、输入输出、验收和空间处置。Worker优先使用健康的Grok 4.6 Xhigh persistent-session完成端到端执行；Main串行审查和Integration。只要新一轮产生有效证据且仍在Spec内即可继续，策略安全上限可由Main有理由地调整；验收通过立即收口。连续两轮只有相同失败或无实质新证据、补丁开始互相补偿、需要扩大边界或候选已不兼容时，停止自动迭代并返回决策包。非阻断发现记录一次进入later，不自动生成新Task。聚焦测试随Work Item运行，完整套件用于高风险Integration和Milestone边界。里程碑内自动开始下一就绪波次，边界等待一骏确认。",
+    "blocked_stop": "如果关键需求仍有歧义、环境或Runtime不可用且没有在范围内的备用路径、连续两次有目的的尝试没有新增证据、需要触碰禁止边界，或Main无法判断验收是否满足，则停止当前Work Item并返回：已完成成果、可复用路径、准确失败证据、已尝试方案、空间处置和所需决定。不得用自动换模型、重建整个Task、增加Judge或扩大范围掩盖阻断；可安全推进的其他正交Work Item不受影响。",
+    "priority": "p0",
+    "mvp_vs_later": {
+      "mvp": [
+        "M2持续高质量交付和Task空间生命周期毕业",
+        "M3证据驱动智能委派毕业",
+        "M4公平Main Token杠杆证明毕业",
+        "M5 CLI/API clean-clone、统一Hub和首次交付毕业"
+      ],
+      "later": [
+        "多人协作、组织权限和云服务",
+        "正式开源治理与公共发布",
+        "更广泛非Coding领域模板",
+        "签名桌面App、自动更新和App Store"
+      ]
+    }
+  },
+  "clarification_log": [
+    {
+      "question": "如何处理已经执行过的旧Goal？",
+      "options": ["归档旧Goal并建立新的唯一长期Goal", "继续沿用旧Goal", "覆盖旧Goal"],
+      "answer": "归档旧Goal并建立新的唯一长期Goal",
+      "rationale": "保留M1证据，同时避免两套当前信息源。"
+    },
+    {
+      "question": "Milestone内如何提高执行并行度？",
+      "answer": "设计正交Work Item，按依赖波次并行，Main串行审查和合入。"
+    },
+    {
+      "question": "项目默认使用哪个Worker？",
+      "answer": "尽量优先Grok CLI、Grok 4.6 Xhigh，并多用Goal式持续执行。"
+    },
+    {
+      "question": "如何限制修复而不因硬次数过早失败或无限循环？",
+      "answer": "不在Goal写死固定修复轮次；以有效进展和Spec边界决定继续，具体安全上限由Worker/Task配置并由Main有理由地调整。"
+    },
+    {
+      "question": "是否使用Worker之间的独立检查？",
+      "answer": "使用现有Review Graph；普通有意义交付默认一个Judge，高风险交付默认两个，最多三个，Judge只读且Main最终裁决。"
+    },
+    {
+      "question": "需求复述是否确认？",
+      "answer": "确认生成Goal和AGENTS.md，并补充避免无休止自证以及明确哪些能力进入ForkLight产品。"
+    }
+  ],
+  "risks": [
+    {
+      "risk": "ForkLight迭代退化为不断证明ForkLight能够迭代",
+      "impact": "产生大量Task、测试、日志和统计，但用户能力没有前进",
+      "mitigation": "每个Work Item必须关闭当前Milestone缺口或产生退出证据；禁止仪式性dogfood和仅为统计重跑。"
+    },
+    {
+      "risk": "把Grok持续Session误称为原生Goal",
+      "impact": "恢复和状态承诺不真实",
+      "mitigation": "当前标记persistent-session；只有身份、状态、终止和恢复合同经真实测试后才切换native-goal。"
+    },
+    {
+      "risk": "正交Work Item实际共享文件或隐含依赖",
+      "impact": "Candidate冲突、重复修正和集成失败",
+      "mitigation": "并行前写清depends_on、允许路径和输出；有共享面就串行，Main逐个Integration。"
+    },
+    {
+      "risk": "Worker互审变成循环或多数投票代替判断",
+      "impact": "成本上升且责任不清",
+      "mitigation": "Judge只读独立输出证据，重复意见不触发新轮次，分歧由Main按合同裁决。"
+    },
+    {
+      "risk": "修复策略不是过严就是无限",
+      "impact": "交付过早失败或无界消耗",
+      "mitigation": "数值只作为可配置保险；以有效进展继续，以重复失败、无证据和越界作为停止条件。"
+    },
+    {
+      "risk": "Workspace、Runtime Home、缓存和备份继续增长",
+      "impact": "磁盘耗尽并留下孤儿进程",
+      "mitigation": "M2建立终态空间处置、孤儿检测、预览清理和证据保留合同。"
+    },
+    {
+      "risk": "无效对照产生虚假的Main Token节约",
+      "impact": "北极星指标误导路由和产品判断",
+      "mitigation": "同范围同验收、质量硬门槛、无有效pair就显示无法判断。"
+    },
+    {
+      "risk": "把项目开发偏好全部做进ForkLight核心",
+      "impact": "产品复杂、抽象失控",
+      "mitigation": "按可产品化判据分类；模型偏好放Profile，流程偏好放AGENTS，一次性恢复放Evidence。"
+    }
+  ],
+  "open_questions": []
+}

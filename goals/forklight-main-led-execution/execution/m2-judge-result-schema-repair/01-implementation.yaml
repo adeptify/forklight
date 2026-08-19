@@ -1,0 +1,124 @@
+version: 2
+name: M2 one-shot same-Judge schema-only result repair
+project: /Users/yijunwang/code/forklight
+taskClass: m2-judge-result-schema-repair
+taskFamily: forklight-quality-decision-chain
+workerProfileId: grok-4-6-xhigh
+deliveryProfileId: forklight-self-upgrade
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 2
+  reason: Review authority, one-shot recovery and Integration-gate truth require two independent views before Main Integration.
+runtime:
+  name: grok-build
+  executable: /Users/yijunwang/code/forklight/goals/forklight-main-led-execution/execution/m2-grok-native-goal/grok-native-goal-bootstrap.mjs
+  effort: xhigh
+  maxBudgetUsd: null
+contract:
+  outcome: Add one Main-confirmed, one-shot, same-frozen-Judge schema-only result repair that fixes only an otherwise-valid over-limit summary, preserves the original failed assignment, never reruns the Candidate or adds a Judge, and exposes truthful CLI/API status and gates.
+  presentation: { summary: 让同一位Judge只修一次超长summary，不重跑Candidate、不换Judge、不加第三位Judge。, language: zh-CN }
+  context:
+    - Read AGENTS.md and specs/m2-b-quality-decision-chain/work-items/judge-result-schema-repair/spec.md completely before editing; that Work Item spec is the sole accepted requirement.
+    - Current real evidence is three otherwise-valid exact-Revision JSON results rejected only because summary length was 507, 558 or 733 against the public 500-character limit.
+    - Original Review Assignment, failure code, Reviewer Task and raw Attempt evidence must remain immutable and readable; append at most one repair record to that assignment.
+    - The repair is a derived read-only Task under the same assignment and same frozen Profile/provider/model/runtime/effort. It is not a new assignment, replacement or third Judge.
+    - "Eligibility is intentionally narrow: only a single otherwise-valid JSON object whose sole defect is summary over 500 but within total-result bounds. Reject every other failure before mutation."
+    - Successful repair must pass the existing strict parser and preserve exact Revision, schemaVersion, disposition and all findings; only summary may differ.
+    - One repair Task means one base Attempt and zero extra/correction/validation-repair/reverification/adaptation/replacement/model switch. No automatic trigger or retry.
+    - This implementation Task truthfully records persistent-session while the operational wrapper invokes one real Grok CLI native /goal with Grok 4.6 Xhigh current-model-only.
+    - ForkLight serves one local developer. Add no lock, lease, checksum, content hash, version handshake, duplicate coordination state or distributed behavior.
+    - Edit only the isolated Workspace. Never commit, push, change remotes, access credentials, edit Hub/UI, touch the storage Candidate paths or run its Candidate.
+  inScope:
+    - Add narrow eligibility and immutable append-only repair lifecycle to existing Review Graph authority.
+    - Atomically create and recover one same-identity read-only repair Task without changing assignment count or Goal review rounds.
+    - Reconcile the repair once, strictly parse it, enforce summary-only change, update effective aggregation/gate evidence and require fresh Main review.
+    - Add explicit Daemon, CLI and MCP operation plus privacy-safe status projection.
+    - Add focused failing-before tests for eligibility, immutability, one-shot, identity/semantic drift, restart recovery, gate and public surfaces.
+  outOfScope:
+    - Candidate rerun/edit/revision, new Graph/assignment/Judge, third or replacement Judge, identity switch, automatic retry, general Reviewer retry, other schema repairs, silent truncation, Main decision, Integration, storage reclaim, Hub/UI, M3, commit or push.
+    - Locks, leases, checksums, content-addressing, version negotiation, multi-user or distributed coordination.
+  executionSteps:
+    - Trace the accepted Review Graph parse, Store, reconcile, gate and transport boundaries and write the minimal implementation plan.
+    - Implement one append-only repair record and same-frozen-identity read-only Task with strict summary-only eligibility and one-shot recovery.
+    - Connect effective result projection, required-Judge gate, newer terminal evidence, Daemon restart, CLI and MCP without changing original assignment truth.
+    - Add focused regressions, run every accepted command, inspect the scoped diff and stop after one complete passing slice.
+  deliverables:
+    - Core one-shot same-Judge result-repair lifecycle and strict summary-only validation.
+    - Durable Store/restart behavior and truthful Review Graph/Integration gate projection.
+    - Explicit CLI/API/MCP operation with bounded privacy-safe output.
+    - Focused tests proving all prohibited rerun/replacement/retry paths stay absent.
+  modules:
+    - name: Repair eligibility and immutable evidence
+      responsibility: Prove the retained raw Judge JSON is otherwise valid with only an over-limit summary and append one permanent allowance-consumption record.
+      consumes: [Candidate Task id, assignment id, original terminal Task/Attempt result, frozen identity, exact Revision and private packet.]
+      produces: [Eligible one-shot repair record or a bounded pre-mutation rejection.]
+      boundaries: [No Candidate run/edit, original assignment overwrite, malformed/stale/unsafe repair, new assignment or integrity handshake.]
+    - name: Same-Judge repair execution and reconcile
+      responsibility: Run one read-only derived Task under the exact frozen Judge identity and accept only strict summary-only output.
+      consumes: [Existing private packet, original JSON, frozen reviewer Task identity/policy, repair Task terminal text.]
+      produces: [One usable same-opinion result or one permanent unusable repair failure.]
+      boundaries: [One base Attempt, zero fallback, no different identity, disposition/findings drift or automatic follow-up.]
+    - name: Public control and gate truth
+      responsibility: Let Main explicitly trigger and inspect repair while canonical aggregation, fresh-Main-decision and Integration gates agree.
+      consumes: [Assignment plus repair projection, Graph events and required review policy.]
+      produces: [CLI/API/MCP result, effective usable opinion count and exact next Main action.]
+      boundaries: [No raw result/packet/prompt/path/credential projection, Main decision or Integration side effect.]
+  callChain:
+    - Main explicitly confirms one assignment repair through CLI/API.
+    - ForkLight validates summary-only eligibility and atomically persists one same-identity read-only repair Task.
+    - The same Judge Profile shortens only summary; ForkLight strictly validates and reconciles the existing assignment opinion.
+    - Required-Judge gate and decision packet reflect the new terminal evidence; Main alone may record a fresh decision and integrate later.
+  scenarios:
+    - name: Real over-limit summary is repaired
+      given: The original succeeded Judge Task returned an otherwise-valid exact-Revision JSON with a 507-character summary and no repair exists.
+      when: Main confirms one repair and the same frozen Judge returns strict JSON with only a shorter summary.
+      then: The original failure remains visible, assignment count stays two, effective usable opinions become two and fresh Main review is required.
+    - name: Substantive or unsafe failure is ineligible
+      given: JSON is malformed, stale, unsafe, has extra fields, changes findings/disposition or the Reviewer Task failed.
+      when: Main requests repair or the repair Task finishes.
+      then: ForkLight rejects or permanently fails it without a second Task, retry, replacement or third Judge.
+    - name: Daemon restarts after durable creation
+      given: One repair record and Task are queued or running.
+      when: Daemon restarts.
+      then: It resumes observation/queueing for that same Task and never creates another repair.
+  risks:
+    - Treating a re-review as schema repair could change the independent opinion; exact disposition/findings/Revision equality prevents that concrete failure.
+    - Overwriting the failed assignment would erase audit evidence; append-only repair metadata and focused Store tests preserve it.
+    - A terminal Graph may otherwise skip restart reconciliation; active repair recovery must be independent of Graph pending/running state.
+  changeBudget: { maxFiles: 16, maxDiffLines: 1800 }
+advancedPolicy: { maxDurationMs: null, observedTokenCeiling: null, noProgressTimeoutMs: null, workerStopGraceMs: 60000, fileLimit: null, fileLimitMode: warn, changedLineLimit: null, changedLineLimitMode: warn, baseMaxAttempts: 1, maxExtraAttempts: 0, maxMainCorrections: 1, maxMainReverifications: 0, maxWorkerValidationRepairs: 0, maxConcurrency: 1, completionMode: warn, changeBudgetMode: warn, maxAdaptationRounds: 0 }
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/review-graph.ts
+    - src/core/review-result-repair.ts
+    - src/core/types.ts
+    - src/state/store.ts
+    - src/daemon/protocol.ts
+    - src/daemon/coordinator.ts
+    - src/daemon/server.ts
+    - src/cli.ts
+    - src/mcp/exchange-receipts.ts
+    - src/mcp/server.ts
+    - tests/review-graph.test.ts
+    - tests/store.test.ts
+    - tests/daemon.test.ts
+    - tests/daemon-cli.test.ts
+    - tests/mcp.test.ts
+    - tests/integration.test.ts
+acceptance:
+  criteria:
+    - Only a single otherwise-valid JSON result with summary over 500 is repairable; every other failure rejects before mutation.
+    - Original assignment evidence remains unchanged and one repair record permanently consumes the allowance.
+    - Repair Task preserves exact frozen Judge identity and packet, is read-only, and has one base Attempt with zero fallback or automatic retry.
+    - A repair counts only when strict parsing passes and exact Revision, disposition and findings match; aggregation/gate then require a fresh Main decision without adding a Judge.
+    - Daemon restart resumes the same durable repair Task, and CLI/MCP expose only privacy-safe explicit control/status.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/review-graph.test.ts tests/store.test.ts tests/daemon.test.ts tests/daemon-cli.test.ts tests/mcp.test.ts tests/integration.test.ts
+    - git diff --check

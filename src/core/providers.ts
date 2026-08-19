@@ -146,7 +146,7 @@ export function providerVariants(
     return [{
       id: "default",
       label: "xAI (Grok Build)",
-      description: "Used with runtime grok-build. Keychain-only readiness; not Anthropic-compatible.",
+      description: "Used with runtime grok-build. Local Grok sign-in or a stored API key; not Anthropic-compatible.",
       endpoint: current.defaultEndpoint,
       models: [current.defaultModel, "grok-4", "grok-3"],
       recommended: true,

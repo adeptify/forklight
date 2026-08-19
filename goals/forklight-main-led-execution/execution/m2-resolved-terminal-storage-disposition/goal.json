@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "name": "M2 resolved terminal storage disposition",
+  "objective": "Make an explicit terminal Main resolution outrank only stale Candidate review/Main/Integration wait packets after active and safety guards, independently verify and review the exact classifier correction, integrate it safely, and audit activated storage lifecycle truth before reclaiming six already-resolved Task workspaces.",
+  "planFile": "./plan.json",
+  "policy": {
+    "maxDurationMs": null,
+    "noProgressTimeoutMs": null,
+    "maxCorrectionRounds": 1,
+    "maxReviewRounds": 2,
+    "maxNoNewEvidenceCycles": 2
+  },
+  "milestones": [
+    { "itemId": "resolved-terminal-precedence-fix", "gate": "integration" },
+    { "itemId": "resolved-candidate-regression-audit", "gate": "machine" },
+    { "itemId": "public-storage-surface-audit", "gate": "machine" },
+    { "itemId": "scope-and-safety-audit", "gate": "machine" }
+  ]
+}

@@ -238,6 +238,13 @@ test("Hub status returns one privacy-safe readiness result per saved Worker", as
     const xai = body.providers.find((provider) => provider.name === "xai");
     assert.equal(xai?.configured, true);
     assert.equal(xai?.authMode, "local-sign-in");
+    const setup = (status.body as {
+      setup?: { fact?: string; reason?: string; nextAction?: { code?: string; message?: string } };
+    }).setup;
+    assert.equal(typeof setup?.fact, "string");
+    assert.equal(typeof setup?.reason, "string");
+    assert.equal(typeof setup?.nextAction?.code, "string");
+    assert.equal(typeof setup?.nextAction?.message, "string");
 
     const serialized = JSON.stringify(body.workerReadiness);
     for (const forbidden of [
@@ -1641,12 +1648,46 @@ test("Hub provider-key writes to Keychain with setup account", async () => {
       ctx.keychain.read("forklight.deepseek.api-key", "hub-test-user"),
       "sk-hub-test-key-abcdef",
     );
+    assert.equal(ctx.settings.get().execution.defaultProvider, "deepseek");
+    assert.equal(JSON.stringify(res.body).includes("sk-hub-test-key-abcdef"), false);
+
+    const second = await doHttp(`${base}/api/provider-key`, "POST", ctx.token, {
+      provider: "minimax",
+      apiKey: "sk-hub-minimax-key-abcdef",
+    });
+    assert.equal(second.status, 200);
+    assert.equal(ctx.settings.get().execution.defaultProvider, "minimax");
+    assert.equal(JSON.stringify(second.body).includes("sk-hub-minimax-key-abcdef"), false);
 
     const bad = await doHttp(`${base}/api/provider-key`, "POST", ctx.token, {
       provider: "deepseek",
       apiKey: "short",
     });
     assert.equal(bad.status, 422);
+    assert.equal(JSON.stringify(bad.body).includes("sk-hub-test-key-abcdef"), false);
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test("Hub provider-key refuses an unreadable existing item and leaves settings unchanged", async () => {
+  const ctx = await makeHub();
+  try {
+    ctx.keychain.write("forklight.deepseek.api-key", "hub-test-user", "keep-this-secret");
+    const originalRead = ctx.keychain.read.bind(ctx.keychain);
+    ctx.keychain.read = () => undefined;
+    const beforeProvider = ctx.settings.get().execution.defaultProvider;
+    const res = await doHttp(`http://127.0.0.1:${ctx.port}/api/provider-key`, "POST", ctx.token, {
+      provider: "deepseek",
+      apiKey: "replacement-hub-secret",
+    });
+    assert.equal(res.status, 422);
+    assert.match(String((res.body as { error?: string }).error), /could not be backed up/);
+    assert.equal(JSON.stringify(res.body).includes("keep-this-secret"), false);
+    assert.equal(JSON.stringify(res.body).includes("replacement-hub-secret"), false);
+    ctx.keychain.read = originalRead;
+    assert.equal(ctx.keychain.read("forklight.deepseek.api-key", "hub-test-user"), "keep-this-secret");
+    assert.equal(ctx.settings.get().execution.defaultProvider, beforeProvider);
   } finally {
     await ctx.cleanup();
   }

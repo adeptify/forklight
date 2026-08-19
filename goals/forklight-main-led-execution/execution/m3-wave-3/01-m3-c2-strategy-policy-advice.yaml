@@ -1,0 +1,201 @@
+version: 2
+name: M3-C2 mode-aware strategy and explicit-policy advice
+project: /Users/yijunwang/code/forklight
+taskClass: m3-strategy-policy-advice
+taskFamily: forklight-routing-decision
+workerProfileId: grok-4-6-xhigh
+executionPreference: auto
+routingDecision:
+  taskFamily: forklight-routing-decision
+  shortlist:
+    - provider: xai
+      model: grok-4.6
+      runtime: grok-build
+      effort: xhigh
+      workerProfileId: grok-4-6-xhigh
+    - provider: deepseek
+      model: deepseek-v4-pro[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: default
+    - provider: openai
+      model: gpt-5.6-luna
+      runtime: codex-cli
+      effort: max
+      workerProfileId: codex-luna-max
+  selectedWorker:
+    provider: xai
+    model: grok-4.6
+    runtime: grok-build
+    effort: xhigh
+    workerProfileId: grok-4-6-xhigh
+  selectedBecause:
+    code: main-judgment
+    note: Current exact and family evidence cannot compare the three shortlisted Workers; Main selects the recently proven Grok 4.6 native Goal path without claiming a historical recommendation.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+  advisory:
+    overallResult: cannot-determine
+    selection: selected-after-cannot-determine
+    cannotDetermineReasons:
+      - insufficient-relevant-samples
+    selectedExecution:
+      resolvedExecutionMode: native-goal
+      readinessState: launchable
+      canLaunch: true
+      nextAction: run-smoke-check
+reviewRequirement:
+  requiredJudges: 2
+  reason: Strategy recommendations and policy-history explanations can affect Main routing choices, so two different-view Judges must inspect non-automation, failure isolation and compatibility before Integration.
+runtime:
+  name: grok-build
+  executable: grok
+  effort: xhigh
+  maxBudgetUsd: null
+contract:
+  outcome: Extend the canonical read-only routing advice so naturally accumulated Task-family history keeps single-run, persistent-session, native-goal and legacy-unknown execution evidence distinct, while Competition and Judge history explain only Main's explicit policies and never start or mutate work.
+  presentation:
+    summary: 让ForkLight按真实执行模式读历史，并诚实解释Competition与Judge政策。
+    language: zh-CN
+  context:
+    - Read AGENTS.md and specs/m3-c-strategy-policy-learning/spec.md completely before editing. That accepted M3-C Work Item is the sole product Spec; do not create another roadmap or spec.
+    - M3-C1, M3-A and M3-B are already integrated. Preserve their per-candidate Competition execution truth, executable Profile advice and durable routingDecision contracts.
+    - Focused audit proved that deriveRoutingEvidence full-worker keys and routingIdentityKey currently stop at provider/model/runtime/effort, so the same Worker under different execution modes is merged.
+    - The current canonical surface is model_routing and forklight routing. Extend that surface, or one focused helper behind it, rather than adding a mutating endpoint or a second routing system.
+    - Current natural Store history includes families with all three execution modes, legacy missing-mode records, one explicit Competition, and Review Graphs with usable and unusable Judge outcomes. Read these records only; do not manufacture Provider Tasks or benchmarks.
+    - The preflight routing query for this Task returned cannot-determine with insufficient-relevant-samples and Competition intent none returned shouldRunCompetition false. The frozen selection is Main judgment, not a model ranking.
+    - ForkLight serves one local developer. Add no checksum, content hash, lock, lease, version handshake, migration, multi-user or distributed coordination mechanism.
+  inScope:
+    - Group comparable ordinary Task evidence by provider, model, Runtime, effort and explicit execution mode; represent missing frozen mode as legacy/unknown and never infer it.
+    - Add a bounded, privacy-safe strategy projection for the requested exact taskClass and explicit taskFamily. Exact-class evidence wins; family fallback is complete-set only.
+    - Recommend an execution strategy only when at least two comparable strategies meet the accepted sample and score-gap gates. Otherwise return stable cannot-determine reasons without starting reruns.
+    - Keep non-model failures excluded from model/mode quality and keep ambiguous attribution visible without turning it into a loss.
+    - When Main supplies Competition intent consider or required plus valid triggers, summarize matching natural Competition admission, outcome and explicit Main-decision facts as explanation only. Intent none must remain not advised and must not use history to override that result.
+    - Summarize historical explicit requiredJudges depth, usable/unusable Review Graph outcomes and distinct underlying provider/model/Runtime/effort identities. Different Profile ids sharing that identity count as one perspective.
+    - Return cannot-determine for Judge policy when an explicit requirement or usable history is absent. Never infer a requirement, assign/replace/add a Judge, vote, or change Integration authority.
+    - Display Main-direct history, if present for the scope, in a separate non-comparative section; never count it as Worker win/loss evidence.
+    - Preserve legacy callers and current Daemon, CLI and MCP routing response behavior through additive backward-compatible fields.
+  outOfScope:
+    - Automatic Competition, Judge creation, Judge replacement, third Judge, majority vote, retry, correction, adaptation, fallback, Worker switch or Integration.
+    - Global Worker/model/runtime leaderboard, synthetic benchmark, manufactured rerun, task-family inference, Provider probe or credential work.
+    - Hub/UI, M4 Token/value claims, storage lifecycle, Runtime Goal implementation, Review Graph gate redesign, schema migration or unrelated refactor.
+    - Checksums, hashes, locks, leases, handshakes, duplicate consistency checks or distributed/multi-user behavior.
+  executionSteps:
+    - Trace only StatisticsService, model routing, Store Competition/Review Graph/Main-direct reads, coordinator routing and current CLI/MCP projections.
+    - Design one additive response projection with closed determination/reason states and explicit execution-mode identity; update the accepted Spec first only if evidence truly changes its boundary.
+    - Implement the smallest complete call chain and focused tests for mode separation, legacy unknown, complete-set fallback, explicit Competition gating, Judge identity diversity, unusable history, Main-direct separation and read-only behavior.
+    - Run the accepted commands, inspect the actual diff against this contract and stop when all criteria pass.
+  deliverables:
+    - Mode-aware execution-strategy evidence and honest recommendation/cannot-determine projection on the canonical routing surface.
+    - Explicit non-automating Competition and Judge policy-history explanation plus separate Main-direct history.
+    - Backward-compatible Daemon, CLI and MCP output with focused regression evidence.
+  modules:
+    - name: Mode-aware statistics
+      responsibility: Keep explicit execution modes and legacy unknown evidence separate without changing failure attribution.
+      consumes: [Terminal ordinary Tasks, frozen Worker identity, executionMode, verification, delivery and failure attribution.]
+      produces: [Exact-class and task-family evidence rows keyed by Worker identity plus execution mode.]
+      boundaries: [No inferred mode, synthetic sample or Store mutation.]
+    - name: Strategy and policy projection
+      responsibility: Explain supported execution strategy and explicit exceptional-policy history for one requested scope.
+      consumes: [Mode-aware evidence, routing policy, Competition records, Review Graph assignments and optional Main-direct records.]
+      produces: [Additive privacy-safe recommendation or cannot-determine details.]
+      boundaries: [Evidence only; no work creation, voting or Main-authority change.]
+    - name: Canonical public routing chain
+      responsibility: Expose the same projection through Daemon, CLI and MCP without breaking existing fields.
+      consumes: [Coordinator modelRouting result.]
+      produces: [Consistent JSON and concise human output.]
+      boundaries: [No new mutating endpoint or Hub/UI.]
+  callChain:
+    - CLI or MCP sends taskClass, optional explicit taskFamily, saved Profiles and explicit Competition intent/triggers to the existing model_routing Daemon request.
+    - Coordinator resolves current Profile execution/readiness, reads scoped natural history, and derives the additive strategy/policy projection.
+    - Statistics keeps mode-aware and legacy-unknown evidence distinct; policy projection gates Competition history on Main intent and summarizes Review Graph evidence by underlying identity.
+    - Daemon returns one privacy-safe read-only response; CLI/MCP present it without starting any Task, Competition, Judge or Integration.
+  scenarios:
+    - name: Same Worker, different modes
+      given: Natural terminal history has the same provider/model/Runtime/effort under single-run and native-goal.
+      when: Routing advice reads the exact class or explicit family.
+      then: Separate mode rows are returned and neither mode borrows the other's samples.
+    - name: Honest unknown
+      given: Fewer than two comparable strategies, incomplete family coverage or an insufficient score gap.
+      when: Strategy advice is requested.
+      then: It returns cannot-determine with stable reasons and creates no work.
+    - name: Explicit Competition only
+      given: Historical Competition exists but Main sends intent none.
+      when: Routing advice is requested.
+      then: Competition remains not advised and history cannot escalate it.
+    - name: Judge identity truth
+      given: Two Judge Profiles may share one provider/model/Runtime/effort identity and some assignments are unusable.
+      when: Judge policy history is projected.
+      then: Underlying diversity, usable/unusable outcomes and declared depth remain explicit without a vote or inferred requirement.
+  risks:
+    - Adding execution mode to one key but not its lookup can silently produce zero history; focused same-identity/different-mode tests must cover derivation and public lookup together.
+    - Aggregated policy history can look like automatic authority; every state must explicitly remain explanatory and preserve intent none, no-vote and Main decision ownership.
+    - Legacy Tasks may lack executionMode or reviewRequirement; report unknown/absent instead of migrating or guessing.
+  changeBudget:
+    maxFiles: 15
+    maxDiffLines: 2400
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 60000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxWorkerValidationRepairs: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test, .forklight-boundary-capture, .forklight-receipt-retry, plans]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/statistics.ts
+    - src/core/model-routing.ts
+    - src/core/strategy-advice.ts
+    - src/core/profile-routing.ts
+    - src/core/types.ts
+    - src/daemon/coordinator.ts
+    - src/daemon/server.ts
+    - src/daemon/protocol.ts
+    - src/cli.ts
+    - src/cli/routing-output.ts
+    - src/mcp/server.ts
+    - tests/statistics.test.ts
+    - tests/model-routing.test.ts
+    - tests/strategy-advice.test.ts
+    - tests/competition.test.ts
+    - tests/review-graph.test.ts
+    - tests/main-failure-attribution.test.ts
+    - tests/daemon.test.ts
+    - tests/daemon-cli.test.ts
+    - tests/mcp.test.ts
+acceptance:
+  criteria:
+    - Provider/model/Runtime/effort/execution mode is the comparable strategy identity; single-run, persistent-session, native-goal and legacy unknown rows never merge or borrow samples.
+    - Exact-class evidence wins and family fallback remains complete-set only; fewer than two comparable strategies, insufficient samples or insufficient gap returns cannot-determine without creating work.
+    - Non-model failure exclusion and ambiguous visibility remain intact, and Main-direct history is separate from Worker quality comparison.
+    - Competition intent none remains not advised; consider/required history is evaluated only with valid explicit triggers and is explanation only.
+    - Judge projection reports declared depth, usable/unusable results and distinct underlying execution identities; it never votes, infers depth, assigns or replaces Judges, adds a third Judge or changes Integration gates.
+    - Existing routing fields and legacy candidate callers remain compatible; Daemon, CLI and MCP expose consistent privacy-safe additive output with no Store mutation.
+    - The exact Candidate stays inside accepted M3-C2 paths, has no Hub/UI, M4, coordination-mechanism or unrelated changes, and passes ForkLight independent verification plus two different-view Judges before Main Integration.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/statistics.test.ts tests/model-routing.test.ts tests/competition.test.ts tests/review-graph.test.ts tests/main-failure-attribution.test.ts tests/daemon.test.ts tests/daemon-cli.test.ts tests/mcp.test.ts
+    - git diff --check

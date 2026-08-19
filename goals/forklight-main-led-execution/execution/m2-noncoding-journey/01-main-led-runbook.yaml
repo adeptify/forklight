@@ -1,0 +1,85 @@
+version: 2
+name: M2 publish Main-led local delivery runbook
+project: /Users/yijunwang/code/forklight
+taskClass: m2-noncoding-main-led-runbook
+taskFamily: forklight-operations-runbook
+workerProfileId: grok-4-6-xhigh
+deliveryProfileId: forklight-self-upgrade
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 1
+  reason: The documentation controls a real operator journey across restart, review, Integration, and destructive workspace disposition, so one independent accuracy and usability view is required.
+contract:
+  outcome: Publish one concise Main-led local delivery runbook that accurately connects readiness, Goal submission, same-Task daemon-restart continuation, verification, Judge review, evidence-based correction or handoff, safe Integration, and terminal workspace disposition.
+  presentation: { summary: 用一份可直接照着走的本地手册，串起 ForkLight 从健康检查到安全交付和空间处置的完整主路径。, language: zh-CN }
+  context:
+    - Read specs/m2-delivery-journeys/spec.md and specs/m2-delivery-journeys/work-items/noncoding-main-led-runbook/spec.md completely before editing.
+    - The accepted Coding source-only Integration recovery and its final four zero-change gates are integrated and complete. Describe only the delivered source-only boundary; build and activation recovery remain unsupported.
+    - This is the first meaningful post-auth Grok 4.6 Xhigh launch. Record and use its truthful ForkLight Goal plus persistent-session behavior; never call it native-goal.
+    - Main will intentionally restart the daemon once only after one coherent useful runbook section or link structure exists. Continue the same Task and Session instead of resubmitting or rerouting.
+    - ForkLight serves one local developer. Keep the primary path simple and do not introduce team, distributed, lock, lease, checksum, or version-handshake guidance.
+  inScope:
+    - Create docs/main-led-delivery.md with one staged primary path and explicit Main versus Worker decisions.
+    - Link the runbook once from README.md and cross-reference it briefly from docs/operations.md.
+    - Use current CLI help and symbolic placeholders; distinguish observation timeout or disconnect from Task or operation failure.
+    - State Judge counts, evidence-based correction and one-hop handoff, exact-Candidate Integration, source-only restart recovery limits, and protected versus reclaimable workspaces accurately.
+  outOfScope:
+    - Any source, test, config, Goal, Spec, evidence, generated output, Hub/UI, other repository, credential, commit, or push change.
+    - Store or SQLite inspection, raw ForkLight Home paths, manual workspace deletion, process archaeology, manual patch application, automatic retry, Competition, or unsupported recovery claim.
+    - General documentation rewrite, duplicate roadmap, multi-user workflow, distributed coordination, lock, lease, checksum, content manifest, or version handshake.
+  executionSteps:
+    - Trace current CLI help and the focused operations, Goal, review, Integration, recovery, and storage documentation.
+    - Draft the shortest complete primary path with decision points, durable IDs, exact boundaries, and links to detailed reference sections.
+    - After the intentional daemon restart, resume the same Session, reconcile commands against current help, and inspect the exact three-path diff.
+    - Run all acceptance commands and report one bounded handoff with any unresolved accuracy risk.
+  deliverables:
+    - docs/main-led-delivery.md as an operational checklist rather than a roadmap or evidence log.
+    - One README discovery link and one concise docs/operations.md cross-reference.
+  modules:
+    - name: Main-led delivery runbook
+      responsibility: Turn existing product truth into one accurate local operator path with visible decision and recovery boundaries.
+      consumes: [Accepted Work Item spec, current CLI help, integrated Coding recovery, review and storage contracts, existing operations reference.]
+      produces: [One concise runbook and two resolving discovery links.]
+      boundaries: [Documentation only; no hidden Store procedure, unsupported promise, duplicate status system, or UI work.]
+  callChain:
+    - Main checks health and submits an accepted Goal while retaining durable IDs.
+    - Worker continues the same Task and persistent Session across an intentional daemon restart, then ForkLight independently verifies the Candidate.
+    - Independent Judge evidence informs Main accept, revise, reject, reuse, or handoff without replacing Main judgment.
+    - Main applies exact-Candidate Integration and observes the same operation without replaying on timeout or disconnect.
+    - Main audits and previews terminal storage, then confirms only eligible ordinary reclaim after durable delivery evidence exists.
+  scenarios:
+    - name: First local delivery
+      given: A local developer has an accepted Goal and a launchable Worker Profile.
+      when: They follow the primary path through review and Integration.
+      then: They retain the correct IDs, know which actor decides each step, and never inspect the Store or manually apply a patch.
+    - name: Restart or observer interruption
+      given: A Worker or Integration observation is interrupted after useful durable progress.
+      when: The daemon restarts or a wait request ends.
+      then: The operator re-observes the same Task, Session, or operation and does not recreate, replay, reroute, or infer failure.
+    - name: Evidence does not support delivery
+      given: Verification, Judge, source compatibility, or two purposeful rounds produce no acceptable new evidence.
+      when: Main reaches the decision point.
+      then: Accepted paths are retained, one exact gap or decision packet is recorded, and ordinary execution stops without scope expansion.
+  risks: [A runbook can become dangerous if it turns an observation timeout into replay authority, overstates Grok as native-goal, or hides unsupported build/activation recovery.]
+  changeBudget: { maxFiles: 3, maxDiffLines: 500 }
+advancedPolicy: { maxDurationMs: null, observedTokenCeiling: null, noProgressTimeoutMs: null, workerStopGraceMs: 60000, fileLimit: null, fileLimitMode: warn, changedLineLimit: null, changedLineLimitMode: warn, baseMaxAttempts: 2, maxExtraAttempts: 0, maxMainCorrections: 1, maxMainReverifications: 1, maxConcurrency: 1, completionMode: warn, changeBudgetMode: warn, maxAdaptationRounds: 0 }
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths: [specs/m2-delivery-journeys/work-items/noncoding-main-led-runbook/spec.md, docs/operations.md, README.md, docs/main-led-delivery.md]
+acceptance:
+  criteria:
+    - A first-time local operator can follow one primary path without Store access, manual deletion, credential handling, commit, push, or Hub dependency.
+    - Runtime labels, same-Task restart continuation, Judge policy, correction and handoff, Integration observation, source-only recovery limits, and workspace protection match integrated truth.
+    - Candidate changes only the three allowed documentation paths and adds no duplicate roadmap or unsupported product promise.
+    - README and operations links resolve to the concise runbook.
+  commands:
+    - npm run build
+    - node dist/src/cli.js --help
+    - >-
+      node -e "const fs=require('node:fs'); const readme=fs.readFileSync('README.md','utf8'); const operations=fs.readFileSync('docs/operations.md','utf8'); if(!fs.existsSync('docs/main-led-delivery.md') || !readme.includes('docs/main-led-delivery.md') || !operations.includes('main-led-delivery')) process.exit(1)"
+    - git diff --check

@@ -1,5 +1,7 @@
 /**
  * Grok Build WorkerAdapter — headless `grok -p` with task-local GROK_HOME.
+ * Native-goal Tasks send `/goal` and admit success only from Task-local
+ * complete + achieved + owned classifier details.
  * Security: no workspace-writable MCP config; tool deny list; sandbox deny true home.
  */
 
@@ -24,8 +26,9 @@ import {
   workerNetworkPolicyMode,
   type WorkerNetworkPolicy,
 } from "../core/network-policy.js";
+import { executionModeFromTaskSpec } from "../core/execution-mode.js";
 import { isEffectiveProgressEvent } from "../core/runtime-activity.js";
-import type { NormalizedWorkerEvent, TaskRecord } from "../core/types.js";
+import type { NormalizedWorkerEvent, ResolvedExecutionMode, TaskRecord } from "../core/types.js";
 import {
   appendGrokTextDelta,
   createGrokTextAssembly,
@@ -34,6 +37,13 @@ import {
   resolveGrokTerminalResultText,
   type GrokTextAssembly,
 } from "../events/grok-normalize.js";
+import {
+  evaluateGrokNativeGoalResult,
+  grokNativeGoalStatePath,
+  readGrokNativeGoalState,
+  resolveGrokNativeGoalLaunch,
+  type GrokNativeGoalLaunch,
+} from "./grok-goal.js";
 import type {
   RuntimeSpecView,
   WorkerAdapter,
@@ -51,7 +61,7 @@ const GROK_CAPABILITIES: WorkerCapabilityMatrix = {
   effortMapping: "partial",
   costUsageFidelity: "partial",
   sessionResume: "partial",
-  nativeGoal: "unsupported",
+  nativeGoal: "supported",
   streamingEvents: "partial",
   progressHeartbeat: "effective-progress",
 };
@@ -82,6 +92,7 @@ function effortToGrok(effort: RuntimeSpecView["effort"]): string[] {
 /**
  * MCP meta / shell / web / agent denylist for headless Grok Workers (design §8.1 / A7).
  * Includes Grok meta-tools and Agent spawns; pairs with --disable-web-search.
+ * Native Goal keeps planner dependencies registered separately.
  */
 export function grokDisallowedTools(): string {
   return [
@@ -96,11 +107,74 @@ export function grokDisallowedTools(): string {
   ].join(",");
 }
 
+/**
+ * Native /goal denylist: web/MCP stay closed. Agent and background task tools
+ * stay registered; actual shell execution is denied via --deny Bash.
+ */
+export function grokNativeDisallowedTools(): string {
+  return [
+    "web_search",
+    "web_fetch",
+    "search_tool",
+    "use_tool",
+    "mcp",
+    "MCPTool",
+  ].join(",");
+}
+
 /** Allowlist respects task.worker.allowEdits (same product rule as Claude). */
 export function grokAllowTools(allowEdits: boolean): string {
   const readOnly = ["read_file", "list_dir", "grep"];
   if (!allowEdits) return readOnly.join(",");
   return [...readOnly, "search_replace", "write"].join(",");
+}
+
+/**
+ * Native /goal allowlist registers planner dependencies (Agent plus background
+ * task tools, the shell capability the planner must see, and Task-local plan
+ * mutators) while actual Bash stays denied. Workspace mutation is gated by
+ * deny argv, not by stripping search_replace/write.
+ */
+export function grokNativeAllowTools(allowEdits: boolean): string {
+  void allowEdits;
+  return [
+    "read_file",
+    "list_dir",
+    "grep",
+    "Agent",
+    "run_terminal_cmd",
+    "get_task_output",
+    "kill_task",
+    "wait_tasks",
+    "search_replace",
+    "write",
+  ].join(",");
+}
+
+/** First launch uses --session-id; later Attempts resume the same Task session. */
+export function grokSessionArgs(sessionId: string, resuming: boolean): string[] {
+  return resuming ? ["--resume", sessionId] : ["--session-id", sessionId];
+}
+
+/** Content-free start/resume evidence for one Task-bound Grok Session. */
+export function grokLaunchEvidence(input: {
+  sessionId: string;
+  resuming: boolean;
+  executionMode: ResolvedExecutionMode;
+}): {
+  eventType: "worker.started" | "worker.resumed";
+  sessionArg: "--session-id" | "--resume";
+  sessionId: string;
+  executionMode: ResolvedExecutionMode;
+  nativeGoal: "supported" | "unsupported";
+} {
+  return {
+    eventType: input.resuming ? "worker.resumed" : "worker.started",
+    sessionArg: input.resuming ? "--resume" : "--session-id",
+    sessionId: input.sessionId,
+    executionMode: input.executionMode,
+    nativeGoal: input.executionMode === "native-goal" ? "supported" : "unsupported",
+  };
 }
 
 /**
@@ -117,13 +191,28 @@ export function buildGrokCliArgs(input: {
   effort: RuntimeSpecView["effort"];
   sessionId: string;
   resuming: boolean;
+  executionMode?: ResolvedExecutionMode;
 }): string[] {
-  const sessionArgs = input.resuming
-    ? ["--resume", input.sessionId]
-    : ["--session-id", input.sessionId];
+  const sessionArgs = grokSessionArgs(input.sessionId, input.resuming);
   const modelArgs = input.model.trim().length > 0
     ? ["-m", input.model.trim()]
     : [];
+  const nativeGoal = input.executionMode === "native-goal";
+  const tools = nativeGoal ? grokNativeAllowTools(input.allowEdits) : grokAllowTools(input.allowEdits);
+  const disallowed = nativeGoal ? grokNativeDisallowedTools() : grokDisallowedTools();
+  const denyArgs = nativeGoal
+    ? grokNativeDenyArgs(input.grokHome, input.workspace, input.sessionId, input.allowEdits)
+    : [
+        // Path denials use Grok permission tool prefixes (Write/Edit), not internal ids.
+        "--deny",
+        `Write(${input.grokHome}/**)`,
+        "--deny",
+        `Edit(${input.grokHome}/**)`,
+        "--deny",
+        "MCPTool",
+        "--deny",
+        "Agent",
+      ];
   return [
     "-p",
     input.prompt,
@@ -136,20 +225,51 @@ export function buildGrokCliArgs(input: {
     "--always-approve",
     "--disable-web-search",
     "--tools",
-    grokAllowTools(input.allowEdits),
+    tools,
     "--disallowed-tools",
-    grokDisallowedTools(),
-    // Path denials use Grok permission tool prefixes (Write/Edit), not internal ids.
-    "--deny",
-    `Write(${input.grokHome}/**)`,
-    "--deny",
-    `Edit(${input.grokHome}/**)`,
-    "--deny",
-    "MCPTool",
-    "--deny",
-    "Agent",
+    disallowed,
+    ...denyArgs,
     ...effortToGrok(input.effort),
     ...sessionArgs,
+  ];
+}
+
+/**
+ * Native denials: read-only Tasks prepend exact Workspace Write/Edit pairs.
+ * Task-local GROK_HOME is not glob-denied so the Planner can persist its plan.
+ */
+export function grokNativeDenyArgs(
+  grokHome: string,
+  workspace: string,
+  sessionId: string,
+  allowEdits: boolean,
+): string[] {
+  const statePath = grokNativeGoalStatePath(grokHome, workspace, sessionId);
+  return [
+    ...(!allowEdits
+      ? ["--deny", `Write(${workspace}/**)`, "--deny", `Edit(${workspace}/**)`]
+      : []),
+    "--deny",
+    `Write(${path.join(grokHome, "auth.json")})`,
+    "--deny",
+    `Edit(${path.join(grokHome, "auth.json")})`,
+    "--deny",
+    `Write(${path.join(grokHome, "agent_id")})`,
+    "--deny",
+    `Edit(${path.join(grokHome, "agent_id")})`,
+    "--deny",
+    `Write(${path.join(grokHome, "config.toml")})`,
+    "--deny",
+    `Edit(${path.join(grokHome, "config.toml")})`,
+    "--deny",
+    `Write(${statePath})`,
+    "--deny",
+    `Edit(${statePath})`,
+    "--deny",
+    "MCPTool",
+    // Grok permission rules recognize Bash, not the internal run_terminal_cmd id.
+    "--deny",
+    "Bash",
   ];
 }
 
@@ -222,6 +342,9 @@ export function buildGrokSandboxProfile(input: {
 (allow network*)`;
 }
 
+/** Distant Grok CLI process breaker (24h). Not a ForkLight Task deadline. */
+export const GROK_NATIVE_FOREGROUND_BLOCK_BUDGET_MS = "86400000";
+
 /**
  * Task-local Grok environment: seeded GROK_HOME, optional XAI_API_KEY, and a
  * deliberate Anthropic-compat strip, then the frozen per-Task network policy.
@@ -231,6 +354,7 @@ export function buildGrokWorkerEnv(
   apiKey: string,
   grokHome: string,
   networkPolicy?: WorkerNetworkPolicy,
+  options?: { nativeGoal?: boolean },
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
@@ -244,6 +368,15 @@ export function buildGrokWorkerEnv(
   delete env.ANTHROPIC_API_KEY;
   delete env.ANTHROPIC_AUTH_TOKEN;
   delete env.ANTHROPIC_BASE_URL;
+  if (options?.nativeGoal) {
+    env.GROK_GOAL = "1";
+    env.GROK_WORKFLOWS = "1";
+    env.GROK_GOAL_USE_CURRENT_MODEL_ONLY = "1";
+    env.GROK_FOREGROUND_BLOCK_BUDGET_MS = GROK_NATIVE_FOREGROUND_BLOCK_BUDGET_MS;
+  } else {
+    delete env.GROK_GOAL_USE_CURRENT_MODEL_ONLY;
+    delete env.GROK_FOREGROUND_BLOCK_BUDGET_MS;
+  }
   return applyWorkerNetworkPolicy(env, networkPolicy);
 }
 
@@ -515,7 +648,9 @@ export class GrokBuildAdapter implements WorkerAdapter {
       watchdogTimer = timeout;
     };
 
-    const prompt = buildWorkerPrompt(
+    const executionMode = executionModeFromTaskSpec(task.spec);
+    const nativeGoal = executionMode === "native-goal";
+    const workerPrompt = buildWorkerPrompt(
       task.spec,
       resuming,
       hooks.feedback,
@@ -525,6 +660,33 @@ export class GrokBuildAdapter implements WorkerAdapter {
         validationRepairLines: workerValidationRepairProtocolLines(task.spec.acceptance.commands, "grok"),
       }),
     );
+    let prompt = workerPrompt;
+    let nativeLaunch: Extract<GrokNativeGoalLaunch, { ok: true }> | undefined;
+    if (nativeGoal) {
+      const prior = readGrokNativeGoalState({
+        grokHome,
+        workspace: task.paths.workspace,
+        sessionId: task.sessionId,
+      });
+      const launchDecision = resolveGrokNativeGoalLaunch({
+        resuming,
+        workerPrompt,
+        prior,
+        ...(hooks.correctionIntent === undefined ? {} : { correctionIntent: hooks.correctionIntent }),
+        ...(hooks.validationRepairIntent === undefined
+          ? {}
+          : { validationRepairIntent: hooks.validationRepairIntent }),
+      });
+      if (!launchDecision.ok) {
+        return {
+          status: "failed",
+          exitCode: 1,
+          error: launchDecision.reason,
+        };
+      }
+      nativeLaunch = launchDecision;
+      prompt = launchDecision.prompt;
+    }
     await writeFile(path.join(task.paths.logs, `attempt-${attempt.ordinal}.prompt.txt`), prompt, {
       mode: 0o600,
     });
@@ -539,6 +701,7 @@ export class GrokBuildAdapter implements WorkerAdapter {
       effort: task.spec.runtime.effort,
       sessionId: task.sessionId,
       resuming,
+      executionMode,
     });
 
     let launchCommand = executable;
@@ -571,10 +734,15 @@ export class GrokBuildAdapter implements WorkerAdapter {
       isolation = "runtime-permissions";
     }
 
+    const launch = grokLaunchEvidence({
+      sessionId: task.sessionId,
+      resuming,
+      executionMode,
+    });
     store.addEvent(
       task.id,
       attempt.id,
-      resuming ? "worker.resumed" : "worker.started",
+      launch.eventType,
       resuming ? "Grok Build Worker resumed" : "Grok Build Worker started",
       {
         model: task.spec.provider.model,
@@ -587,10 +755,22 @@ export class GrokBuildAdapter implements WorkerAdapter {
         ...(authSeed.seeded.length > 0 ? { authSeeded: authSeed.seeded } : {}),
         // Privacy-safe: mode-level evidence only; proxy values never reach events.
         networkPolicyMode: workerNetworkPolicyMode(task.spec.networkPolicy),
+        executionMode: launch.executionMode,
+        sessionId: launch.sessionId,
+        sessionArg: launch.sessionArg,
+        nativeGoal: launch.nativeGoal,
+        ...(nativeLaunch === undefined ? {} : { nativeGoalKind: nativeLaunch.kind }),
+        ...(nativeLaunch?.kind === "successor"
+          ? {
+              predecessorGoalId: nativeLaunch.predecessorGoalId,
+              successorReasonClass: nativeLaunch.reasonClass,
+            }
+          : {}),
+        ...(nativeLaunch?.kind === "resume" ? { goalId: nativeLaunch.expectedGoalId } : {}),
       },
     );
 
-    const env = buildGrokWorkerEnv(apiKey, grokHome, task.spec.networkPolicy);
+    const env = buildGrokWorkerEnv(apiKey, grokHome, task.spec.networkPolicy, { nativeGoal });
 
     child = spawn(launchCommand, launchArgs, {
       cwd: task.paths.workspace,
@@ -611,6 +791,10 @@ export class GrokBuildAdapter implements WorkerAdapter {
         watchdogTerminal = true;
         clearWatchdog();
         terminal = event.terminal;
+        if (nativeGoal) {
+          // Stream completion is a Worker claim. Persist native terminal truth later.
+          return;
+        }
       } else if (isEffectiveProgressEvent(event.type, event.payload)) {
         // Genuine thought/text deltas and tools reset the stop; keepalive-only
         // records refresh Runtime liveness in durable history without resetting.
@@ -716,6 +900,65 @@ export class GrokBuildAdapter implements WorkerAdapter {
           effect: "hard-fail",
           detail: "Worker reached the configured no-effective-progress interval and was terminated",
         },
+      };
+    }
+    if (nativeGoal && nativeLaunch !== undefined) {
+      const evaluation = evaluateGrokNativeGoalResult({
+        grokHome,
+        workspace: task.paths.workspace,
+        sessionId: task.sessionId,
+        launch: nativeLaunch,
+        exitCode,
+        ...(terminal?.resultText === undefined ? {} : { completionProse: terminal.resultText }),
+      });
+      if (evaluation.observation !== undefined) {
+        store.addEvent(
+          task.id,
+          attempt.id,
+          "worker.message",
+          "Grok native Goal observation",
+          evaluation.observation,
+        );
+      }
+      if (evaluation.status === "succeeded") {
+        store.addEvent(
+          task.id,
+          attempt.id,
+          "worker.completed",
+          "Grok native Goal completed",
+          {
+            ...(evaluation.observation ?? {}),
+            ...(evaluation.predecessorGoalId === undefined
+              ? {}
+              : { predecessorGoalId: evaluation.predecessorGoalId }),
+          },
+        );
+        return {
+          status: "succeeded",
+          exitCode,
+          ...terminalFields(resolveTerminal(false)),
+        };
+      }
+      const failedTerminal = resolveTerminal(true);
+      const haystack = [
+        failedTerminal?.resultText,
+        stderr,
+      ].filter((part): part is string => typeof part === "string" && part.trim().length > 0)
+        .join("\n");
+      if (isGrokConnectivityEvidence(haystack)) {
+        return {
+          status: "failed",
+          exitCode,
+          ...terminalFields(failedTerminal),
+          error: GROK_CONNECTIVITY_SAFE_ERROR,
+          failureCategory: "connectivity",
+        };
+      }
+      return {
+        status: "failed",
+        exitCode,
+        ...terminalFields(failedTerminal),
+        error: evaluation.error ?? "Grok native Goal did not reach complete plus achieved evidence",
       };
     }
     if (exitCode !== 0 || terminal?.isError) {

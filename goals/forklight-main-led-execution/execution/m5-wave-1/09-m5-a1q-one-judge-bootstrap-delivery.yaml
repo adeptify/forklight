@@ -1,0 +1,157 @@
+version: 2
+name: M5-A1Q one-Judge bootstrap exact-Candidate delivery
+project: /Users/yijunwang/code/forklight
+taskClass: m5-a1q-one-judge-bootstrap-delivery
+taskFamily: forklight-quality-decision-chain
+workerProfileId: grok-4-6-xhigh
+deliveryProfileId: forklight-self-upgrade
+executionPreference: auto
+routingDecision:
+  taskFamily: forklight-quality-decision-chain
+  shortlist:
+    - provider: xai
+      model: grok-4.6
+      runtime: grok-build
+      effort: xhigh
+      workerProfileId: grok-4-6-xhigh
+  selectedWorker:
+    provider: xai
+    model: grok-4.6
+    runtime: grok-build
+    effort: xhigh
+    workerProfileId: grok-4-6-xhigh
+  selectedBecause:
+    code: user-specified
+    note: 一骏 explicitly authorized one bootstrap-only exact-Candidate delivery with one Codex Judge after the ordinary two-Judge chain deadlocked on output-safety evidence.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+reviewRequirement:
+  requiredJudges: 1
+  reason: This exact delivery uses an explicitly authorized one-time bootstrap exception. One independent Codex Judge plus unchanged deterministic acceptance and Main review are required; this does not alter the ordinary high-risk two-Judge policy.
+runtime:
+  name: grok-build
+  executable: /Users/yijunwang/code/forklight/goals/forklight-main-led-execution/execution/m5-wave-1/m5-a1q-bootstrap-exact-candidate.mjs
+  effort: xhigh
+  maxBudgetUsd: null
+contract:
+  outcome: Materialize and deliver byte-equivalent behavior to verified Revision 364f98ae-741b-452e-b5d1-5bc8100c69d1 without product edits, using the explicitly authorized one-Judge bootstrap exception and ForkLight safe serial Integration.
+  presentation:
+    summary: 原样交付已完成的质量链修复，只为打破旧过滤器阻塞自身升级的循环。
+    language: zh-CN
+  context:
+    - Read AGENTS.md and specs/m5-product-graduation/work-items/credential-label-judge-repair/spec.md completely before doing anything. The Spec is the sole accepted boundary.
+    - The wrapper already materialized exact verified Revision 364f98ae-741b-452e-b5d1-5bc8100c69d1 from a Workspace-local three-path seed.
+    - The exact seed passed build, 412 focused tests, diff validation, Main scoped review and one usable Codex accept. A second Judge also proposed accept but its value-shaped examples were correctly unusable.
+    - This Task exists only because 一骏 explicitly authorized a one-time one-Judge bootstrap exception. It does not change the ordinary high-risk two-Judge policy.
+    - Inspect the exact Candidate and run verification. Do not edit, rewrite, polish or add tests. Any byte drift from the seed is a terminal failure for Main.
+    - Return handoff only in the final Worker response. Do not create or modify Goal, Spec, evidence, decision, progress, documentation or handoff files.
+    - ForkLight serves one local developer. Add no checksum, content hash, lock, lease, version handshake, duplicate coordination state, multi-user or distributed behavior.
+    - Never touch the original A1 Candidate or assignment, create a Judge, integrate, commit, push, reset, reclaim or edit Hub UI.
+  inScope:
+    - Validate the Workspace-local seed has exactly the three accepted paths and applies to this fresh Task source base.
+    - Inspect exact Candidate behavior without changing it.
+    - Run the accepted bootstrap test, build, five-file focused suite and diff validation.
+    - Return one fresh exact Candidate Revision for one independent Codex Judge and Main serial Integration.
+  outOfScope:
+    - Any product behavior or test change, parser redesign, repair change, Store schema, public operation or file outside the exact three paths.
+    - A second/third/replacement Judge, prior Volcengine repair, original A1 MiniMax repair before activation, Candidate rerun after failure or ordinary two-Judge policy change.
+    - Hub/UI, A2/A3, Goal/Spec/evidence/docs/handoff files, coordination mechanisms, commit, push, reset or reclamation.
+    - Extra Attempt, validation repair, Main correction, reverify, adaptation, retry, fallback, model switch, Competition or further replacement.
+  executionSteps:
+    - Confirm the operational bootstrap test and exact three-path seed pass.
+    - Inspect the materialized Candidate against the accepted Spec and make no edit.
+    - Run build, the five-file focused suite and diff validation.
+    - Return concise final-response-only evidence and stop.
+  deliverables:
+    - One fresh exact three-path Candidate byte-equivalent in behavior and content to Revision 364f98ae-741b-452e-b5d1-5bc8100c69d1.
+    - Passing bootstrap policy, build, 412-test focused suite and diff validation.
+    - Final-response-only handoff stating no product change and the one-Judge bootstrap boundary.
+  modules:
+    - name: Exact Candidate materialization
+      responsibility: Validate and apply the verified three-path seed before Grok starts.
+      consumes: [Workspace-local exact Candidate patch, fresh isolated Workspace, exact path set.]
+      produces: [Materialized verified Candidate and Task-local marker.]
+      boundaries: [Operational only; no cross-Task read, hash, lock, source Integration or old Workspace mutation.]
+    - name: Evidence-only native Goal
+      responsibility: Inspect and verify the exact Candidate without rewriting passing behavior.
+      consumes: [Accepted Spec, materialized Candidate, unchanged commands.]
+      produces: [Fresh exact Candidate Revision and concise handoff.]
+      boundaries: [No product edit, repair, correction, fallback or extra Attempt.]
+    - name: One-Judge bootstrap evidence
+      responsibility: Supply the explicitly authorized minimum independent opinion before Main safe Integration.
+      consumes: [Fresh exact Revision, independent verification, one-time exception.]
+      produces: [One usable Codex opinion or terminal stop.]
+      boundaries: [No general policy change, second Judge, replacement, vote or automatic Integration.]
+  callChain:
+    - Main-owned bootstrap validates and materializes the exact verified Candidate in the isolated Workspace.
+    - Grok runs one current-model-only native Goal, inspects the Candidate, verifies it and makes no edit.
+    - ForkLight independently reruns the exact accepted commands and captures one fresh Revision.
+    - One Codex Judge reviews the exact Revision; Main alone may accept and integrate it serially.
+    - After activation, Main may separately invoke the accepted original A1 MiniMax label-only repair.
+  scenarios:
+    - name: Exact Candidate remains unchanged
+      given: The verified seed materializes cleanly on the current source base.
+      when: Grok inspects and verification passes.
+      then: A fresh exact three-path Revision is captured with no behavior drift.
+    - name: Candidate drifts
+      given: Any seed path differs from the verified Candidate after Worker execution.
+      when: Main compares the fresh Revision.
+      then: Main rejects and no correction, Judge or replacement runs.
+    - name: Sole Judge unusable or blocking
+      given: The one authorized Codex opinion is not usable accept evidence.
+      when: Review Graph becomes terminal.
+      then: Main rejects and no replacement or Integration runs.
+  risks:
+    - The exception could be misreported as normal policy; all Task and SSOT evidence must name one-Judge bootstrap explicitly.
+    - A Worker edit could hide inside the exact paths; Main must compare the fresh Revision byte-for-byte to the seed before review.
+  changeBudget:
+    maxFiles: 3
+    maxDiffLines: 900
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 60000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxWorkerValidationRepairs: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test, .forklight-boundary-capture, .forklight-receipt-retry, plans]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/review-graph.ts
+    - src/core/review-result-repair.ts
+    - tests/review-graph.test.ts
+acceptance:
+  criteria:
+    - The fresh Candidate is byte-equivalent to verified Revision 364f98ae-741b-452e-b5d1-5bc8100c69d1 and contains exactly the same three paths.
+    - Bare credential labels remain safe; actual value shapes remain unsafe; unchanged-summary repair remains permanent semantic-drift.
+    - Existing historical repair, one-shot identity, opinion immutability, restart behavior and fresh-Main gate remain passing.
+    - The Worker adds no product, test, Goal, Spec, evidence, docs, handoff or unrelated change.
+    - Review requirement is exactly one only for this named bootstrap Task and does not change product defaults.
+    - No original A1 assignment, Volcengine result, Hub UI, A2/A3 or source project is mutated before Main Integration.
+  commands:
+    - node goals/forklight-main-led-execution/execution/m5-wave-1/m5-a1q-bootstrap-exact-candidate.test.mjs
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/review-graph.test.ts tests/daemon.test.ts tests/daemon-cli.test.ts tests/mcp.test.ts tests/integration.test.ts
+    - git diff --check

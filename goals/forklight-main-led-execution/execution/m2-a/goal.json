@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "name": "M2-A Grok 4.6 persistent-session truth",
+  "objective": "Deliver a safely integrated and independently audited Grok 4.6 Xhigh persistent-session path while preserving legacy single-run and Codex native-goal behavior and keeping generated dist output outside Candidate truth.",
+  "planFile": "./plan.json",
+  "policy": {
+    "maxDurationMs": null,
+    "noProgressTimeoutMs": null,
+    "maxCorrectionRounds": 1,
+    "maxReviewRounds": 2,
+    "maxNoNewEvidenceCycles": 2
+  },
+  "milestones": [
+    { "itemId": "implement", "gate": "integration" },
+    { "itemId": "post-integration-truth", "gate": "machine" },
+    { "itemId": "compatibility-audit", "gate": "machine" },
+    { "itemId": "scope-audit", "gate": "machine" }
+  ]
+}

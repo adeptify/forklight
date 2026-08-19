@@ -27,11 +27,41 @@ test("Hub public assets exist with configure + operate chrome", async () => {
   const css = await readFile(path.join(hubPublic, "app.css"), "utf8");
   assert.ok(html.includes("<!DOCTYPE html>"));
   assert.ok(html.includes('data-tab="model"') && html.includes('data-tab="work"'));
-  assert.ok(html.includes('id="fl-detail"'));
-  assert.ok(html.includes("THESIS: One Goal owns one working canvas."),
-    "the binding Work direction comment remains intact");
+  assert.ok(html.includes('data-tab="worker"') && html.includes('data-tab="mains"'));
+  assert.ok(html.includes('data-tab="decisions"'), "Decision Center is a primary route");
+  assert.ok(html.includes('id="fl-view"') && html.includes('id="fl-detail"'));
+  assert.ok(html.includes("<script src=\"i18n.js\"></script>") && html.includes("<script src=\"app.js\"></script>"));
+  assert.ok(!html.includes('type="module"') && !html.includes("importmap"), "classic script tags only");
+  assert.ok(html.includes("THESIS: ForkLight opens on the user's work:"),
+    "the user-view design contract comment remains intact");
+  assert.ok(html.includes("product-bar") && html.includes("fl-system-menu"),
+    "compact product bar and quiet System access ship");
+  const systemMarkup = html.slice(
+    html.indexOf('id="fl-system-menu"'),
+    html.indexOf("</details>", html.indexOf('id="fl-system-menu"')),
+  );
+  assert.ok(
+    systemMarkup.includes("theme-switch")
+      && systemMarkup.includes("lang-switch")
+      && systemMarkup.includes('id="fl-status-bar"'),
+    "theme, language and connection truth stay reachable through System",
+  );
+  assert.equal((html.match(/id="fl-theme-light"/g) || []).length, 1, "theme controls are not duplicated");
+  assert.equal((html.match(/id="fl-lang-zh"/g) || []).length, 1, "language controls are not duplicated");
+  assert.equal((html.match(/id="fl-status-bar"/g) || []).length, 1, "connection truth is not duplicated");
+  assert.ok(
+    html.includes('data-tab="work"') && html.includes('data-tab="decisions"') && html.includes("navSystem"),
+    "Work, Decision Center and System remain in the shell",
+  );
+  const navScroll = html.slice(html.indexOf('class="nav-scroll"'), html.indexOf('id="fl-system-menu"'));
+  assert.ok(navScroll.includes('data-tab="work"') && navScroll.includes('data-tab="decisions"'),
+    "Work and Decision Center stay in the inner nav scroller");
+  assert.ok(!navScroll.includes("theme-switch") && !navScroll.includes("fl-system-menu"),
+    "System utilities are not inside the inner nav scroller");
+  assert.ok(!html.includes("class=\"sidebar\""), "the configuration-first sidebar is gone");
   assert.ok(js.includes("X-ForkLight-Hub-Token"));
   assert.ok(js.includes("function kanbanCard"));
+  assert.ok(css.includes("#f6f7f9") && css.includes("#171a21") && css.includes("#1677ff"));
   assert.ok(css.length > 200);
 });
 
@@ -5186,7 +5216,8 @@ test("Hub top-level pages lead with purpose and share an input-process-output-ne
     } else {
       assert.ok(!block.includes(storyCall), `${page} does not use the generic page-story block`);
       assert.ok(block.includes(denseMarker), `${page} renders its focused dense content`);
-      assert.ok(block.includes("renderWorkShapeGuide"), "Work leads with the shape guide");
+      assert.ok(block.includes("renderWorkWorkbench"), "Work leads with the hierarchy-first workbench");
+      assert.ok(!block.includes("renderWorkShapeGuide"), "Work does not lead with an object-choice lesson");
     }
   }
 
@@ -7907,10 +7938,10 @@ test("Hub explains execution preference bilingually without forcing protocol voc
   assert.ok(src.includes("workersReadinessNextExecutionMode"), "readiness next action key is consumed");
   assert.ok(src.includes("fl-wp-execution"), "the Worker editor has an execution preference control");
   for (const phrase of [
-    "Auto — prefer a real Goal",
+    "Auto: prefer a real Goal",
     "One normal run",
     "Native Goal (requires support)",
-    "自动 —— 优先使用真实 Goal",
+    "自动：优先使用真实 Goal",
     "单次执行",
     "原生 Goal（需要 Runtime 支持）",
   ]) {
@@ -8024,20 +8055,22 @@ test("Hub authenticates onto Work as the only default work surface", async () =>
   }
   // Initial localized chrome matches Work page metadata (zh-CN default shell).
   assert.ok(html.includes('id="fl-page-title"') && html.includes(">工作<"), "initial page title is Work");
-  assert.ok(html.includes("查看 Goal、独立 Plan 或一次性 Task 工作区，以及其中的工作"),
-    "initial page sub is workspace-neutral Work orientation");
+  assert.ok(html.includes("看清想达成什么、现在进展到哪、接下来需要你做什么"),
+    "initial page sub leads with the user's outcome, progress, and next need");
   assert.ok(i18n.includes('work: { title: "Work"'), "English Work title remains truthful");
   assert.ok(i18n.includes('work: { title: "工作"'), "Chinese Work title remains truthful");
   // First refresh requests Work hierarchy/intake slices via the default tab fallback.
   assert.ok(src.includes('requestPlan(S.tab || "work")'), "refresh falls back to Work deps");
   assert.ok(src.includes('pageMeta(S.tab || "work")'), "chrome falls back to Work metadata");
   assert.ok(src.includes('var tab = S.tab || "work"'), "render falls back to Work");
-  // Keyboard/focus order follows visible primary nav: Work is the first Operate item.
-  const operateLabel = html.indexOf('data-i18n="navOperate"');
+  // Keyboard/focus order: Work then Decision Center, then quiet System access.
   const workBtn = html.indexOf('data-tab="work"');
+  const decisionBtn = html.indexOf('data-tab="decisions"');
+  const systemMenu = html.indexOf("fl-system-menu");
   const competeBtn = html.indexOf('data-tab="competitions"');
-  assert.ok(operateLabel > 0 && workBtn > operateLabel, "Work follows the Operate group label");
-  assert.ok(competeBtn > workBtn, "Compete follows Work in focus order");
+  assert.ok(workBtn > 0 && decisionBtn > workBtn, "Decision Center follows Work");
+  assert.ok(systemMenu > decisionBtn, "System access follows the primary routes");
+  assert.ok(competeBtn > systemMenu, "Competition stays inside System, after the primary routes");
 });
 
 test("Hub legacy peer pages redirect to the single Work surface", async () => {
@@ -8389,15 +8422,19 @@ test("Hub Work copy is bilingual, explanation-first, and internal-vocabulary-fre
   const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
   const { enSection, zhSection } = splitI18n(i18n);
   const work = extractFunctionSource(src, "rWork");
-  assert.ok(work.includes("renderWorkShapeGuide()"), "Work page leads with shape rules");
+  assert.ok(work.includes("renderWorkWorkbench(view, S.workSelection)"), "Work page leads with the real hierarchy");
+  assert.ok(!src.includes("function renderWorkShapeGuide("), "the shape-choice teaching block is retired");
   assert.ok(!work.includes('renderPageStory("work")'), "generic page tutorial is not primary Work copy");
   const enKeys = [
     "workFilterApply", "workFilterReset", "workColumnWaitingDecision",
     "workCardBlocker", "workCardNext", "workGoalDecision",
     "workIndependentPlans", "workOneOffTasks", "workUnsupportedHierarchy",
     "workFilterInternalProjectsOmitted", "workOneOffCount",
-    "workShapeGuideTitle", "workShapeTaskRule", "workShapePlanRule", "workShapeGoalRule",
-    "workShapeProposalFlow", "workFinishedWorkCount", "workNoFurtherAction",
+    "workTreeGoalLevel", "workTreePlanLevel", "workTreeTaskLevel",
+    "workTreeNewGoal", "workTreeAddPlan", "workTreeAddTask",
+    "workCreateGoalTitle", "workCreatePlanTitle", "workCreateTaskTitle",
+    "workCreateHint", "workCreateCancel", "workCreateContinue",
+    "workFinishedWorkCount", "workNoFurtherAction",
     "workCurrentPhaseTitle", "workOneOffCurrentTitle", "workOneOffHistoryTitle",
     "workPortfolioAttention", "workAdvancedTitle", "outcomeAdvancedHint",
   ];
@@ -8415,8 +8452,10 @@ test("Hub Work copy is bilingual, explanation-first, and internal-vocabulary-fre
     "zh explains omitted internal project choices");
   assert.ok(i18n.includes("{count} tasks"), "en one-off count is plain");
   assert.ok(i18n.includes("{count} 个任务"), "zh one-off count is plain");
-  assert.ok(i18n.includes("One independently reviewable deliverable"), "en shape rule explains Task");
-  assert.ok(i18n.includes("一个可独立验收的交付"), "zh shape rule explains Task");
+  assert.ok(i18n.includes("Add a plan to {name}"), "en contextual Plan action names its parent");
+  assert.ok(i18n.includes("为「{name}」添加计划"), "zh contextual Plan action names its parent");
+  assert.ok(i18n.includes("Add a task to {name}"), "en contextual Task action names its parent");
+  assert.ok(i18n.includes("在「{name}」中添加任务"), "zh contextual Task action names its parent");
   assert.ok(i18n.includes("More options"), "en expert controls have a reason");
   assert.ok(i18n.includes("更多选项"), "zh expert controls have a reason");
   assert.ok(!i18n.includes("Advanced — submit a task file"), "old unexplained Advanced label is gone");
@@ -8528,18 +8567,23 @@ test("FL-112E2 focused Goals select the Core currentPlanId and fall back to the 
   assert.ok(focusedOneOff.includes("WORK_ONE_OFF_GROUPS"), "standalone Tasks are grouped by truthful status purpose");
 });
 
-// --- FL-112B: Work page explains shape and keeps the focused workspace calm ---
+// --- FL-112B: Work page expresses hierarchy and keeps the focused workspace calm ---
 
-test("FL-112B Work shape guide is visible and replaces generic page help", async () => {
+test("FL-112B Work expresses Goal → Plan → Task through one contextual tree", async () => {
   const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
   const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
   const css = await readFile(path.join(hubPublic, "app.css"), "utf8");
-  const guide = extractFunctionSource(src, "renderWorkShapeGuide");
-  assert.ok(guide.includes('data-fl-role", "work-shape-guide"'), "shape guide role is stable");
-  assert.ok(guide.includes("workShapeTaskRule"), "guide explains Task");
-  assert.ok(guide.includes("workShapePlanRule"), "guide explains Plan");
-  assert.ok(guide.includes("workShapeGoalRule"), "guide explains Goal");
-  assert.ok(guide.includes("workShapeProposalFlow"), "guide names Main proposal and confirmation");
+  const goal = extractFunctionSource(src, "renderWorkTreeGoal");
+  const plan = extractFunctionSource(src, "renderWorkTreePlan");
+  const task = extractFunctionSource(src, "renderWorkTreeTask");
+  assert.ok(goal.includes("renderWorkTreePlan") && goal.includes('shape: "plan"'),
+    "Goal renders child Plans and an in-place Plan action");
+  assert.ok(plan.includes("renderWorkTreeTask") && plan.includes('shape: "task"'),
+    "Plan renders child Tasks and an in-place Task action");
+  assert.ok(task.includes("showTask(item.id, item.breadcrumb)"),
+    "Task opens the existing canonical detail path");
+  assert.ok(!src.includes("function renderWorkShapeGuide("),
+    "no teaching block asks the user to choose an internal shape");
   assert.ok(!extractFunctionSource(src, "rWork").includes('renderPageStory("work")'),
     "generic input-process-output help is not duplicated on Work");
   assert.ok(i18n.includes("More options") && i18n.includes("更多选项"),
@@ -8549,22 +8593,17 @@ test("FL-112B Work shape guide is visible and replaces generic page help", async
   const story = extractFunctionSource(src, "renderPageStory");
   assert.ok(story.includes("card.appendChild(purpose)"), "non-Work pages keep always-open purpose");
   assert.ok(story.includes("card.appendChild(flow)"), "non-Work pages keep always-open flow");
-  const rw = extractFunctionSource(src, "rWork");
-  const outcomeAt = rw.indexOf("renderOutcomeSection()");
-  const storyAt = rw.indexOf("renderWorkShapeGuide()");
-  const filtersAt = rw.indexOf("renderWorkFilters()");
-  const boardAt = rw.indexOf("renderWorkWorkbench(view, S.workSelection)");
-  assert.ok(outcomeAt > 0 && storyAt > outcomeAt && filtersAt > storyAt && boardAt > filtersAt,
-    "Work order is outcome → shape rules → filters → focused workbench");
-  assert.ok(rw.includes('data-fl-role", "work-intro"'),
-    "outcome and shape explanation share one compact semantic intro");
-  assert.ok(css.includes(".work-shape-guide"), "shape guide styles ship");
-  assert.ok(css.includes(".work-shape-rules"), "three-level shape rules have a stable layout");
-  assert.ok(!/work-shape-guide[\s\S]{0,200}height:\s*\d+vh/.test(css),
-    "shape guide does not use fixed viewport heights");
+  const tree = extractFunctionSource(src, "renderWorkGoalTree");
+  assert.ok(tree.includes("workTreeNewGoal") && tree.includes("renderWorkTreeList"),
+    "the tree itself leads with work and a root Goal action");
+  assert.ok(css.includes(".work-tree-children") && css.includes("border-left"),
+    "branch position and connectors carry the hierarchy visually");
+  assert.ok(css.includes(".work-contextual-create"), "the composer is styled only as a contextual child");
+  assert.ok(i18n.includes("Your work") && i18n.includes("你的工作"),
+    "the rail is named from the user's point of view");
 });
 
-test("FL-112B terminal Goals stay in one counted, lazy Finished history disclosure", async () => {
+test("FL-112B terminal Goals stay in the History tree without a duplicate lane", async () => {
   const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
   const css = await readFile(path.join(hubPublic, "app.css"), "utf8");
   assert.ok(src.includes("function workGoalIsTerminalStatus("), "terminal status helper ships");
@@ -8593,15 +8632,18 @@ test("FL-112B terminal Goals stay in one counted, lazy Finished history disclosu
   assert.ok(finished.includes("renderWorkHistoryOption(goal)"), "history expands to selectable Goal summaries");
   assert.ok(finished.includes("if(details.open) ensureFinishedBody()"),
     "lanes render only after the disclosure opens");
-  const portfolio = extractFunctionSource(src, "renderWorkPortfolio");
-  assert.ok(portfolio.includes("workGoalIsTerminalStatusForSelection"),
-    "portfolio partitions active and terminal Goals by canonical status");
-  assert.ok(portfolio.includes("renderWorkFinishedGoals(finishedGoals)"),
-    "terminal Goal history is reachable from the rail");
-  assert.ok(portfolio.indexOf("activeGoals") < portfolio.indexOf("independent"),
-    "active Goal summaries precede independent Plans");
-  assert.ok(portfolio.indexOf("independent") < portfolio.indexOf("oneOffTasks"),
-    "one-off work remains a separate portfolio choice");
+  const tree = extractFunctionSource(src, "composeGoalTreeModel");
+  const portfolio = extractFunctionSource(src, "renderWorkGoalTree");
+  assert.ok(tree.includes("workGoalIsTerminalStatusForSelection"),
+    "Goal Tree partitions Now and History by canonical Goal status");
+  assert.ok(portfolio.includes("renderWorkTreeList(model.visible, selection)"),
+    "terminal Goal history uses the same nested tree renderer");
+  assert.ok(!portfolio.includes("renderWorkFinishedGoals"),
+    "History does not append a second duplicate finished-Goal lane");
+  assert.ok(tree.includes("if(item.terminal) history.push") && tree.includes("now.push"),
+    "Now Goals stay separate from History Goals");
+  assert.ok(tree.includes("oneOffTasks") && tree.includes("inbox"),
+    "one-off work remains a separate Goal Tree choice");
   assert.ok(css.includes(".work-finished-group"), "finished group styles ship");
   assert.ok(!/work-finished-group[\s\S]{0,240}(max-height:\s*\d+vh|overflow:\s*hidden)/.test(css),
     "finished group does not clip or fix viewport height");
@@ -10175,6 +10217,7 @@ test("FL-112E9 reload context restores the draft, selected intake, confirm step,
     "workReadingOptionalNumber",
     "workReadingSafeFilterPart",
     "workReadingNormalizeFilter",
+    "workNormalizeTreeWidth",
     "workReadingNormalizeRecord",
   ].map((name) => extractFunctionSource(src, name)).join("\n");
   const constants = `
@@ -10185,6 +10228,9 @@ test("FL-112E9 reload context restores the draft, selected intake, confirm step,
     var WORK_READING_CONTEXT_DISCLOSURES = ["finishedOpen", "advancedOpen", "expertDetailsOpen", "goalSummaryOpen", "filtersOpen", "oneOffCurrentOpen", "oneOffAttentionOpen", "oneOffHistoryOpen", "shapeGuideOpen", "pageStoryOpen", "outcomeAdvancedOpen"];
     var WORK_READING_CONTEXT_TABS = ["overview", "instruction", "process", "result", "checks", "actions", "more"];
     var WORK_COLUMN_CODES = ["not-started", "ready", "running", "waiting-verification", "waiting-user-decision", "completed", "stopped-failed"];
+    var GOAL_TREE_WIDTH_DEFAULT = 280;
+    var GOAL_TREE_WIDTH_MIN = 200;
+    var GOAL_TREE_WIDTH_MAX = 420;
   `;
   const api = new Function("sessionStorage", `${constants}\n${helpers}\nreturn {
     normalize: workReadingNormalizeRecord,
@@ -10223,82 +10269,45 @@ test("FL-112E9 reload context restores the draft, selected intake, confirm step,
   assert.equal(bad?.createdNavigate, null, "unknown created shape fails closed");
 });
 
-// --- FL-112E10: compose narrow reveal bridge + natural first-use copy ---
+// --- FL-112E10: contextual creation + natural first-use copy ---
 
-test("FL-112E10 narrow New work bridge reveals the existing composer without mutation", async () => {
+test("FL-112E10 tree location opens one composer with exact parent context", async () => {
   const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
-  const header = extractFunctionSource(src, "renderWorkContextHeader");
-  assert.ok(header.includes('data-fl-role", "work-context-new-entry"'),
-    "first Work context exposes one New work bridge control");
-  assert.ok(header.includes('t("workNewEntryLabel")'),
-    "bridge reuses the existing New work label");
-  assert.ok(header.includes("workRevealNewEntry()"),
-    "bridge activates the reveal helper on deliberate click");
-  assert.ok(!header.includes("postJSON") && !header.includes("refresh(") && !header.includes("renderOutcomeComposer"),
-    "bridge never submits, refreshes, or mounts a second composer");
+  const contextual = extractFunctionSource(src, "renderWorkContextualComposer");
+  assert.ok(contextual.includes("workCreateTargetEqual") && contextual.includes("renderOutcomeSection"),
+    "the rail mounts the canonical composer only for the selected tree location");
 
-  const reveal = extractFunctionSource(src, "workRevealNewEntry");
-  assert.ok(reveal.includes('[data-fl-role="outcome-section"]'),
-    "reveal targets the existing outcome section role");
-  assert.ok(reveal.includes('[data-fl-role="outcome-text"]'),
-    "reveal targets the existing outcome textbox role");
-  assert.ok(reveal.includes("scrollIntoView") && reveal.includes(".focus"),
-    "reveal scrolls and focuses only after activation");
-  assert.ok(reveal.includes("if(!section && !text) return"),
-    "missing targets are a safe no-op");
-  assert.doesNotMatch(reveal, /postJSON|refresh\s*\(|outcomeSubmit|render\s*\(/,
-    "reveal never mutates intake, submits, or re-renders");
+  const opener = extractFunctionSource(src, "workOpenCreateTarget");
+  assert.ok(opener.includes("S.outcomeDraft.requestedShape = target.shape"),
+    "the tree location fixes the requested shape");
+  assert.ok(!opener.includes("postJSON") && !opener.includes("refresh("),
+    "opening the composer creates nothing and starts no request");
 
-  // Behavioral: present targets scroll and focus; missing targets throw nothing.
-  const revealFn = new Function(`
-    ${reveal}
-    return workRevealNewEntry;
-  `)() as () => void;
-  let scrolled = 0;
-  let focused = 0;
-  const section = {
-    scrollIntoView() { scrolled += 1; },
-  };
-  const text = {
-    focus() { focused += 1; },
-  };
-  type TestDocumentHost = {
-    document?: { querySelector: (sel: string) => unknown };
-  };
-  const host = globalThis as unknown as TestDocumentHost;
-  const previousDocument = host.document;
-  host.document = {
-    querySelector(sel: string) {
-      if (sel.includes("outcome-section")) return section;
-      if (sel.includes("outcome-text")) return text;
-      return null;
-    },
-  };
-  try {
-    assert.doesNotThrow(() => revealFn(), "present targets do not throw");
-    assert.equal(scrolled, 1, "section scrolls once");
-    assert.equal(focused, 1, "textbox focuses once");
-    host.document = {
-      querySelector() { return null; },
-    };
-    assert.doesNotThrow(() => revealFn(), "missing targets are a silent no-op");
-    assert.equal(scrolled, 1, "missing targets do not scroll");
-    assert.equal(focused, 1, "missing targets do not focus");
-  } finally {
-    if (previousDocument === undefined) {
-      delete host.document;
-    } else {
-      host.document = previousDocument;
-    }
-  }
+  const contextSource = extractFunctionSource(src, "workCreateTargetContext");
+  const contextFor = new Function(`${contextSource}; return workCreateTargetContext;`)() as
+    (target: Record<string, string>) => string;
+  assert.equal(contextFor({ shape: "goal" }), "", "a root Goal has no invented parent");
+  const taskContext = contextFor({
+    shape: "task",
+    goalId: "goal-1",
+    goalName: "Ship Hub",
+    planId: "plan-2",
+    planName: "Polish Work",
+  });
+  assert.ok(taskContext.includes("Goal goal-1 (Ship Hub)"), "Task context includes its exact Goal");
+  assert.ok(taskContext.includes("Plan plan-2 (Polish Work)"), "Task context includes its exact Plan");
 
-  // One canonical composer remains in the portfolio rail.
-  const entry = extractFunctionSource(src, "renderWorkNewEntry");
-  assert.ok(entry.includes("renderOutcomeSection()"),
-    "the rail still mounts the one canonical composer");
+  const submit = extractFunctionSource(src, "outcomeSubmit");
+  assert.ok(submit.includes("workOutcomeContextValue()"),
+    "the existing intake request receives the contextual placement");
+  assert.ok(submit.includes("S.workCreateTarget.shape") && submit.includes('postJSON("/api/ops/intakes"'),
+    "contextual creation reuses the one intake endpoint and fixed requested shape");
+
   const workbench = extractFunctionSource(src, "renderWorkWorkbench");
-  assert.ok(workbench.includes("renderWorkContextHeader") && workbench.includes("renderWorkPortfolio"),
-    "workbench still composes context header plus portfolio composer");
+  assert.ok(workbench.includes("renderWorkPortfolio") && workbench.includes("renderWorkFocusedWorkspace"),
+    "workbench composes the tree and selected result");
+  assert.ok(!workbench.includes("renderWorkContextHeader"),
+    "the selected result does not repeat a mechanical hierarchy lesson");
 });
 
 test("FL-112E10 Work orientation and Main handoff copy stay workspace-neutral and natural", async () => {
@@ -10306,17 +10315,13 @@ test("FL-112E10 Work orientation and Main handoff copy stay workspace-neutral an
   const html = await readFile(path.join(hubPublic, "index.html"), "utf8");
   const { enSection, zhSection } = splitI18n(i18n);
 
-  // Page subtitle is true for Goal, independent Plan, and one-off Task.
-  assert.match(enSection, /work:\s*\{\s*title:\s*"Work",\s*sub:\s*"[^"]*Goal[^"]*Plan[^"]*Task[^"]*"\s*\}/,
-    "English Work subtitle names Goal, Plan, and Task workspaces");
-  assert.match(zhSection, /work:\s*\{\s*title:\s*"工作",\s*sub:\s*"[^"]*Goal[^"]*Plan[^"]*Task[^"]*"\s*\}/,
-    "Chinese Work subtitle names Goal, Plan, and Task workspaces");
-  assert.ok(enSection.includes("independent Plan") || enSection.includes("one-off Task"),
-    "English subtitle is not Goal-phase-only");
-  assert.ok(zhSection.includes("独立 Plan") || zhSection.includes("一次性 Task"),
-    "Chinese subtitle is not Goal-phase-only");
-  assert.ok(html.includes("Goal") && html.includes("Plan") && html.includes("Task"),
-    "initial static shell subtitle stays workspace-neutral");
+  // Page subtitle speaks in the user's terms: desired outcome, progress, next need.
+  assert.ok(enSection.includes("See what you are aiming for, what is true now, and what needs you next"),
+    "English Work subtitle states the user's three questions");
+  assert.ok(zhSection.includes("看清想达成什么、现在进展到哪、接下来需要你做什么"),
+    "Chinese Work subtitle states the user's three questions");
+  assert.ok(html.includes("看清想达成什么、现在进展到哪、接下来需要你做什么"),
+    "initial static shell uses the same human-language orientation");
   assert.ok(!html.includes("统一的目标 → 计划 → 任务看板"),
     "initial shell drops the Goal-only hierarchy subtitle");
 
@@ -10424,8 +10429,12 @@ test("FL-112A Work continuity helpers ship with keep-or-refresh wiring", async (
   assert.ok(snap.includes("S.workSelection"), "focused workspace is part of visible truth");
   assert.ok(snap.includes("S.intakes"), "intake evidence is snapshotted");
   assert.ok(snap.includes("S.workFilter"), "applied filter is snapshotted");
+  assert.ok(snap.includes("S.tab"), "current route is part of visible truth");
   assert.ok(!snap.includes("S.lastOk") && !snap.includes("Date.now"),
     "snapshot ignores connection clock chrome");
+  const live = extractFunctionSource(src, "workDomIsLive");
+  assert.ok(live.includes('tab === "decisions"'), "Decision Center has its own live mount check");
+  assert.ok(live.includes('tab !== "work"'), "non-Work routes do not inherit the Work mount");
 });
 
 test("FL-112A three identical Work polls keep the same truth snapshot and skip DOM replace", async () => {
@@ -10622,6 +10631,7 @@ test("FL-112A changed Work evidence forces one refresh and restores surviving co
     extractFunctionSource(src, "workFindFocusTarget"),
     extractFunctionSource(src, "workContentScrollEl"),
     extractFunctionSource(src, "workMaterializeOpenFinishedBody"),
+    extractFunctionSource(src, "workNormalizeTreeWidth"),
     extractFunctionSource(src, "workCaptureWorkbenchContext"),
     extractFunctionSource(src, "workRestoreWorkbenchContext"),
   ].join("\n");
@@ -10911,6 +10921,87 @@ test("FL-112A changed Work evidence forces one refresh and restores surviving co
   assert.equal(api.find("task:t-gone"), null, "removed Task has no focus target");
   assert.doesNotThrow(() => api.restore(goneCtx), "missing focus target fails safely");
   assert.equal(postNestedCard.focusCalls, 1, "missing target does not steal focus onto another Task");
+});
+
+test("Work to Decision Center rebuilds the selected route while same-route polls retain", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const extraStart = src.indexOf("var WORK_TRUTH_VOLATILE_EXTRA = [");
+  assert.ok(extraStart >= 0, "private volatile extra-key array ships");
+  const extraEnd = src.indexOf("];", extraStart) + 2;
+  const helpers = [
+    src.slice(extraStart, extraEnd),
+    extractFunctionSource(src, "workIsVolatileTruthKey"),
+    extractFunctionSource(src, "workStableTruthClone"),
+    extractFunctionSource(src, "workSelectionKey"),
+    extractFunctionSource(src, "workVisibleTruthSnapshot"),
+    extractFunctionSource(src, "workDomIsLive"),
+    extractFunctionSource(src, "workShouldRetainDom"),
+  ].join("\n");
+
+  const workBoard = { id: "live-work-board" };
+  const decisionCenter = { id: "live-decision-center" };
+  const mounts = { work: workBoard, decisions: null as { id: string } | null };
+  const viewEl = {
+    querySelector(sel: string) {
+      if (sel.includes("work-board") || sel.includes("workbench-layout") || sel.includes("goal-tree")) {
+        return mounts.work;
+      }
+      if (sel.includes("decision-center")) return mounts.decisions;
+      return null;
+    },
+  };
+  const windowObj = { ForklightI18n: { getLang() { return "zh"; } } };
+  const factory = new Function(
+    "window",
+    "viewEl",
+    `${helpers}
+     var S = {
+       tab: "work",
+       workFilter: {},
+       workSelection: { kind: "goal", id: "g-active" },
+       workHierarchy: { goals: [{ goalId: "g-active", name: "Hub" }] },
+       workHierarchyError: null,
+       intakes: [],
+       intakesError: null,
+       workRenderSnapshot: null,
+       workTreeScope: "now",
+       workTreeQuery: "",
+       workMobilePane: "tree"
+     };
+     return {
+       S: S,
+       snapshot: workVisibleTruthSnapshot,
+       retain: workShouldRetainDom,
+       remember: function(s){ S.workRenderSnapshot = s; },
+       setTab: function(tab){ S.tab = tab; }
+     };`,
+  );
+  const api = factory(windowObj, viewEl) as {
+    S: { tab: string; workRenderSnapshot: string | null };
+    snapshot: () => string;
+    retain: () => boolean;
+    remember: (s: string) => void;
+    setTab: (tab: string) => void;
+  };
+
+  const workSnap = api.snapshot();
+  api.remember(workSnap);
+  assert.match(workSnap, /"tab":"work"/, "Work snapshot records the Work route");
+  assert.equal(api.retain(), true, "an identical Work poll keeps the live Work mount");
+
+  api.setTab("decisions");
+  assert.notEqual(api.snapshot(), workSnap, "switching to Decision Center changes visible truth");
+  assert.equal(api.retain(), false, "Work to Decision Center does not keep the Work mount");
+
+  mounts.work = { id: "unmounted-work" };
+  mounts.decisions = decisionCenter;
+  const decisionSnap = api.snapshot();
+  api.remember(decisionSnap);
+  assert.match(decisionSnap, /"tab":"decisions"/, "Decision Center snapshot records its route");
+  assert.equal(api.retain(), true, "an identical Decision Center poll keeps the live Decision mount");
+
+  api.setTab("work");
+  assert.equal(api.retain(), false, "Decision Center to Work rebuilds the selected route");
 });
 
 // --- FL-108D1: Task Detail tells one clear input-to-delivery story ---
@@ -11491,6 +11582,7 @@ test("FL-112F reload context is versioned, bounded, field-safe, and storage-fail
     "workReadingOptionalNumber",
     "workReadingSafeFilterPart",
     "workReadingNormalizeFilter",
+    "workNormalizeTreeWidth",
     "workReadingNormalizeRecord",
     "workReadSessionContext",
     "workWriteSessionContext",
@@ -11504,6 +11596,9 @@ test("FL-112F reload context is versioned, bounded, field-safe, and storage-fail
     var WORK_READING_CONTEXT_DISCLOSURES = ["finishedOpen", "advancedOpen", "expertDetailsOpen", "goalSummaryOpen", "filtersOpen", "oneOffCurrentOpen", "oneOffAttentionOpen", "oneOffHistoryOpen", "shapeGuideOpen", "pageStoryOpen", "outcomeAdvancedOpen"];
     var WORK_READING_CONTEXT_TABS = ["overview", "instruction", "process", "result", "checks", "actions", "more"];
     var WORK_COLUMN_CODES = ["not-started", "ready", "running", "waiting-verification", "waiting-user-decision", "completed", "stopped-failed"];
+    var GOAL_TREE_WIDTH_DEFAULT = 280;
+    var GOAL_TREE_WIDTH_MIN = 200;
+    var GOAL_TREE_WIDTH_MAX = 420;
   `;
   let raw = "";
   let removed = 0;
@@ -11694,9 +11789,13 @@ test("FL-112F terminal-Goal default phase is saved/restored so manual board scro
     var WORK_COLUMN_CODES = ["not-started", "ready", "running", "waiting-verification", "waiting-user-decision", "completed", "stopped-failed"];
     var WORK_READING_CONTEXT_DISCLOSURES = ["finishedOpen", "advancedOpen", "expertDetailsOpen", "goalSummaryOpen", "filtersOpen", "oneOffCurrentOpen", "oneOffAttentionOpen", "oneOffHistoryOpen", "shapeGuideOpen", "pageStoryOpen", "outcomeAdvancedOpen"];
     var WORK_READING_CONTEXT_TABS = ["overview", "instruction", "process", "result", "checks", "actions", "more"];
+    var GOAL_TREE_WIDTH_DEFAULT = 280;
+    var GOAL_TREE_WIDTH_MIN = 200;
+    var GOAL_TREE_WIDTH_MAX = 420;
   `;
   const helpers = [
     "workReadingSafeNumber",
+    "workNormalizeTreeWidth",
     "normalizeWorkHierarchy",
     "workMakeSelection",
     "workSelectionKey",

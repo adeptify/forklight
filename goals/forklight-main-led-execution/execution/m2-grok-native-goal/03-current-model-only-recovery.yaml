@@ -1,0 +1,130 @@
+version: 2
+name: M2-A final current-model-only exact Candidate recovery
+project: /Users/yijunwang/code/forklight
+taskClass: m2-grok-native-goal-truth
+taskFamily: forklight-runtime-recovery
+workerProfileId: grok-4-6-xhigh
+deliveryProfileId: forklight-self-upgrade
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 2
+  reason: Frozen Grok identity, native Goal recovery, terminal truth and sandbox policy are core high-risk behavior requiring two independent views.
+runtime:
+  name: grok-build
+  executable: /Users/yijunwang/code/forklight/goals/forklight-main-led-execution/execution/m2-grok-native-goal/current-model-only-recovery-bootstrap.mjs
+  effort: xhigh
+  maxBudgetUsd: null
+contract:
+  outcome: >-
+    Reuse the exact independently verified 14-path native /goal Candidate and close its sole Main
+    review gap: every native Goal role uses the frozen Grok 4.6 Xhigh model via
+    GROK_GOAL_USE_CURRENT_MODEL_ONLY=1, while explicit persistent-session does not inherit that
+    native-only flag.
+  presentation: { summary: 复用完整Candidate，只补current-model-only环境真相和聚焦测试。, language: zh-CN }
+  context:
+    - Read AGENTS.md and specs/m2-a-grok-execution-truth/work-items/grok-native-goal/spec.md completely before editing; the final recovery section is the sole accepted requirement.
+    - Source Task 010812a2-0939-4315-9e19-ae7b892e677b produced Revision 00d99db6-429f-4786-b982-740f19581b31, digest e12f45e8d2b9daceebc1b5d53929a455e7ae0965110853b3e677960a0fd42f62, with 14 accepted paths and two usable Judge accepts.
+    - The recovery bootstrap verifies that digest and materializes the exact Candidate into this isolated Workspace before Grok starts. Preserve those reusable bytes except for the two explicitly writable delta paths below.
+    - Main's only remaining finding is that native mode sets GROK_GOAL and GROK_WORKFLOWS but omits GROK_GOAL_USE_CURRENT_MODEL_ONLY, allowing native role models to escape the frozen Grok 4.6 identity.
+    - This is one final Task with one base Attempt and zero extra Attempt, validation repair, correction, reverification, adaptation, handoff, reroute, model switch or replacement. Any failure is terminal.
+    - Product execution truth remains persistent-session until this Candidate is safely integrated and a no-wrapper live Task proves native-goal.
+    - ForkLight serves one local developer. Add no lock, lease, checksum beyond the exact authorized seed digest, manifest, version handshake, duplicate Goal state or distributed behavior.
+    - Edit only the isolated Workspace. Never commit, push, change remotes, access credentials, edit storage paths, Hub/UI, Goal SSOT or operational wrapper files.
+  inScope:
+    - In src/workers/grok.ts, set GROK_GOAL_USE_CURRENT_MODEL_ONLY=1 exactly when buildGrokWorkerEnv constructs native-goal environment and remove that flag from explicit persistent-session environment even if ambient process env contains it.
+    - In tests/worker-runtime.test.ts, add focused assertions for native first launch/resume/successor environment and explicit persistent-session non-inheritance.
+    - Run the accepted original native Goal verification without changing the other 12 retained Candidate paths.
+  outOfScope:
+    - Reimplementing or refactoring the 14-path Candidate, changing native Goal state/parser/tool/sandbox behavior, changing model/effort/Profile, adding Runtime configuration, Store/protocol/schema, Review Graph, Integration, storage lifecycle, routing, economics, Hub/UI, commit or push.
+    - Extra Attempt, correction, validation repair, reverification, adaptation, handoff, reroute, model switch, replacement, Competition or automatic retry.
+    - Locks, leases, content-addressing, duplicate checks, version negotiation, multi-user or distributed coordination.
+  executionSteps:
+    - Confirm the exact retained Candidate is present and inspect only buildGrokWorkerEnv plus its focused tests.
+    - Add the native-only current-model flag and explicit persistent-session removal with the smallest coherent patch.
+    - Run the complete accepted command set, inspect that only the two delta paths changed beyond the seed, and stop.
+  deliverables:
+    - Exact 14-path Candidate plus the current-model-only native env invariant.
+    - Focused native and explicit-persistent environment regressions.
+    - One terminal native Goal and ForkLight independent verification evidence.
+  modules:
+    - name: Native Goal child environment
+      responsibility: Bind all native Goal roles to the already frozen top-level Grok 4.6 model while keeping the flag absent from explicit persistent-session.
+      consumes: [Resolved execution mode, task-local Grok environment, ambient process environment.]
+      produces: [Native-only GROK_GOAL_USE_CURRENT_MODEL_ONLY=1 or a clean explicit persistent environment.]
+      boundaries: [No new configuration, handshake, Store copy, model switch or legacy relabel.]
+    - name: Focused environment proof
+      responsibility: Prove native create/resume/successor share the invariant and persistent-session cannot inherit it.
+      consumes: [buildGrokWorkerEnv test fixtures.]
+      produces: [Deterministic assertions inside the accepted worker-runtime suite.]
+      boundaries: [No broad test rewrite or product refactor.]
+  callChain:
+    - Recovery bootstrap validates and materializes exact Revision 00d99db6 into the isolated Workspace.
+    - Grok 4.6 Xhigh native /goal adds only the current-model-only product invariant and tests.
+    - ForkLight independently verifies the exact resulting Candidate; Main compares it with the retained Revision.
+    - Exactly two independent Judges review the fresh Revision before Main serial safe Integration and activation.
+    - A no-wrapper product Task proves truthful native-goal identity and terminal evidence.
+  scenarios:
+    - name: Native Goal freezes every role model
+      given: A new or resumed Grok Task resolves to native-goal.
+      when: ForkLight constructs the child environment.
+      then: GROK_GOAL, GROK_WORKFLOWS and GROK_GOAL_USE_CURRENT_MODEL_ONLY all equal 1.
+    - name: Explicit persistent session remains native-free
+      given: Ambient process environment contains the current-model-only variable.
+      when: A Task explicitly resolves to persistent-session.
+      then: The child environment omits GROK_GOAL_USE_CURRENT_MODEL_ONLY.
+  risks:
+    - Inheriting the flag only in the bootstrap would leave product Runtime truth false; the production env builder and focused test must carry it.
+    - Rebuilding accepted native Goal behavior could introduce unrelated regression; exact seed reuse and Main two-path delta comparison prevent that concrete failure.
+  changeBudget: { maxFiles: 14, maxDiffLines: 1700 }
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 60000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxWorkerValidationRepairs: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - docs/configuration.md
+    - docs/main-clients/grok-build.md
+    - docs/main-led-delivery.md
+    - src/core/execution-mode.ts
+    - src/workers/grok-goal.ts
+    - src/workers/grok.ts
+    - tests/cli-health.test.ts
+    - tests/competition.test.ts
+    - tests/goal.test.ts
+    - tests/task-preview.test.ts
+    - tests/task.test.ts
+    - tests/worker-profiles.test.ts
+    - tests/worker-readiness.test.ts
+    - tests/worker-runtime.test.ts
+acceptance:
+  criteria:
+    - Exact Revision 00d99db6 is reused and only src/workers/grok.ts plus tests/worker-runtime.test.ts differ from that retained Candidate.
+    - Native-goal child env always sets GROK_GOAL_USE_CURRENT_MODEL_ONLY=1 with the frozen model/effort; explicit persistent-session removes it even when ambient env is set.
+    - Original native Goal launch, resume, successor, state, terminal, sandbox and public-truth acceptance remains green.
+    - One Attempt ends in durable native complete plus achieved evidence and the fresh Candidate passes exactly two external Judges before Main Integration.
+  commands:
+    - node goals/forklight-main-led-execution/execution/m2-grok-native-goal/current-model-only-recovery-bootstrap.test.mjs
+    - git apply -p2 --reverse --check --exclude=src/workers/grok.ts --exclude=tests/worker-runtime.test.ts goals/forklight-main-led-execution/execution/m2-grok-native-goal/00d99db6-429f-4786-b982-740f19581b31.patch
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/worker-runtime.test.ts tests/task.test.ts tests/worker-profiles.test.ts tests/worker-readiness.test.ts tests/cli-health.test.ts tests/task-preview.test.ts tests/competition.test.ts tests/goal.test.ts
+    - git diff --check

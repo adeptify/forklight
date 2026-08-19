@@ -766,6 +766,7 @@ test("routing explanation degrades honestly when no routing decision exists", as
   assert.equal(explanation.evidence, null);
   assert.equal(explanation.competition, null);
   assert.equal(explanation.nextAction, "not-recorded");
+  assert.equal(explanation.advisory, null);
   // The resolved Worker remains visible even when reasoning was not recorded.
   assert.equal(explanation.selectedWorker.provider, "xai");
   assert.equal(explanation.selectedWorker.model, "grok-4.5");
@@ -899,6 +900,142 @@ test("routing explanation never enters the preview revision digest", async () =>
   // The projection adds the explanation field without changing what the
   // digest hashes — the explanation is deliberately absent from the digest.
   assert.equal(projected.previewRevisionDigest, recomputed);
+});
+
+const PREVIEW_QWEN_WORKER = {
+  provider: "qwen",
+  model: "qwen3.7-plus",
+  runtime: "claude-code",
+  effort: "high",
+};
+const PREVIEW_SELECTED_EXECUTION = {
+  resolvedExecutionMode: "single-run",
+  readinessState: "launchable",
+  canLaunch: true,
+  nextAction: "none",
+};
+
+test("preview followed-recommendation projects frozen advisory facts without rescoring", async () => {
+  const decision = routingDecisionFor("user-specified", {
+    shortlist: [GROK_SELECTED_WORKER, PREVIEW_QWEN_WORKER],
+    advisory: {
+      overallResult: "recommended",
+      selection: "followed-recommendation",
+      recommendedWorker: GROK_SELECTED_WORKER,
+      confidence: 0.91,
+      selectedExecution: PREVIEW_SELECTED_EXECUTION,
+    },
+  });
+  const taskFile = await writeRoutingDecisionTask(decision);
+  const preview = await buildTaskAdmissionPreview(taskFile, settingsWithGrokBuilder());
+  const advisory = preview.routingExplanation.advisory!;
+  assert.equal(advisory.overallResult, "recommended");
+  assert.equal(advisory.selection, "followed-recommendation");
+  assert.deepEqual(advisory.recommendedWorker, GROK_SELECTED_WORKER);
+  assert.equal(advisory.confidence, 0.91);
+  assert.deepEqual(advisory.selectedExecution, PREVIEW_SELECTED_EXECUTION);
+});
+
+test("preview manual-override keeps both identities and hides the private note", async () => {
+  const decision = routingDecisionFor("user-specified", {
+    shortlist: [GROK_SELECTED_WORKER, PREVIEW_QWEN_WORKER],
+    selectedBecause: { code: "user-specified", note: "PRIVATE_M3B_NOTE_NEVER_PROJECT" },
+    evidenceSnapshot: {
+      scope: "exact-class",
+      exactSampleCounts: { SECRET_M3B_SAMPLE_KEY: 1 },
+      settingsDigest: "SECRET_M3B_SETTINGS_DIGEST",
+    },
+    advisory: {
+      overallResult: "recommended",
+      selection: "manual-override",
+      recommendedWorker: PREVIEW_QWEN_WORKER,
+      confidence: 0.84,
+      selectedExecution: PREVIEW_SELECTED_EXECUTION,
+    },
+  });
+  const taskFile = await writeRoutingDecisionTask(decision);
+  const preview = await buildTaskAdmissionPreview(taskFile, settingsWithGrokBuilder());
+  assert.equal(preview.routingExplanation.advisory!.selection, "manual-override");
+  assert.deepEqual(preview.routingExplanation.advisory!.recommendedWorker, PREVIEW_QWEN_WORKER);
+  const json = JSON.stringify(preview);
+  const human = formatTaskAdmissionPreviewHuman(preview);
+  assert.ok(!json.includes("PRIVATE_M3B_NOTE_NEVER_PROJECT"));
+  assert.ok(!json.includes("SECRET_M3B_SETTINGS_DIGEST"));
+  assert.ok(!json.includes("SECRET_M3B_SAMPLE_KEY"));
+  assert.ok(!human.includes("PRIVATE_M3B_NOTE_NEVER_PROJECT"));
+  assert.match(human, /Selection: manual-override/);
+});
+
+test("preview cannot-determine records Main selection without recommendation or confidence", async () => {
+  const decision = routingDecisionFor("user-specified", {
+    advisory: {
+      overallResult: "cannot-determine",
+      selection: "selected-after-cannot-determine",
+      cannotDetermineReasons: ["insufficient-relevant-samples"],
+      selectedExecution: PREVIEW_SELECTED_EXECUTION,
+    },
+  });
+  const taskFile = await writeRoutingDecisionTask(decision);
+  const preview = await buildTaskAdmissionPreview(taskFile, settingsWithGrokBuilder());
+  const advisory = preview.routingExplanation.advisory!;
+  assert.equal(advisory.overallResult, "cannot-determine");
+  assert.equal(advisory.selection, "selected-after-cannot-determine");
+  assert.equal(advisory.recommendedWorker, undefined);
+  assert.equal(advisory.confidence, undefined);
+  const human = formatTaskAdmissionPreviewHuman(preview);
+  assert.match(human, /Cannot determine because: insufficient-relevant-samples/);
+  assert.doesNotMatch(human, /Recommended:/);
+  assert.doesNotMatch(human, /best|superior|winner/i);
+});
+
+test("preview accepts same-executable different-Profile override and rejects mode mismatch", async () => {
+  const twin = { ...GROK_SELECTED_WORKER, workerProfileId: "local-grok-twin" };
+  const overrideDecision = routingDecisionFor("user-specified", {
+    shortlist: [GROK_SELECTED_WORKER, twin],
+    selectedBecause: { code: "user-specified", note: "PRIVATE_M3B_NOTE_NEVER_PROJECT" },
+    advisory: {
+      overallResult: "recommended",
+      selection: "manual-override",
+      recommendedWorker: twin,
+      confidence: 0.84,
+      selectedExecution: PREVIEW_SELECTED_EXECUTION,
+    },
+  });
+  const overrideFile = await writeRoutingDecisionTask(overrideDecision);
+  const preview = await buildTaskAdmissionPreview(overrideFile, settingsWithGrokBuilder());
+  assert.equal(preview.routingExplanation.advisory!.selection, "manual-override");
+  assert.equal(preview.routingExplanation.advisory!.recommendedWorker!.workerProfileId, "local-grok-twin");
+  assert.equal(preview.routingExplanation.selectedWorker.workerProfileId, "local-grok-builder");
+  assert.equal(preview.routingExplanation.advisory!.selectedExecution.resolvedExecutionMode, "single-run");
+  const json = JSON.stringify(preview);
+  assert.ok(!json.includes("PRIVATE_M3B_NOTE_NEVER_PROJECT"));
+
+  const mismatch = routingDecisionFor("user-specified", {
+    advisory: {
+      overallResult: "cannot-determine",
+      selection: "selected-after-cannot-determine",
+      cannotDetermineReasons: ["insufficient-relevant-samples"],
+      selectedExecution: {
+        ...PREVIEW_SELECTED_EXECUTION,
+        resolvedExecutionMode: "native-goal",
+      },
+    },
+  });
+  const mismatchFile = await writeRoutingDecisionTask(mismatch);
+  await assert.rejects(
+    () => buildTaskAdmissionPreview(mismatchFile, settingsWithGrokBuilder()),
+    /does not match resolved Task executionMode/,
+  );
+});
+
+test("preview of a legacy routingDecision invents no advisory relationship", async () => {
+  const decision = routingDecisionFor("main-judgment");
+  const taskFile = await writeRoutingDecisionTask(decision);
+  const preview = await buildTaskAdmissionPreview(taskFile, settingsWithGrokBuilder());
+  assert.equal(preview.routingExplanation.present, true);
+  assert.equal(preview.routingExplanation.advisory, null);
+  const human = formatTaskAdmissionPreviewHuman(preview);
+  assert.doesNotMatch(human, /Advisory result:/);
 });
 
 test("human routing explanation renders selection, evidence and Competition concisely", async () => {
@@ -1376,16 +1513,46 @@ test("preview projects requested and resolved execution mode for auto Codex", as
   assert.equal(preview.execution.preference, "auto");
   assert.equal(preview.execution.mode, "native-goal");
   assert.equal(preview.execution.nativeGoalSupported, true);
+  assert.equal(preview.execution.persistentSessionSupported, false);
   const human = formatTaskAdmissionPreviewHuman(preview);
   assert.match(human, /Execution: requested=auto resolved=native-goal/);
+  assert.match(human, /native Goal supported/);
+  assert.match(human, /persistent session unsupported/);
 });
 
-test("forced native-goal preview fails closed on an unsupported Runtime", async () => {
+test("Grok 4.6 Xhigh preview freezes native-goal", async () => {
+  const { taskFile } = await writePreviewFixture({ workerProfileId: "grok-4-6-xhigh" });
+  const preview = await buildTaskAdmissionPreview(taskFile, cloneDefaults());
+  assert.equal(preview.provider, "xai");
+  assert.equal(preview.model, "grok-4.6");
+  assert.equal(preview.runtime, "grok-build");
+  assert.equal(preview.effort, "xhigh");
+  assert.equal(preview.execution.preference, "auto");
+  assert.equal(preview.execution.mode, "native-goal");
+  assert.equal(preview.execution.nativeGoalSupported, true);
+  assert.equal(preview.execution.persistentSessionSupported, true);
+  const human = formatTaskAdmissionPreviewHuman(preview);
+  assert.match(human, /Execution: requested=auto resolved=native-goal/);
+  assert.match(human, /native Goal supported/);
+  assert.match(human, /persistent session supported/);
+});
+
+test("forced native-goal preview admits on grok-build", async () => {
   const { taskFile } = await writePreviewFixture({ workerProfileId: "local-grok-builder" });
   const yaml = await readFile(taskFile, "utf8") + "\nexecutionPreference: native-goal\n";
   await writeFile(taskFile, yaml);
+  const preview = await buildTaskAdmissionPreview(taskFile, settingsWithGrokBuilder());
+  assert.equal(preview.execution.preference, "native-goal");
+  assert.equal(preview.execution.mode, "native-goal");
+  assert.equal(preview.execution.nativeGoalSupported, true);
+});
+
+test("forced native-goal preview fails closed on an unsupported Runtime", async () => {
+  const { taskFile } = await writePreviewFixture({});
+  const yaml = await readFile(taskFile, "utf8") + "\nexecutionPreference: native-goal\n";
+  await writeFile(taskFile, yaml);
   await assert.rejects(
-    () => buildTaskAdmissionPreview(taskFile, settingsWithGrokBuilder()),
+    () => buildTaskAdmissionPreview(taskFile, cloneDefaults()),
     /native-goal/,
   );
 });
@@ -1514,4 +1681,37 @@ test("legacy version 2 preview never carries a background", async () => {
   const { taskFile } = await writePreviewFixture({});
   const preview = await buildTaskAdmissionPreview(taskFile, cloneDefaults());
   assert.equal("background" in preview, false);
+});
+
+test("preview freezes an explicit review requirement and binds it in the digest", async () => {
+  const { taskFile } = await writePreviewFixture({});
+  const first = await buildTaskAdmissionPreview(taskFile, cloneDefaults());
+  assert.equal("reviewRequirement" in first, false);
+  assert.match(formatTaskAdmissionPreviewHuman(first), /Review requirement: \(legacy — none declared\)/);
+
+  const withReq = `${await readFile(taskFile, "utf8")}\nreviewRequirement:\n  requiredJudges: 2\n  reason: High-risk Integration and review authority\n`;
+  await writeFile(taskFile, withReq);
+  const second = await buildTaskAdmissionPreview(taskFile, cloneDefaults());
+  assert.deepEqual(second.reviewRequirement, {
+    requiredJudges: 2,
+    reason: "High-risk Integration and review authority",
+  });
+  assert.notEqual(second.previewRevisionDigest, first.previewRevisionDigest);
+  const human = formatTaskAdmissionPreviewHuman(second);
+  assert.match(human, /Review requirement: 2 judge\(s\) — High-risk Integration and review authority/);
+  assert.doesNotMatch(human, /SECRET_ENDPOINT|NEVER_LEAK/);
+});
+
+test("preview treats requiredJudges 0 as explicit skip evidence", async () => {
+  const { taskFile } = await writePreviewFixture({});
+  await writeFile(
+    taskFile,
+    `${await readFile(taskFile, "utf8")}\nreviewRequirement:\n  requiredJudges: 0\n  reason: Deterministic mechanical check\n`,
+  );
+  const preview = await buildTaskAdmissionPreview(taskFile, cloneDefaults());
+  assert.equal(preview.reviewRequirement?.requiredJudges, 0);
+  assert.match(
+    formatTaskAdmissionPreviewHuman(preview),
+    /Review requirement: explicit skip \(0\) — Deterministic mechanical check/,
+  );
 });

@@ -1,0 +1,2039 @@
+diff --git a/baseline/src/cli.ts b/workspace/src/cli.ts
+index e5a7c9a..4b94188 100755
+--- a/baseline/src/cli.ts
++++ b/workspace/src/cli.ts
+@@ -14,6 +14,10 @@ import type { DirectCodexSampleReview } from "./core/direct-codex-review.js";
+ import type { DirectCodexInboxItem } from "./core/direct-codex-workflow-service.js";
+ import type { MainUsageSample, MainUsageStatus } from "./core/main-token-usage.js";
+ import type { MainPairAssessResult, MainPairReport } from "./core/main-token-pair.js";
++import {
++  formatMainTokenValueReportHuman,
++  type MainTokenValueReport,
++} from "./core/main-token-value-report.js";
+ import { forklightHome } from "./core/config.js";
+ import { providerProbeBatchFailed } from "./core/provider-probe.js";
+ import { providerLabel, providerNames, providerReadiness } from "./core/providers.js";
+@@ -294,6 +298,8 @@ Usage:
+   forklight main-token assess --task-id <id> --comparison-id <id> --same-scope <true|false> --same-acceptance <true|false> --delegated-quality-not-lower <true|false> --direct-verification-ref <id> --delegated-integration-id <id> --reviewer main-codex --assessed-at <canonical-ISO> --schema-version 1 --confirm [--json]
+   forklight main-token pair-report --task-id <id> --comparison-id <id> [--json]
+       # pair-report is read-only; never starts work or invents a saving
++  forklight value-report --families <json-array> [--comparisons <json-array>] [--json]
++      # read-only family Main Token value report; never starts work or writes evidence
+   forklight direct-codex capture --usage <json-object> --metadata <json-object> [--json]
+   forklight direct-codex capture-task --task-id <id> --run-ref <ref> --usage <json-object> [--json]
+   forklight direct-codex inbox --task-class <class> --profile-id <id> [--json]
+@@ -1056,6 +1062,19 @@ function parseMainTokenBooleanFlag(options: DirectCodexCliOptions, flag: string)
+   throw new Error(`Invalid main-token option: ${flag}`);
+ }
+ 
++function parseValueReportStringArray(raw: string, flag: string): string[] {
++  let parsed: unknown;
++  try {
++    parsed = JSON.parse(raw);
++  } catch {
++    throw new Error(`Invalid ${flag} JSON array`);
++  }
++  if (!Array.isArray(parsed) || parsed.some((entry) => typeof entry !== "string")) {
++    throw new Error(`Invalid ${flag} JSON array`);
++  }
++  return parsed;
++}
++
+ function humanMainPairAssessLines(result: MainPairAssessResult): string {
+   const lines = [
+     `outcome: ${result.outcome}`,
+@@ -2071,6 +2090,28 @@ async function main(): Promise<void> {
+     throw new Error("Unknown main-token subcommand. Use: capture, status, assess, or pair-report.");
+   }
+ 
++  if (command === "value-report") {
++    const tokens = positional === undefined ? rest : [positional, ...rest];
++    const options = parseMainTokenOptions(tokens, ["--families", "--comparisons"]);
++    const families = parseValueReportStringArray(
++      requiredMainTokenOption(options, "--families"),
++      "--families",
++    );
++    const comparisonsRaw = options.values["--comparisons"];
++    const comparisons = comparisonsRaw === undefined
++      ? undefined
++      : parseValueReportStringArray(comparisonsRaw, "--comparisons");
++    await ensureDaemon();
++    const report = await daemonRequest<MainTokenValueReport>("main_token_value_report", {
++      families,
++      ...(comparisons === undefined ? {} : { comparisons }),
++    });
++    process.stdout.write(options.switches.has("--json")
++      ? `${JSON.stringify(report, null, 2)}\n`
++      : formatMainTokenValueReportHuman(report));
++    return;
++  }
++
+   if (command === "validate") {
+     const store = new StateStore(forklightHome());
+     try {
+diff --git a/workspace/src/core/main-token-value-report.ts b/workspace/src/core/main-token-value-report.ts
+new file mode 100644
+index 0000000..175f2a4
+--- /dev/null
++++ b/workspace/src/core/main-token-value-report.ts
+@@ -0,0 +1,954 @@
++// Read-only family Main Token value report (M4-C).
++// Reuses current M4-B pair reports and canonical Task economics/event reads.
++// Lists every in-scope accepted/rejected comparison. Proven-lower only from
++// a current accepted pair with strictly positive direct-minus-delegated.
++// Missing evidence is typed, never a zero sample. No hidden winner, FX,
++// percentage average, Worker/Main mix, or work creation.
++
++import { getTaskEconomicsReport } from "./task-economics-report.js";
++import {
++  MAIN_PAIR_METHOD,
++  readMainPairReport,
++  type MainPairAssessment,
++  type MainPairOutcome,
++  type MainPairPercentage,
++  type MainPairReason,
++  type MainPairReport,
++  type MainPairSaving,
++} from "./main-token-pair.js";
++import { normalizeMainUsageComparisonId } from "./main-token-usage.js";
++import type { StateStore } from "../state/store.js";
++import type { AttemptRecord, EventRecord, MainDirectDecisionRecord } from "./types.js";
++
++export const MAIN_VALUE_REPORT_SCHEMA_VERSION = 1 as const;
++export const MAIN_VALUE_REPORT_METHOD = MAIN_PAIR_METHOD;
++export const MAX_VALUE_REPORT_FAMILIES = 10 as const;
++export const MAX_VALUE_REPORT_COMPARISONS = 64 as const;
++
++export const MAIN_VALUE_REPORT_REASONS = [
++  "invalid-request",
++  "empty-store",
++  "uncovered-family",
++  "legacy-pair-contract-missing",
++  "comparison-identities-unavailable",
++  "comparison-not-found",
++  "comparison-family-mismatch",
++  "incomplete-evidence",
++  "stale-pair",
++  "rejected-pair",
++  "cannot-determine",
++  "not-strictly-positive",
++] as const;
++export type MainValueReportReason = (typeof MAIN_VALUE_REPORT_REASONS)[number];
++
++export type FamilyValueClaim = "proven-lower" | "cannot-determine";
++export type OverallValueClaim = "proven" | "cannot-determine";
++export type ComparisonListingStatus =
++  | "accepted"
++  | "rejected"
++  | "stale"
++  | "incomplete"
++  | "legacy"
++  | "absent";
++export type EvidenceCompleteness = "complete" | "incomplete" | "unavailable";
++
++export interface CountedTokenEvidence {
++  readonly status: EvidenceCompleteness;
++  readonly reason?: string;
++  readonly grossTokens?: number;
++  readonly completeCount: number;
++  readonly incompleteCount: number;
++  readonly denominator: number;
++}
++
++export interface RuntimeEstimateEvidence {
++  readonly status: EvidenceCompleteness;
++  readonly reason?: string;
++  readonly observedTotalUsd?: number;
++  readonly sampleCount: number;
++  readonly missingCount: number;
++  readonly denominator: number;
++}
++
++export interface OfficialNativeCurrencyTotal {
++  readonly currency: string;
++  readonly total: number;
++  readonly quotedCount: number;
++  readonly sources: readonly string[];
++  readonly providerBillClaim: boolean;
++}
++
++export interface OfficialNativeCurrencyRange {
++  readonly currency: string;
++  readonly min: number;
++  readonly max: number;
++  readonly rangedAttemptCount: number;
++  readonly sources: readonly string[];
++}
++
++export interface OfficialCostEvidence {
++  readonly status: "quoted" | "ranged" | "mixed" | "unavailable";
++  readonly reason?: string;
++  readonly totals: readonly OfficialNativeCurrencyTotal[];
++  readonly ranges: readonly OfficialNativeCurrencyRange[];
++  readonly unavailableCount: number;
++  readonly unavailableBreakdown: Readonly<Record<string, number>>;
++}
++
++export interface ElapsedEvidence {
++  readonly status: EvidenceCompleteness;
++  readonly reason?: string;
++  readonly totalMs?: number;
++  readonly measuredCount: number;
++  readonly unmeasuredCount: number;
++  readonly denominator: number;
++}
++
++export interface MainDirectElapsedEvidence {
++  readonly status: EvidenceCompleteness;
++  readonly reason?: string;
++  readonly binding: "task-family";
++  readonly totalMs?: number;
++  readonly closedCount: number;
++  readonly openCount: number;
++  readonly unmeasuredCount: number;
++  readonly denominator: number;
++}
++
++export interface CorrectionHandoffEvidence {
++  readonly status: EvidenceCompleteness;
++  readonly reason?: string;
++  readonly workerValidationRepairCount: number;
++  readonly mainCorrectionCount: number;
++  readonly mainReverificationCount: number;
++  readonly handoffCount: number;
++  readonly attemptCount: number;
++  readonly eventCount: number;
++}
++
++export interface DelegatedDeliveryValue {
++  readonly workerTokens: CountedTokenEvidence;
++  readonly runtimeEstimate: RuntimeEstimateEvidence;
++  readonly officialCost: OfficialCostEvidence;
++  readonly attemptElapsed: ElapsedEvidence;
++  readonly corrections: CorrectionHandoffEvidence;
++}
++
++export interface ValueComparisonEntry {
++  readonly comparisonId: string;
++  readonly forklightTaskId?: string;
++  readonly taskFamily?: string;
++  readonly taskClass?: string;
++  readonly directCodexProfileId?: string;
++  readonly method: typeof MAIN_VALUE_REPORT_METHOD;
++  readonly pairValidity: MainPairOutcome | "absent";
++  readonly pairReasons: readonly MainPairReason[];
++  readonly listingStatus: ComparisonListingStatus;
++  readonly contributesProvenLower: boolean;
++  readonly directGrossTokens?: number;
++  readonly delegatedGrossTokens?: number;
++  readonly signedChange?: number;
++  readonly percentageChange: MainPairPercentage;
++  readonly saving: MainPairSaving;
++  readonly qualityGates?: {
++    readonly sameScope: true;
++    readonly sameAcceptance: true;
++    readonly delegatedQualityNotLower: true;
++  };
++  readonly evidence?: MainPairReport["evidence"];
++  readonly deliveryValue: DelegatedDeliveryValue;
++}
++
++export interface FamilyValueSection {
++  readonly taskFamily: string;
++  readonly claim: FamilyValueClaim;
++  readonly reasons: readonly MainValueReportReason[];
++  readonly comparisons: readonly ValueComparisonEntry[];
++  readonly acceptedPairCount: number;
++  readonly rejectedPairCount: number;
++  readonly provenLowerPairCount: number;
++  readonly mainDirectElapsed: MainDirectElapsedEvidence;
++}
++
++export interface MainTokenValueReport {
++  readonly schemaVersion: typeof MAIN_VALUE_REPORT_SCHEMA_VERSION;
++  readonly method: typeof MAIN_VALUE_REPORT_METHOD;
++  readonly requestedFamilies: readonly string[];
++  readonly requestedComparisons: readonly string[];
++  readonly overall: OverallValueClaim;
++  readonly reasons: readonly MainValueReportReason[];
++  readonly confidence: OverallValueClaim;
++  readonly families: readonly FamilyValueSection[];
++  readonly createdWork: false;
++}
++
++const REQUEST_KEYS: ReadonlySet<string> = new Set(["families", "comparisons"]);
++const RAW_FIELDS: ReadonlySet<string> = new Set([
++  "text", "content", "prompt", "body", "payload", "raw", "secret", "credential",
++  "log", "response", "request", "sourceText", "sourceHash", "diff", "path",
++  "notes", "note", "reason", "detail",
++]);
++const REPORT_FORBIDDEN_KEYS: ReadonlySet<string> = new Set([
++  "change", "savings", "directCodexSavings", "familyValue", "calibration",
++  "workerMainTotal", "fxTotal", "averagePercentage", "bestPair", "ranking",
++  "prompt", "response", "source", "diff", "path", "log", "credential", "note",
++]);
++const TASK_LABEL = /^[^\s].{0,79}$/;
++const REASON_RANK = new Map(MAIN_VALUE_REPORT_REASONS.map((reason, index) => [reason, index]));
++
++function freezeDeep(value: unknown): void {
++  if (value === null || typeof value !== "object" || Object.isFrozen(value)) return;
++  if (Array.isArray(value)) {
++    for (const entry of value) freezeDeep(entry);
++  } else {
++    for (const entry of Object.values(value)) freezeDeep(entry);
++  }
++  Object.freeze(value);
++}
++
++const hasOwn = (object: object, key: string): boolean =>
++  Object.prototype.hasOwnProperty.call(object, key);
++
++function uniqueSortedReasons(reasons: readonly MainValueReportReason[]): MainValueReportReason[] {
++  return [...new Set(reasons)].sort((left, right) =>
++    (REASON_RANK.get(left) ?? 99) - (REASON_RANK.get(right) ?? 99),
++  );
++}
++
++function emptyPercentage(): MainPairPercentage {
++  return { available: false, reason: "totals-unavailable" };
++}
++
++function unavailableTokens(reason: string): CountedTokenEvidence {
++  return { status: "unavailable", reason, completeCount: 0, incompleteCount: 0, denominator: 0 };
++}
++
++function unavailableRuntime(reason: string): RuntimeEstimateEvidence {
++  return { status: "unavailable", reason, sampleCount: 0, missingCount: 0, denominator: 0 };
++}
++
++function unavailableOfficial(reason: string): OfficialCostEvidence {
++  return {
++    status: "unavailable",
++    reason,
++    totals: [],
++    ranges: [],
++    unavailableCount: 0,
++    unavailableBreakdown: {},
++  };
++}
++
++function unavailableElapsed(reason: string): ElapsedEvidence {
++  return { status: "unavailable", reason, measuredCount: 0, unmeasuredCount: 0, denominator: 0 };
++}
++
++function unavailableCorrections(reason: string): CorrectionHandoffEvidence {
++  return {
++    status: "unavailable",
++    reason,
++    workerValidationRepairCount: 0,
++    mainCorrectionCount: 0,
++    mainReverificationCount: 0,
++    handoffCount: 0,
++    attemptCount: 0,
++    eventCount: 0,
++  };
++}
++
++function unavailableDelivery(reason: string): DelegatedDeliveryValue {
++  return {
++    workerTokens: unavailableTokens(reason),
++    runtimeEstimate: unavailableRuntime(reason),
++    officialCost: unavailableOfficial(reason),
++    attemptElapsed: unavailableElapsed(reason),
++    corrections: unavailableCorrections(reason),
++  };
++}
++
++function unavailableMainDirect(reason: string): MainDirectElapsedEvidence {
++  return {
++    status: "unavailable",
++    reason,
++    binding: "task-family",
++    closedCount: 0,
++    openCount: 0,
++    unmeasuredCount: 0,
++    denominator: 0,
++  };
++}
++
++type ParsedRequest =
++  | {
++    ok: true;
++    families: readonly string[];
++    comparisons: readonly string[];
++    filterActive: boolean;
++  }
++  | { ok: false; families: readonly string[]; comparisons: readonly string[] };
++
++function parseStringList(value: unknown, max: number): string[] | undefined {
++  if (!Array.isArray(value) || value.length > max) return undefined;
++  const items: string[] = [];
++  const seen = new Set<string>();
++  for (const entry of value) {
++    if (typeof entry !== "string" || entry !== entry.trim() || !TASK_LABEL.test(entry)) {
++      return undefined;
++    }
++    if (seen.has(entry)) return undefined;
++    seen.add(entry);
++    items.push(entry);
++  }
++  return items;
++}
++
++function parseRequest(params: unknown): ParsedRequest {
++  if (params === null || typeof params !== "object" || Array.isArray(params)) {
++    return { ok: false, families: [], comparisons: [] };
++  }
++  const raw = params as Record<string, unknown>;
++  for (const key of Object.keys(raw)) {
++    if (!REQUEST_KEYS.has(key) || RAW_FIELDS.has(key)) {
++      return { ok: false, families: [], comparisons: [] };
++    }
++  }
++  if (!hasOwn(raw, "families")) return { ok: false, families: [], comparisons: [] };
++  const families = parseStringList(raw.families, MAX_VALUE_REPORT_FAMILIES);
++  if (families === undefined || families.length < 1) {
++    return { ok: false, families: [], comparisons: [] };
++  }
++  if (!hasOwn(raw, "comparisons") || raw.comparisons === undefined) {
++    return { ok: true, families, comparisons: [], filterActive: false };
++  }
++  if (!Array.isArray(raw.comparisons)) return { ok: false, families, comparisons: [] };
++  if (raw.comparisons.length === 0) {
++    return { ok: true, families, comparisons: [], filterActive: false };
++  }
++  if (raw.comparisons.length > MAX_VALUE_REPORT_COMPARISONS) {
++    return { ok: false, families, comparisons: [] };
++  }
++  const comparisons: string[] = [];
++  const seen = new Set<string>();
++  for (const entry of raw.comparisons) {
++    let comparisonId: string;
++    try {
++      comparisonId = normalizeMainUsageComparisonId(entry);
++    } catch {
++      return { ok: false, families, comparisons: [] };
++    }
++    if (seen.has(comparisonId)) return { ok: false, families, comparisons: [] };
++    seen.add(comparisonId);
++    comparisons.push(comparisonId);
++  }
++  return { ok: true, families, comparisons, filterActive: true };
++}
++
++interface ComparisonIdentity {
++  readonly comparisonId: string;
++  readonly forklightTaskId?: string;
++  readonly taskFamily?: string;
++}
++
++interface SqliteLike {
++  prepare(sql: string): { all: (...params: unknown[]) => unknown };
++}
++
++function peekLiveSqlite(store: object): SqliteLike | undefined {
++  const db = (store as { db?: unknown }).db;
++  if (db === null || typeof db !== "object") return undefined;
++  if (typeof (db as { prepare?: unknown }).prepare !== "function") return undefined;
++  return db as SqliteLike;
++}
++
++/** Read comparison ids from the live Store connection. This is not a second
++ *  database client and adds no schema; store.ts has no family enumerator. */
++function discoverStoredComparisonIds(store: StateStore): string[] | undefined {
++  const db = peekLiveSqlite(store);
++  if (db === undefined) return undefined;
++  try {
++    const sampleRows = db.prepare(
++      "SELECT DISTINCT comparison_id AS id FROM main_usage_samples",
++    ).all() as Array<{ id?: unknown }>;
++    const assessmentRows = db.prepare(
++      "SELECT comparison_id AS id FROM main_pair_assessments",
++    ).all() as Array<{ id?: unknown }>;
++    const ids = new Set<string>();
++    for (const row of [...sampleRows, ...assessmentRows]) {
++      if (typeof row?.id !== "string") continue;
++      try {
++        ids.add(normalizeMainUsageComparisonId(row.id));
++      } catch {
++        // Skip unreadable identities rather than inventing a sample.
++      }
++    }
++    return [...ids];
++  } catch {
++    return undefined;
++  }
++}
++
++function resolveIdentity(store: StateStore, comparisonId: string): ComparisonIdentity {
++  const assessment = store.getMainPairAssessmentByComparison(comparisonId);
++  const samples = store.listMainUsageSamplesByComparison(comparisonId);
++  const sample = samples[0];
++  const forklightTaskId = assessment?.forklightTaskId ?? sample?.forklightTaskId;
++  let taskFamily = assessment?.taskFamily ?? sample?.taskFamily;
++  if (taskFamily === undefined && forklightTaskId !== undefined) {
++    try {
++      taskFamily = store.getTask(forklightTaskId).spec.taskFamily;
++    } catch {
++      // Task identity remains optional; missing is not a zero family.
++    }
++  }
++  return {
++    comparisonId,
++    ...(forklightTaskId === undefined ? {} : { forklightTaskId }),
++    ...(taskFamily === undefined ? {} : { taskFamily }),
++  };
++}
++
++function safePairReport(store: StateStore, taskId: string, comparisonId: string): MainPairReport | undefined {
++  try {
++    return readMainPairReport(store, taskId, comparisonId);
++  } catch {
++    return undefined;
++  }
++}
++
++function listingStatus(
++  assessment: MainPairAssessment | undefined,
++  pair: MainPairReport | undefined,
++): ComparisonListingStatus {
++  if (pair === undefined && assessment === undefined) return "absent";
++  if (assessment?.decision === "rejected") return "rejected";
++  if (assessment?.decision === "accepted" && pair?.validity === "accepted") return "accepted";
++  if (assessment?.decision === "accepted") return "stale";
++  if (pair?.reasons.includes("legacy-pair-contract-missing")) return "legacy";
++  return "incomplete";
++}
++
++function elapsedMs(startedAt: string, finishedAt: string): number | undefined {
++  const started = Date.parse(startedAt);
++  const finished = Date.parse(finishedAt);
++  if (!Number.isFinite(started) || !Number.isFinite(finished) || finished < started) return undefined;
++  return finished - started;
++}
++
++function projectAttemptElapsed(attempts: readonly AttemptRecord[]): ElapsedEvidence {
++  if (attempts.length === 0) return unavailableElapsed("no-attempts");
++  let totalMs = 0;
++  let measured = 0;
++  let unmeasured = 0;
++  for (const attempt of attempts) {
++    if (attempt.finishedAt === undefined) {
++      unmeasured += 1;
++      continue;
++    }
++    const duration = elapsedMs(attempt.startedAt, attempt.finishedAt);
++    if (duration === undefined) {
++      unmeasured += 1;
++      continue;
++    }
++    totalMs += duration;
++    measured += 1;
++  }
++  if (measured === 0) {
++    return {
++      status: "unavailable",
++      reason: "attempt-timestamps-unavailable",
++      measuredCount: 0,
++      unmeasuredCount: unmeasured,
++      denominator: attempts.length,
++    };
++  }
++  return {
++    status: unmeasured === 0 ? "complete" : "incomplete",
++    ...(unmeasured === 0 ? {} : { reason: "attempt-timestamps-incomplete" }),
++    totalMs,
++    measuredCount: measured,
++    unmeasuredCount: unmeasured,
++    denominator: attempts.length,
++  };
++}
++
++function projectMainDirectElapsed(
++  decisions: readonly MainDirectDecisionRecord[],
++  taskFamily: string,
++): MainDirectElapsedEvidence {
++  const scoped = decisions.filter((decision) => decision.taskFamily === taskFamily);
++  if (scoped.length === 0) return unavailableMainDirect("no-main-direct-episode");
++  let totalMs = 0;
++  let closed = 0;
++  let open = 0;
++  let unmeasured = 0;
++  for (const decision of scoped) {
++    const closedAt = decision.closedState?.closedAt;
++    if (closedAt === undefined) {
++      open += 1;
++      continue;
++    }
++    const duration = elapsedMs(decision.startedAt, closedAt);
++    if (duration === undefined) {
++      unmeasured += 1;
++      continue;
++    }
++    totalMs += duration;
++    closed += 1;
++  }
++  if (closed === 0) {
++    return {
++      status: "unavailable",
++      reason: "main-direct-episode-open-or-unmeasured",
++      binding: "task-family",
++      closedCount: 0,
++      openCount: open,
++      unmeasuredCount: unmeasured,
++      denominator: scoped.length,
++    };
++  }
++  return {
++    status: open === 0 && unmeasured === 0 ? "complete" : "incomplete",
++    ...(open === 0 && unmeasured === 0 ? {} : { reason: "main-direct-episode-incomplete" }),
++    binding: "task-family",
++    totalMs,
++    closedCount: closed,
++    openCount: open,
++    unmeasuredCount: unmeasured,
++    denominator: scoped.length,
++  };
++}
++
++function projectCorrections(
++  store: StateStore,
++  taskId: string,
++  attempts: readonly AttemptRecord[],
++  events: readonly EventRecord[],
++): CorrectionHandoffEvidence {
++  let handoffCount = 0;
++  try {
++    handoffCount = store.listCandidateHandoffsBySourceTaskId(taskId).length;
++  } catch {
++    handoffCount = events.filter((event) => event.type === "candidate.handoff.authorized").length;
++  }
++  const kindCorrections = attempts.filter((attempt) => attempt.executionKind === "main-correction").length;
++  const reviseCorrections = events.filter((event) => event.type === "task.revise.requested").length;
++  return {
++    status: "complete",
++    workerValidationRepairCount: events.filter((event) => event.type === "worker.validation-repair.authorized").length,
++    mainCorrectionCount: kindCorrections > 0 ? kindCorrections : reviseCorrections,
++    mainReverificationCount: events.filter((event) => event.type === "candidate.reverification.authorized").length,
++    handoffCount,
++    attemptCount: attempts.length,
++    eventCount: events.length,
++  };
++}
++
++function projectDeliveryValue(store: StateStore, taskId: string | undefined): DelegatedDeliveryValue {
++  if (taskId === undefined) return unavailableDelivery("delegated-task-unavailable");
++  let attempts: AttemptRecord[];
++  let events: EventRecord[];
++  try {
++    attempts = store.listAttempts(taskId);
++    events = store.listEvents(taskId);
++  } catch {
++    return unavailableDelivery("delegated-task-unavailable");
++  }
++
++  let workerTokens = unavailableTokens("task-economics-unavailable");
++  let runtimeEstimate = unavailableRuntime("task-economics-unavailable");
++  let officialCost = unavailableOfficial("task-economics-unavailable");
++  try {
++    const economics = getTaskEconomicsReport(store, taskId);
++    if (attempts.length === 0) {
++      workerTokens = unavailableTokens("no-attempts");
++      runtimeEstimate = unavailableRuntime("no-attempts");
++      officialCost = unavailableOfficial("no-attempts");
++    } else {
++      const volume = economics.tokenReport.report.workerVolume;
++      if (volume.kind === "complete") {
++        workerTokens = {
++          status: "complete",
++          grossTokens: volume.grossWorkerTokens,
++          completeCount: volume.sampleCount,
++          incompleteCount: 0,
++          denominator: attempts.length,
++        };
++      } else {
++        workerTokens = {
++          status: "incomplete",
++          reason: "worker-usage-incomplete",
++          ...(volume.completeSampleCount > 0 ? { grossTokens: volume.grossWorkerTokens } : {}),
++          completeCount: volume.completeSampleCount,
++          incompleteCount: volume.missingSampleCount,
++          denominator: attempts.length,
++        };
++      }
++      const runtime = economics.runtimeEstimate;
++      runtimeEstimate = {
++        status: runtime.complete ? "complete" : "incomplete",
++        ...(runtime.complete ? {} : { reason: "runtime-estimate-incomplete" }),
++        ...(runtime.sampleCount > 0 ? { observedTotalUsd: runtime.observedTotalUsd } : {}),
++        sampleCount: runtime.sampleCount,
++        missingCount: runtime.missingCount,
++        denominator: attempts.length,
++      };
++      const totals: OfficialNativeCurrencyTotal[] = economics.officialCost.totals.map((total) => ({
++        currency: total.currency,
++        total: total.total,
++        quotedCount: total.quotedCount,
++        sources: total.sources,
++        providerBillClaim: total.providerBillClaim,
++      }));
++      const ranges: OfficialNativeCurrencyRange[] = economics.officialCost.ranges.map((range) => ({
++        currency: range.currency,
++        min: range.min,
++        max: range.max,
++        rangedAttemptCount: range.rangedAttemptCount,
++        sources: range.sources,
++      }));
++      const unavailableCount = economics.officialCost.unavailable.unavailableCount;
++      let status: OfficialCostEvidence["status"] = "unavailable";
++      let reason: string | undefined = "official-cost-unavailable";
++      if (totals.length > 0 && unavailableCount === 0 && ranges.length === 0) {
++        status = "quoted";
++        reason = undefined;
++      } else if (totals.length === 0 && ranges.length > 0) {
++        status = "ranged";
++        reason = "official-cost-range-only";
++      } else if (totals.length > 0 || ranges.length > 0) {
++        status = "mixed";
++        reason = "official-cost-incomplete";
++      }
++      officialCost = {
++        status,
++        ...(reason === undefined ? {} : { reason }),
++        totals,
++        ranges,
++        unavailableCount,
++        unavailableBreakdown: economics.officialCost.unavailable.breakdown,
++      };
++    }
++  } catch {
++    if (attempts.length === 0) {
++      workerTokens = unavailableTokens("no-attempts");
++      runtimeEstimate = unavailableRuntime("no-attempts");
++      officialCost = unavailableOfficial("no-attempts");
++    }
++  }
++
++  return {
++    workerTokens,
++    runtimeEstimate,
++    officialCost,
++    attemptElapsed: projectAttemptElapsed(attempts),
++    corrections: projectCorrections(store, taskId, attempts, events),
++  };
++}
++
++function buildComparisonEntry(
++  store: StateStore,
++  identity: ComparisonIdentity,
++): ValueComparisonEntry {
++  const assessment = store.getMainPairAssessmentByComparison(identity.comparisonId);
++  const pair = identity.forklightTaskId === undefined
++    ? undefined
++    : safePairReport(store, identity.forklightTaskId, identity.comparisonId);
++  const status = listingStatus(assessment, pair);
++  const acceptedCurrent = status === "accepted" && pair?.validity === "accepted";
++  const signedChange = pair?.signedChange;
++  const contributesProvenLower = acceptedCurrent
++    && typeof signedChange === "number"
++    && signedChange > 0;
++  const qualityGates = acceptedCurrent
++    && assessment?.sameScope === true
++    && assessment.sameAcceptance === true
++    && assessment.delegatedQualityNotLower === true
++    ? {
++      sameScope: true as const,
++      sameAcceptance: true as const,
++      delegatedQualityNotLower: true as const,
++    }
++    : undefined;
++  const taskFamily = identity.taskFamily ?? pair?.taskFamily;
++  const taskClass = pair?.taskClass ?? assessment?.taskClass;
++  const directCodexProfileId = pair?.directCodexProfileId ?? assessment?.directCodexProfileId;
++  const directGrossTokens = pair?.directGrossTokens;
++  const delegatedGrossTokens = pair?.delegatedGrossTokens;
++  const evidence = pair?.evidence;
++  const entry: ValueComparisonEntry = {
++    comparisonId: identity.comparisonId,
++    ...(identity.forklightTaskId === undefined ? {} : { forklightTaskId: identity.forklightTaskId }),
++    ...(taskFamily === undefined ? {} : { taskFamily }),
++    ...(taskClass === undefined ? {} : { taskClass }),
++    ...(directCodexProfileId === undefined ? {} : { directCodexProfileId }),
++    method: MAIN_VALUE_REPORT_METHOD,
++    pairValidity: pair?.validity ?? "absent",
++    pairReasons: pair?.reasons ?? (status === "absent" ? [] : ["incomplete-evidence"]),
++    listingStatus: status,
++    contributesProvenLower,
++    ...(directGrossTokens === undefined ? {} : { directGrossTokens }),
++    ...(delegatedGrossTokens === undefined ? {} : { delegatedGrossTokens }),
++    ...(signedChange === undefined ? {} : { signedChange }),
++    percentageChange: pair?.percentageChange ?? emptyPercentage(),
++    saving: pair?.saving ?? { status: "unavailable" },
++    ...(qualityGates === undefined ? {} : { qualityGates }),
++    ...(evidence === undefined ? {} : { evidence }),
++    deliveryValue: projectDeliveryValue(store, identity.forklightTaskId),
++  };
++  return entry;
++}
++
++function familyReasons(
++  comparisons: readonly ValueComparisonEntry[],
++  provenLower: boolean,
++  uncovered: boolean,
++  legacyOnly: boolean,
++  identitiesUnavailable: boolean,
++): MainValueReportReason[] {
++  if (identitiesUnavailable) return ["comparison-identities-unavailable"];
++  if (uncovered) return ["uncovered-family"];
++  if (legacyOnly) return ["legacy-pair-contract-missing"];
++  if (provenLower) return [];
++  const reasons: MainValueReportReason[] = [];
++  if (comparisons.some((entry) => entry.listingStatus === "stale")) reasons.push("stale-pair");
++  if (comparisons.some((entry) => entry.listingStatus === "rejected")) reasons.push("rejected-pair");
++  if (comparisons.some((entry) => entry.listingStatus === "incomplete" || entry.listingStatus === "absent")) {
++    reasons.push("incomplete-evidence");
++  }
++  if (comparisons.some((entry) => entry.listingStatus === "legacy")) {
++    reasons.push("legacy-pair-contract-missing");
++  }
++  if (comparisons.some((entry) =>
++    entry.listingStatus === "accepted" && typeof entry.signedChange === "number" && entry.signedChange <= 0
++  )) {
++    reasons.push("not-strictly-positive");
++  }
++  if (reasons.length === 0) reasons.push("cannot-determine");
++  return uniqueSortedReasons(reasons);
++}
++
++function emptyReport(
++  families: readonly string[],
++  comparisons: readonly string[],
++  reasons: readonly MainValueReportReason[],
++): MainTokenValueReport {
++  const report: MainTokenValueReport = {
++    schemaVersion: MAIN_VALUE_REPORT_SCHEMA_VERSION,
++    method: MAIN_VALUE_REPORT_METHOD,
++    requestedFamilies: families,
++    requestedComparisons: comparisons,
++    overall: "cannot-determine",
++    reasons: uniqueSortedReasons(reasons),
++    confidence: "cannot-determine",
++    families: families.map((taskFamily) => ({
++      taskFamily,
++      claim: "cannot-determine",
++      reasons: uniqueSortedReasons(
++        reasons.includes("invalid-request") ? ["invalid-request"] : ["cannot-determine"],
++      ),
++      comparisons: [],
++      acceptedPairCount: 0,
++      rejectedPairCount: 0,
++      provenLowerPairCount: 0,
++      mainDirectElapsed: unavailableMainDirect("not-evaluated"),
++    })),
++    createdWork: false,
++  };
++  freezeDeep(report);
++  return report;
++}
++
++function storeIsEmpty(store: StateStore): boolean {
++  return store.listTasks().length === 0
++    && store.countMainUsageSamples() === 0
++    && store.countMainPairAssessments() === 0;
++}
++
++function familyHasLegacyOnly(
++  store: StateStore,
++  taskFamily: string,
++  comparisons: readonly ValueComparisonEntry[],
++): boolean {
++  if (comparisons.length > 0) return false;
++  const tasks = store.listTasks().filter((task) => task.spec.taskFamily === taskFamily);
++  if (tasks.length === 0) return false;
++  return tasks.some((task) => store.hasLegacyMainPairEvidence(task.id));
++}
++
++/** One immutable family value report. Never mutates Store or Milestone truth. */
++export function readMainTokenValueReport(store: StateStore, params: unknown): MainTokenValueReport {
++  const request = parseRequest(params);
++  if (!request.ok) return emptyReport(request.families, request.comparisons, ["invalid-request"]);
++
++  const overallReasons: MainValueReportReason[] = [];
++  if (storeIsEmpty(store)) overallReasons.push("empty-store");
++
++  let discoveryComplete = true;
++  let discoveredIds: string[];
++  if (request.filterActive) {
++    discoveredIds = [...request.comparisons];
++  } else {
++    const stored = discoverStoredComparisonIds(store);
++    if (stored === undefined) {
++      const knownCount = store.countMainUsageSamples() + store.countMainPairAssessments();
++      if (knownCount > 0) {
++        discoveryComplete = false;
++        overallReasons.push("comparison-identities-unavailable");
++      }
++      discoveredIds = [];
++    } else {
++      discoveredIds = stored;
++    }
++  }
++
++  const identities = discoveredIds.map((comparisonId) => resolveIdentity(store, comparisonId));
++  const byFamily = new Map<string, ComparisonIdentity[]>();
++  for (const family of request.families) byFamily.set(family, []);
++
++  for (const identity of identities) {
++    if (identity.forklightTaskId === undefined && identity.taskFamily === undefined) {
++      if (request.filterActive) overallReasons.push("comparison-not-found");
++      continue;
++    }
++    const family = identity.taskFamily;
++    if (family === undefined || !byFamily.has(family)) {
++      if (request.filterActive) overallReasons.push("comparison-family-mismatch");
++      continue;
++    }
++    byFamily.get(family)!.push(identity);
++  }
++
++  let mainDirectDecisions: MainDirectDecisionRecord[] = [];
++  try {
++    mainDirectDecisions = store.listMainDirectDecisions();
++  } catch {
++    mainDirectDecisions = [];
++  }
++
++  const families: FamilyValueSection[] = request.families.map((taskFamily) => {
++    const scoped = (byFamily.get(taskFamily) ?? [])
++      .slice()
++      .sort((left, right) => left.comparisonId.localeCompare(right.comparisonId));
++    const comparisons = scoped.map((identity) => buildComparisonEntry(store, identity));
++    const provenLowerPairCount = comparisons.filter((entry) => entry.contributesProvenLower).length;
++    const acceptedPairCount = comparisons.filter((entry) => entry.listingStatus === "accepted").length;
++    const rejectedPairCount = comparisons.filter((entry) => entry.listingStatus === "rejected").length;
++    const identitiesUnavailable = !discoveryComplete && !request.filterActive;
++    const legacyOnly = familyHasLegacyOnly(store, taskFamily, comparisons);
++    const uncovered = !identitiesUnavailable && comparisons.length === 0 && !legacyOnly;
++    const provenLower = provenLowerPairCount > 0 && !identitiesUnavailable;
++    const reasons = familyReasons(comparisons, provenLower, uncovered && comparisons.length === 0, legacyOnly, identitiesUnavailable);
++    const claim: FamilyValueClaim = provenLower ? "proven-lower" : "cannot-determine";
++    return {
++      taskFamily,
++      claim,
++      reasons,
++      comparisons,
++      acceptedPairCount,
++      rejectedPairCount,
++      provenLowerPairCount,
++      mainDirectElapsed: projectMainDirectElapsed(mainDirectDecisions, taskFamily),
++    };
++  });
++
++  for (const family of families) overallReasons.push(...family.reasons);
++  const overall: OverallValueClaim = families.length > 0 && families.every((family) => family.claim === "proven-lower")
++    ? "proven"
++    : "cannot-determine";
++  if (overall !== "proven" && overallReasons.length === 0) overallReasons.push("cannot-determine");
++
++  const report: MainTokenValueReport = {
++    schemaVersion: MAIN_VALUE_REPORT_SCHEMA_VERSION,
++    method: MAIN_VALUE_REPORT_METHOD,
++    requestedFamilies: request.families,
++    requestedComparisons: request.comparisons,
++    overall,
++    reasons: uniqueSortedReasons(overallReasons),
++    confidence: overall,
++    families,
++    createdWork: false,
++  };
++  for (const key of Object.keys(report)) {
++    if (REPORT_FORBIDDEN_KEYS.has(key)) throw new TypeError("Invalid Main Token value report");
++  }
++  freezeDeep(report);
++  return report;
++}
++
++function formatPercentage(change: MainPairPercentage): string {
++  return change.available ? String(change.value) : `unavailable (${change.reason})`;
++}
++
++function formatTokenEvidence(evidence: CountedTokenEvidence): string {
++  if (evidence.status === "unavailable") return `unavailable (${evidence.reason ?? "unavailable"})`;
++  const tokens = evidence.grossTokens === undefined ? "present-incomplete" : String(evidence.grossTokens);
++  return `${evidence.status} ${tokens} (${evidence.completeCount}/${evidence.denominator})`;
++}
++
++function formatRuntime(evidence: RuntimeEstimateEvidence): string {
++  if (evidence.status === "unavailable") return `unavailable (${evidence.reason ?? "unavailable"})`;
++  const amount = evidence.observedTotalUsd === undefined ? "present-incomplete" : String(evidence.observedTotalUsd);
++  return `${evidence.status} ${amount} (${evidence.sampleCount}/${evidence.denominator})`;
++}
++
++function formatOfficial(evidence: OfficialCostEvidence): string {
++  if (evidence.status === "unavailable") return `unavailable (${evidence.reason ?? "unavailable"})`;
++  const totals = evidence.totals.map((total) => `${total.currency}:${total.total}`).join(",") || "(none)";
++  const ranges = evidence.ranges.map((range) => `${range.currency}:${range.min}-${range.max}`).join(",") || "(none)";
++  return `${evidence.status} totals=${totals} ranges=${ranges} unavailable=${evidence.unavailableCount}`;
++}
++
++function formatElapsed(evidence: ElapsedEvidence): string {
++  if (evidence.status === "unavailable") return `unavailable (${evidence.reason ?? "unavailable"})`;
++  return `${evidence.status} ${evidence.totalMs ?? "(none)"}ms (${evidence.measuredCount}/${evidence.denominator})`;
++}
++
++function formatMainDirect(evidence: MainDirectElapsedEvidence): string {
++  if (evidence.status === "unavailable") return `unavailable (${evidence.reason ?? "unavailable"})`;
++  return `${evidence.status} ${evidence.totalMs ?? "(none)"}ms closed=${evidence.closedCount}/${evidence.denominator} binding=${evidence.binding}`;
++}
++
++export function formatMainTokenValueReportHuman(report: MainTokenValueReport): string {
++  const lines = [
++    `overall: ${report.overall}`,
++    `reasons: ${report.reasons.join(", ") || "(none)"}`,
++    `confidence: ${report.confidence}`,
++    `method: ${report.method}`,
++    `createdWork: ${report.createdWork}`,
++    `schemaVersion: ${report.schemaVersion}`,
++  ];
++  for (const family of report.families) {
++    lines.push(`family: ${family.taskFamily}`);
++    lines.push(`  claim: ${family.claim}`);
++    lines.push(`  reasons: ${family.reasons.join(", ") || "(none)"}`);
++    lines.push(`  acceptedPairCount: ${family.acceptedPairCount}`);
++    lines.push(`  rejectedPairCount: ${family.rejectedPairCount}`);
++    lines.push(`  provenLowerPairCount: ${family.provenLowerPairCount}`);
++    lines.push(`  mainDirectElapsed: ${formatMainDirect(family.mainDirectElapsed)}`);
++    if (family.comparisons.length === 0) {
++      lines.push("  comparisons: (none)");
++      continue;
++    }
++    for (const comparison of family.comparisons) {
++      lines.push(`  comparison: ${comparison.comparisonId}`);
++      lines.push(`    pairValidity: ${comparison.pairValidity}`);
++      lines.push(`    listingStatus: ${comparison.listingStatus}`);
++      lines.push(`    pairReasons: ${comparison.pairReasons.join(", ") || "(none)"}`);
++      lines.push(`    directGrossTokens: ${comparison.directGrossTokens ?? "(none)"}`);
++      lines.push(`    delegatedGrossTokens: ${comparison.delegatedGrossTokens ?? "(none)"}`);
++      lines.push(`    signedChange: ${comparison.signedChange ?? "(none)"}`);
++      lines.push(`    percentageChange: ${formatPercentage(comparison.percentageChange)}`);
++      lines.push(`    contributesProvenLower: ${comparison.contributesProvenLower}`);
++      lines.push(`    workerTokens: ${formatTokenEvidence(comparison.deliveryValue.workerTokens)}`);
++      lines.push(`    runtimeEstimate: ${formatRuntime(comparison.deliveryValue.runtimeEstimate)}`);
++      lines.push(`    officialCost: ${formatOfficial(comparison.deliveryValue.officialCost)}`);
++      lines.push(`    attemptElapsed: ${formatElapsed(comparison.deliveryValue.attemptElapsed)}`);
++      lines.push(
++        `    corrections: repair=${comparison.deliveryValue.corrections.workerValidationRepairCount} `
++        + `main=${comparison.deliveryValue.corrections.mainCorrectionCount} `
++        + `reverify=${comparison.deliveryValue.corrections.mainReverificationCount} `
++        + `handoff=${comparison.deliveryValue.corrections.handoffCount}`,
++      );
++    }
++  }
++  return `${lines.join("\n")}\n`;
++}
+diff --git a/baseline/src/daemon/coordinator.ts b/workspace/src/daemon/coordinator.ts
+index db39842..6bbdbd4 100644
+--- a/baseline/src/daemon/coordinator.ts
++++ b/workspace/src/daemon/coordinator.ts
+@@ -260,6 +260,10 @@ import {
+   type MainPairAssessResult,
+   type MainPairReport,
+ } from "../core/main-token-pair.js";
++import {
++  readMainTokenValueReport,
++  type MainTokenValueReport,
++} from "../core/main-token-value-report.js";
+ import { currentBuildIdentity } from "../core/build-identity.js";
+ import {
+   buildIntegrationOperationView,
+@@ -2078,6 +2082,10 @@ export class DaemonCoordinator {
+     return readMainPairReport(this.store, taskId, comparisonId);
+   }
+ 
++  mainTokenValueReport(params: unknown): MainTokenValueReport {
++    return readMainTokenValueReport(this.store, params);
++  }
++
+   list(statuses?: TaskStatus[], limit = 20): TaskRecord[] {
+     return this.store.listTasks(statuses).slice(0, Math.max(1, Math.min(limit, 100)));
+   }
+diff --git a/baseline/src/daemon/protocol.ts b/workspace/src/daemon/protocol.ts
+index 71b7d15..4b351fd 100644
+--- a/baseline/src/daemon/protocol.ts
++++ b/workspace/src/daemon/protocol.ts
+@@ -57,6 +57,7 @@ export type DaemonMethod =
+   | "main_token_status"
+   | "main_token_assess"
+   | "main_token_pair_report"
++  | "main_token_value_report"
+   | "adaptation_preview"
+   | "adaptation_apply"
+   | "activation_handoff_shutdown"
+@@ -142,6 +143,7 @@ const READ_ONLY_METHODS = new Set<DaemonMethod>([
+   "direct_codex_publication_preview",
+   "main_token_status",
+   "main_token_pair_report",
++  "main_token_value_report",
+   "adaptation_preview",
+   "candidate_reverify_eligibility",
+   "correction_eligibility",
+diff --git a/baseline/src/daemon/server.ts b/workspace/src/daemon/server.ts
+index b21aa84..2d3cc99 100644
+--- a/baseline/src/daemon/server.ts
++++ b/workspace/src/daemon/server.ts
+@@ -897,6 +897,8 @@ export class ForkLightDaemon {
+         return this.coordinator.mainTokenAssess(params);
+       case "main_token_pair_report":
+         return this.coordinator.mainTokenPairReport(params.taskId, params.comparisonId);
++      case "main_token_value_report":
++        return this.coordinator.mainTokenValueReport(params);
+       case "adaptation_preview":
+         return this.coordinator.adaptationPreview({
+           taskId: requiredString(params.taskId, "taskId"),
+diff --git a/baseline/src/mcp/server.ts b/workspace/src/mcp/server.ts
+index 8cfc646..d485d3c 100644
+--- a/baseline/src/mcp/server.ts
++++ b/workspace/src/mcp/server.ts
+@@ -10,6 +10,7 @@ import type { RoutingAdvisoryResponse } from "../core/model-routing.js";
+ import type { DirectCodexPairedSample } from "../core/direct-codex-calibration.js";
+ import type { MainUsageSample, MainUsageStatus } from "../core/main-token-usage.js";
+ import type { MainPairAssessResult, MainPairReport } from "../core/main-token-pair.js";
++import type { MainTokenValueReport } from "../core/main-token-value-report.js";
+ import type {
+   AttemptRecord,
+   EventRecord,
+@@ -2633,6 +2634,38 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
+     },
+   );
+ 
++  server.registerTool(
++    "forklight_main_token_value_report",
++    {
++      title: "Read family Main Token value report",
++      description:
++        "Read-only family Main Token value report for one to ten exact task families. Lists every in-scope accepted or rejected pair. Proves delegated Main Token lower only when every requested family has a current accepted strictly-positive pair. Never mutates, creates work, writes evidence, or mixes Worker Token with Main Token.",
++      inputSchema: z.object({
++        families: z.array(z.string().min(1).max(80)).min(1).max(10)
++          .describe("One to ten exact task-family names; no inferred family"),
++        comparisons: z.array(z.string().min(1).max(128)).max(64).optional()
++          .describe("Optional exact comparison-id filter"),
++      }).strict(),
++      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
++    },
++    async ({ families, comparisons }) => {
++      await ensureDaemon(home);
++      const report = await daemonRequest<MainTokenValueReport>(
++        "main_token_value_report",
++        {
++          families,
++          ...(comparisons === undefined ? {} : { comparisons }),
++        },
++        home,
++      );
++      const comparisonCount = report.families.reduce((count, family) => count + family.comparisons.length, 0);
++      return textAndData(
++        report,
++        `Main Token value report: overall=${report.overall}; families=${report.families.length}; comparisons=${comparisonCount}.`,
++      );
++    },
++  );
++
+   // --- Main-direct execution decisions ---
+ 
+   server.registerTool(
+diff --git a/baseline/tests/daemon-cli.test.ts b/workspace/tests/daemon-cli.test.ts
+index 86be4c8..b40b841 100644
+--- a/baseline/tests/daemon-cli.test.ts
++++ b/workspace/tests/daemon-cli.test.ts
+@@ -2955,3 +2955,67 @@ test("main-token CLI assess and pair-report launch twice with matching report JS
+     await daemon.close();
+   }
+ });
++
++test("value-report CLI empty and seeded launches agree and stay read-only", async () => {
++  const emptyHome = await mkdtemp(path.join(tmpdir(), "fl-m4c-cli-empty-"));
++  const emptyDaemon = new ForkLightDaemon(emptyHome, 0);
++  await emptyDaemon.start();
++  try {
++    const emptyArgs = ["value-report", "--families", JSON.stringify(["forklight-storage-lifecycle"]), "--json"];
++    const empty1 = await runMainTokenCli(emptyHome, emptyArgs);
++    const empty2 = await runMainTokenCli(emptyHome, emptyArgs);
++    assert.equal(empty1.exitCode, 0, empty1.stderr);
++    assert.equal(empty2.stdout, empty1.stdout);
++    const emptyJson = JSON.parse(empty1.stdout) as Record<string, unknown>;
++    assert.equal(emptyJson.overall, "cannot-determine");
++    assert.ok((emptyJson.reasons as string[]).includes("empty-store"));
++    assert.ok((emptyJson.reasons as string[]).includes("uncovered-family"));
++    assert.equal(emptyJson.createdWork, false);
++    const emptyStore = new StateStore(emptyHome);
++    assert.equal(emptyStore.listTasks().length, 0);
++    emptyStore.close();
++  } finally {
++    await emptyDaemon.close();
++  }
++
++  const home = await mkdtemp(path.join(tmpdir(), "fl-m4c-cli-seed-"));
++  seedCliComparablePair(home);
++  const daemon = new ForkLightDaemon(home, 0);
++  await daemon.start();
++  try {
++    const assess = await runMainTokenCli(home, [
++      "main-token", "assess", "--task-id", "cli-pair", "--comparison-id", "cmp-cli-pair",
++      "--same-scope", "true", "--same-acceptance", "true", "--delegated-quality-not-lower", "true",
++      "--direct-verification-ref", "dvref1", "--delegated-integration-id", "intopcli",
++      "--reviewer", "main-codex", "--assessed-at", "2026-08-17T12:30:00.000Z",
++      "--schema-version", "1", "--confirm", "--json",
++    ]);
++    assert.equal(assess.exitCode, 0, assess.stderr);
++    const reportArgs = ["value-report", "--families", JSON.stringify(["forklight-storage-lifecycle"]), "--json"];
++    const report1 = await runMainTokenCli(home, reportArgs);
++    const report2 = await runMainTokenCli(home, reportArgs);
++    assert.equal(report1.exitCode, 0, report1.stderr);
++    assert.equal(report2.stdout, report1.stdout);
++    const reportJson = JSON.parse(report1.stdout) as Record<string, unknown>;
++    assert.equal(reportJson.overall, "proven");
++    const families = reportJson.families as Array<Record<string, unknown>>;
++    assert.equal(families[0]?.claim, "proven-lower");
++    const comparisons = families[0]?.comparisons as Array<Record<string, unknown>>;
++    assert.equal(comparisons[0]?.signedChange, 3000);
++    assert.equal(comparisons[0]?.contributesProvenLower, true);
++    for (const key of ["change", "savings", "directCodexSavings", "averagePercentage", "bestPair", "prompt"]) {
++      assert.equal(key in reportJson, false);
++    }
++    const human = await runMainTokenCli(home, [
++      "value-report", "--families", JSON.stringify(["forklight-storage-lifecycle"]),
++    ]);
++    assert.equal(human.exitCode, 0, human.stderr);
++    assert.match(human.stdout, /overall: proven/);
++    assert.match(human.stdout, /claim: proven-lower/);
++    assert.match(human.stdout, /signedChange: 3000/);
++    assert.match(human.stdout, /unavailable \(no-attempts\)/);
++    assert.doesNotMatch(human.stdout, /averagePercentage|bestPair|directCodexSavings/);
++  } finally {
++    await daemon.close();
++  }
++});
+diff --git a/baseline/tests/daemon.test.ts b/workspace/tests/daemon.test.ts
+index 4b316bc..1705ebb 100644
+--- a/baseline/tests/daemon.test.ts
++++ b/workspace/tests/daemon.test.ts
+@@ -125,6 +125,7 @@ test("identity matching protects state changes but lets a new build stop an old
+   assert.equal(requiresMatchingBuildIdentity("main_token_status"), false);
+   assert.equal(requiresMatchingBuildIdentity("main_token_assess"), true);
+   assert.equal(requiresMatchingBuildIdentity("main_token_pair_report"), false);
++  assert.equal(requiresMatchingBuildIdentity("main_token_value_report"), false);
+ });
+ 
+ test("coordinator storage audit is read-only and reclaim requires current eligibility", async () => {
+@@ -9894,3 +9895,76 @@ test("daemon main_token_assess and pair_report share signed count-only JSON", as
+     await daemon.close();
+   }
+ });
++
++test("daemon main_token_value_report is read-only and agrees across two launches", async () => {
++  const emptyHome = await mkdtemp(path.join(tmpdir(), "fl-m4c-daemon-empty-"));
++  const emptyDaemon = new ForkLightDaemon(emptyHome, 0);
++  await emptyDaemon.start();
++  try {
++    const empty1 = await daemonRequest<Record<string, unknown>>("main_token_value_report", {
++      families: ["forklight-storage-lifecycle"],
++    }, emptyHome);
++    const empty2 = await daemonRequest<Record<string, unknown>>("main_token_value_report", {
++      families: ["forklight-storage-lifecycle"],
++    }, emptyHome);
++    assert.deepEqual(empty1, empty2);
++    assert.equal(empty1.overall, "cannot-determine");
++    assert.ok((empty1.reasons as string[]).includes("empty-store"));
++    assert.ok((empty1.reasons as string[]).includes("uncovered-family"));
++    assert.equal(empty1.createdWork, false);
++    const emptyStore = new StateStore(emptyHome);
++    assert.equal(emptyStore.listTasks().length, 0);
++    assert.equal(emptyStore.countMainPairAssessments(), 0);
++    emptyStore.close();
++  } finally {
++    await emptyDaemon.close();
++  }
++
++  const home = await mkdtemp(path.join(tmpdir(), "fl-m4c-daemon-seed-"));
++  seedComparablePair(home, "pair-task", "cmp-d1", "intop1");
++  const daemon = new ForkLightDaemon(home, 0);
++  await daemon.start();
++  try {
++    await daemonRequest("main_token_assess", {
++      taskId: "pair-task", comparisonId: "cmp-d1", confirm: true,
++      sameScope: true, sameAcceptance: true, delegatedQualityNotLower: true,
++      directVerificationRef: { referenceId: "dvref1" },
++      delegatedIntegrationOperationId: "intop1",
++      reviewer: "main-codex", assessedAt: "2026-08-17T12:30:00.000Z", schemaVersion: 1,
++    }, home);
++    const before = new StateStore(home);
++    const counts = {
++      tasks: before.listTasks().length,
++      events: before.listEvents("pair-task").length,
++      assessments: before.countMainPairAssessments(),
++      samples: before.countMainUsageSamples(),
++    };
++    before.close();
++    const report1 = await daemonRequest<Record<string, unknown>>("main_token_value_report", {
++      families: ["forklight-storage-lifecycle"],
++    }, home);
++    const report2 = await daemonRequest<Record<string, unknown>>("main_token_value_report", {
++      families: ["forklight-storage-lifecycle"],
++    }, home);
++    assert.deepEqual(report1, report2);
++    assert.equal(report1.overall, "proven");
++    assert.equal(report1.createdWork, false);
++    const families = report1.families as Array<Record<string, unknown>>;
++    assert.equal(families[0]?.claim, "proven-lower");
++    const comparisons = families[0]?.comparisons as Array<Record<string, unknown>>;
++    assert.equal(comparisons.length, 1);
++    assert.equal(comparisons[0]?.signedChange, 3000);
++    assert.equal(comparisons[0]?.contributesProvenLower, true);
++    for (const key of ["change", "savings", "directCodexSavings", "prompt", "averagePercentage", "bestPair"]) {
++      assert.equal(key in report1, false);
++    }
++    const after = new StateStore(home);
++    assert.equal(after.listTasks().length, counts.tasks);
++    assert.equal(after.listEvents("pair-task").length, counts.events);
++    assert.equal(after.countMainPairAssessments(), counts.assessments);
++    assert.equal(after.countMainUsageSamples(), counts.samples);
++    after.close();
++  } finally {
++    await daemon.close();
++  }
++});
+diff --git a/workspace/tests/main-token-value-report.test.ts b/workspace/tests/main-token-value-report.test.ts
+new file mode 100644
+index 0000000..0fabc6b
+--- /dev/null
++++ b/workspace/tests/main-token-value-report.test.ts
+@@ -0,0 +1,584 @@
++import assert from "node:assert/strict";
++import { mkdtemp, readFile } from "node:fs/promises";
++import { tmpdir } from "node:os";
++import path from "node:path";
++import test from "node:test";
++import { buildTaskRecord } from "../src/core/runner.js";
++import { parseTaskSpec } from "../src/core/task.js";
++import { assessMainPair, computeMainPairArithmetic, readMainPairReport } from "../src/core/main-token-pair.js";
++import {
++  formatMainTokenValueReportHuman,
++  readMainTokenValueReport,
++  type MainTokenValueReport,
++} from "../src/core/main-token-value-report.js";
++import { StateStore } from "../src/state/store.js";
++import type {
++  AttemptOfficialCostQuoted,
++  AttemptRecord,
++  AttemptTokenUsage,
++  MainDirectDecisionRecord,
++} from "../src/core/types.js";
++
++const TS = "2026-08-17T12:00:00.000Z";
++const ASSESSED_AT = "2026-08-17T12:30:00.000Z";
++const TASK_CLASS = "edit-task";
++const FAMILY_STORAGE = "forklight-storage-lifecycle";
++const FAMILY_RUNTIME = "worker-runtime";
++const PROFILE = "codex-main-v1";
++const DIGEST = "a".repeat(64);
++const SECRET = "value-report-SECRET-prompt";
++const FORBIDDEN = [
++  "prompt", "response", "source", "diff", "path", "log", "credential", "note", "notes",
++  "change", "savings", "directCodexSavings", "familyValue", "calibration",
++  "averagePercentage", "bestPair", "ranking", "workerMainTotal", "fxTotal",
++  "text", "content", "body", "payload", "raw",
++] as const;
++
++function createReadyTask(store: StateStore, id: string, taskFamily = FAMILY_STORAGE): void {
++  const home = store.databasePath.replace(/\/forklight\.sqlite$/, "");
++  const spec = parseTaskSpec({
++    version: 1, name: id, project: "/tmp/source", goal: "Value report test",
++    taskClass: TASK_CLASS, taskFamily, directCodexProfileId: PROFILE,
++    acceptance: { commands: ["true"] },
++  }, "/tmp");
++  store.createTask(buildTaskRecord({
++    spec, taskFile: `/tmp/${id}.yaml`, home, id, sessionId: `session-${id}`, createdAt: TS,
++  }));
++}
++
++function seedSamples(
++  store: StateStore,
++  taskId: string,
++  comparisonId: string,
++  direct: { input: number; output: number },
++  delegated: { input: number; output: number },
++  prefix: string,
++  taskFamily = FAMILY_STORAGE,
++): void {
++  store.saveMainUsageSample({
++    sampleId: `${prefix}d`, forklightTaskId: taskId, comparisonId, role: "direct-main",
++    taskClass: TASK_CLASS, taskFamily, directCodexProfileId: PROFILE,
++    inputTokens: direct.input, outputTokens: direct.output,
++    cacheReadInputTokens: 0, cacheCreationInputTokens: 0,
++    grossTokens: direct.input + direct.output,
++    source: "codex-terminal-result", runRef: `codex-run:${prefix}d`,
++    capturedAt: TS, schemaVersion: 1,
++  });
++  store.saveMainUsageSample({
++    sampleId: `${prefix}g`, forklightTaskId: taskId, comparisonId, role: "delegated-main",
++    taskClass: TASK_CLASS, taskFamily, directCodexProfileId: PROFILE,
++    inputTokens: delegated.input, outputTokens: delegated.output,
++    cacheReadInputTokens: 0, cacheCreationInputTokens: 0,
++    grossTokens: delegated.input + delegated.output,
++    source: "codex-terminal-result", runRef: `codex-run:${prefix}g`,
++    capturedAt: TS, schemaVersion: 1,
++  });
++}
++
++function seedCurrentDelivery(store: StateStore, taskId: string, operationId: string): void {
++  const attemptId = `att-${taskId}`.slice(0, 64);
++  const verification = store.addEvent(taskId, attemptId, "verification.completed", "passed", {
++    passed: true,
++  });
++  store.addEvent(taskId, attemptId, "main-review.completed", "accept", {
++    decision: "accept",
++    reason: "accepted",
++    attemptId,
++    verificationEventSequence: verification.sequence,
++    candidateRevisionId: `rev-${taskId}`.slice(0, 64),
++    acceptedPatchDigest: DIGEST,
++  });
++  store.saveIntegrationReceipt({
++    id: `rcpt-${operationId}`.slice(0, 64),
++    taskId,
++    patchDigest: DIGEST,
++    affectedFiles: ["src/cli.ts"],
++    rejectionReasons: [],
++    sourceEvidence: {},
++    createdAt: TS,
++    expiresAt: "2099-01-01T00:00:00.000Z",
++    consumed: true,
++  });
++  store.saveIntegrationResult({
++    id: operationId,
++    receiptId: `rcpt-${operationId}`.slice(0, 64),
++    taskId,
++    status: "applied",
++    appliedAt: TS,
++    createdAt: TS,
++    stages: [
++      { stage: "source-applied", status: "passed" },
++      { stage: "source-verified", status: "passed" },
++      { stage: "artifact-built", status: "passed" },
++      { stage: "runtime-activated", status: "passed" },
++    ],
++  });
++}
++
++function assessInput(taskId: string, comparisonId: string, operationId: string, extra: Record<string, unknown> = {}) {
++  return {
++    taskId,
++    comparisonId,
++    confirm: true,
++    sameScope: true,
++    sameAcceptance: true,
++    delegatedQualityNotLower: true,
++    directVerificationRef: { referenceId: "dvref1" },
++    delegatedIntegrationOperationId: operationId,
++    reviewer: "main-codex",
++    assessedAt: ASSESSED_AT,
++    schemaVersion: 1,
++    ...extra,
++  };
++}
++
++function acceptPair(
++  store: StateStore,
++  taskId: string,
++  comparisonId: string,
++  operationId: string,
++  direct: { input: number; output: number },
++  delegated: { input: number; output: number },
++  prefix: string,
++  taskFamily = FAMILY_STORAGE,
++): void {
++  createReadyTask(store, taskId, taskFamily);
++  seedSamples(store, taskId, comparisonId, direct, delegated, prefix, taskFamily);
++  seedCurrentDelivery(store, taskId, operationId);
++  const result = assessMainPair(store, assessInput(taskId, comparisonId, operationId));
++  assert.equal(result.outcome, "accepted");
++}
++
++function snapshot(store: StateStore, taskIds: readonly string[]) {
++  return {
++    assessments: store.countMainPairAssessments(),
++    samples: store.countMainUsageSamples(),
++    tasks: store.listTasks().length,
++    events: Object.fromEntries(taskIds.map((id) => [id, store.listEvents(id).length])),
++  };
++}
++
++function assertPrivacy(report: MainTokenValueReport): void {
++  const json = JSON.stringify(report);
++  assert.equal(json.includes(SECRET), false);
++  assert.equal("createdWork" in report, true);
++  assert.equal(report.createdWork, false);
++  for (const key of FORBIDDEN) {
++    assert.equal(key in report, false, key);
++    for (const family of report.families) {
++      assert.equal(key in family, false, `${family.taskFamily}.${key}`);
++      for (const comparison of family.comparisons) {
++        assert.equal(key in comparison, false, `${comparison.comparisonId}.${key}`);
++      }
++    }
++  }
++}
++
++function assertDeepFrozen(value: unknown, label = "root"): void {
++  if (value === null || typeof value !== "object") return;
++  assert.ok(Object.isFrozen(value), `Expected ${label} frozen`);
++  if (Array.isArray(value)) {
++    value.forEach((entry, index) => assertDeepFrozen(entry, `${label}[${index}]`));
++    return;
++  }
++  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
++    assertDeepFrozen(entry, `${label}.${key}`);
++  }
++}
++
++function quotedCost(currency: "USD" | "CNY", total: number, url: string): AttemptOfficialCostQuoted {
++  return {
++    stage: "calculation",
++    quoted: true,
++    result: {
++      quoted: true,
++      currency,
++      total,
++      components: [],
++      pricing: {
++        provider: "deepseek",
++        origin: "https://api.deepseek.com",
++        route: "deepseek-direct-payg",
++        modelAliases: ["deepseek-v4-pro"],
++        serviceTier: "standard",
++        currency,
++        unitTokens: 1_000_000,
++        source: { url, checkedAt: TS },
++        promotion: null,
++      },
++      appliedTier: { applied: [], totalPromptInput: 0 },
++      usageSource: "terminal-result",
++      providerBillClaim: false,
++    },
++  } as unknown as AttemptOfficialCostQuoted;
++}
++
++function completeUsage(input: number, output: number): AttemptTokenUsage {
++  return {
++    inputTokens: input,
++    outputTokens: output,
++    cacheReadInputTokens: 0,
++    cacheCreationInputTokens: 0,
++    source: "terminal-result",
++    complete: true,
++  };
++}
++
++function makeAttempt(id: string, taskId: string, ordinal: number, overrides: Partial<AttemptRecord> = {}): AttemptRecord {
++  return {
++    id,
++    taskId,
++    ordinal,
++    status: "succeeded",
++    sessionId: `s-${id}`,
++    rawLogPath: `/tmp/${id}.log`,
++    startedAt: TS,
++    finishedAt: "2026-08-17T12:00:01.000Z",
++    exitCode: 0,
++    ...overrides,
++  } as AttemptRecord;
++}
++
++test("empty Store is cannot-determine with typed reasons and no zero sample", async () => {
++  const home = await mkdtemp(path.join(tmpdir(), "fl-m4c-empty-"));
++  const store = new StateStore(home);
++  try {
++    const first = readMainTokenValueReport(store, { families: [FAMILY_STORAGE] });
++    const second = readMainTokenValueReport(store, { families: [FAMILY_STORAGE] });
++    assert.deepEqual(first, second);
++    assert.equal(first.overall, "cannot-determine");
++    assert.ok(first.reasons.includes("empty-store"));
++    assert.ok(first.reasons.includes("uncovered-family"));
++    assert.equal(first.families[0]?.claim, "cannot-determine");
++    assert.deepEqual(first.families[0]?.reasons, ["uncovered-family"]);
++    assert.equal(first.families[0]?.comparisons.length, 0);
++    assert.equal(first.families[0]?.acceptedPairCount, 0);
++    assert.equal("grossTokens" in (first.families[0] ?? {}), false);
++    assertPrivacy(first);
++    assertDeepFrozen(first);
++    const human = formatMainTokenValueReportHuman(first);
++    assert.match(human, /overall: cannot-determine/);
++    assert.match(human, /uncovered-family/);
++    assert.doesNotMatch(human, /saving claim|averagePercentage|bestPair/i);
++  } finally {
++    store.close();
++  }
++});
++
++test("invalid request is cannot-determine and does not invent families", async () => {
++  const home = await mkdtemp(path.join(tmpdir(), "fl-m4c-invalid-"));
++  const store = new StateStore(home);
++  try {
++    const none = readMainTokenValueReport(store, { families: [] });
++    assert.equal(none.overall, "cannot-determine");
++    assert.deepEqual(none.reasons, ["invalid-request"]);
++    assert.deepEqual(none.requestedFamilies, []);
++
++    const tooMany = readMainTokenValueReport(store, {
++      families: Array.from({ length: 11 }, (_, index) => `family-${index}`),
++    });
++    assert.deepEqual(tooMany.reasons, ["invalid-request"]);
++
++    const duplicate = readMainTokenValueReport(store, {
++      families: [FAMILY_STORAGE, FAMILY_STORAGE],
++    });
++    assert.deepEqual(duplicate.reasons, ["invalid-request"]);
++
++    const unknownKey = readMainTokenValueReport(store, {
++      families: [FAMILY_STORAGE],
++      prompt: SECRET,
++    });
++    assert.deepEqual(unknownKey.reasons, ["invalid-request"]);
++    assert.equal(JSON.stringify(unknownKey).includes(SECRET), false);
++    assert.equal(store.countMainPairAssessments(), 0);
++  } finally {
++    store.close();
++  }
++});
++
++test("uncovered and legacy-only families stay cannot-determine", async () => {
++  const home = await mkdtemp(path.join(tmpdir(), "fl-m4c-legacy-"));
++  const store = new StateStore(home);
++  createReadyTask(store, "task-legacy");
++  store.saveDirectCodexProfilePublication({
++    directCodexProfileId: PROFILE,
++    calibration: {
++      minTokens: 1000, maxTokens: 1500, method: "paired-sample-v1",
++      taskClass: TASK_CLASS, confidence: "medium", version: 1, sampleSize: 1,
++      evidenceReferences: ["sample:legacy-pub-v1"], createdAt: TS, schemaVersion: 1,
++    },
++    envelopeSchemaVersion: 1,
++  });
++  try {
++    const report = readMainTokenValueReport(store, {
++      families: [FAMILY_STORAGE, FAMILY_RUNTIME],
++    });
++    assert.equal(report.overall, "cannot-determine");
++    assert.equal(report.families[0]?.taskFamily, FAMILY_STORAGE);
++    assert.deepEqual(report.families[0]?.reasons, ["legacy-pair-contract-missing"]);
++    assert.equal(report.families[0]?.comparisons.length, 0);
++    assert.equal(report.families[1]?.taskFamily, FAMILY_RUNTIME);
++    assert.deepEqual(report.families[1]?.reasons, ["uncovered-family"]);
++    assert.equal(report.createdWork, false);
++    assert.ok(!report.reasons.includes("not-strictly-positive"));
++  } finally {
++    store.close();
++  }
++});
++
++test("accepted strictly-positive pair proves a family; omitted filter lists it", async () => {
++  const home = await mkdtemp(path.join(tmpdir(), "fl-m4c-ok-"));
++  const store = new StateStore(home);
++  acceptPair(store, "task-ok", "cmp-ok", "intop-ok", { input: 4000, output: 500 }, { input: 1200, output: 300 }, "ok");
++  const before = snapshot(store, ["task-ok"]);
++  try {
++    const first = readMainTokenValueReport(store, { families: [FAMILY_STORAGE] });
++    const second = readMainTokenValueReport(store, { families: [FAMILY_STORAGE] });
++    assert.deepEqual(first, second);
++    assert.equal(first.overall, "proven");
++    assert.equal(first.families[0]?.claim, "proven-lower");
++    assert.deepEqual(first.families[0]?.reasons, []);
++    assert.equal(first.families[0]?.comparisons.length, 1);
++    const comparison = first.families[0]!.comparisons[0]!;
++    const pair = readMainPairReport(store, "task-ok", "cmp-ok");
++    const expected = computeMainPairArithmetic(pair.directGrossTokens!, pair.delegatedGrossTokens!, true);
++    assert.equal(comparison.listingStatus, "accepted");
++    assert.equal(comparison.pairValidity, "accepted");
++    assert.equal(comparison.directGrossTokens, pair.directGrossTokens);
++    assert.equal(comparison.delegatedGrossTokens, pair.delegatedGrossTokens);
++    assert.equal(comparison.signedChange, expected.signedChange);
++    assert.ok(comparison.signedChange! > 0);
++    assert.deepEqual(comparison.percentageChange, expected.percentageChange);
++    assert.equal(comparison.contributesProvenLower, true);
++    assert.deepEqual(comparison.qualityGates, {
++      sameScope: true, sameAcceptance: true, delegatedQualityNotLower: true,
++    });
++    assert.equal(comparison.deliveryValue.workerTokens.status, "unavailable");
++    assert.equal(comparison.deliveryValue.workerTokens.reason, "no-attempts");
++    assert.equal("grossTokens" in comparison.deliveryValue.workerTokens, false);
++    assert.equal(first.createdWork, false);
++    assert.deepEqual(snapshot(store, ["task-ok"]), before);
++    const human = formatMainTokenValueReportHuman(first);
++    assert.match(human, /claim: proven-lower/);
++    assert.match(human, /signedChange: 3000/);
++    assert.match(human, /workerTokens: unavailable \(no-attempts\)/);
++  } finally {
++    store.close();
++  }
++});
++
++test("equal and higher accepted pairs stay visible and cannot graduate a family", async () => {
++  const home = await mkdtemp(path.join(tmpdir(), "fl-m4c-eq-"));
++  const store = new StateStore(home);
++  acceptPair(store, "task-eq", "cmp-eq", "intop-eq", { input: 2000, output: 0 }, { input: 2000, output: 0 }, "eq");
++  acceptPair(store, "task-hi", "cmp-hi", "intop-hi", { input: 1000, output: 0 }, { input: 1500, output: 0 }, "hi");
++  try {
++    const report = readMainTokenValueReport(store, { families: [FAMILY_STORAGE] });
++    assert.equal(report.overall, "cannot-determine");
++    assert.equal(report.families[0]?.claim, "cannot-determine");
++    assert.ok(report.families[0]?.reasons.includes("not-strictly-positive"));
++    const byId = Object.fromEntries(report.families[0]!.comparisons.map((entry) => [entry.comparisonId, entry]));
++    assert.equal(byId["cmp-eq"]?.signedChange, 0);
++    assert.equal(byId["cmp-eq"]?.contributesProvenLower, false);
++    assert.equal(byId["cmp-eq"]?.saving.status, "not-lower");
++    assert.equal(byId["cmp-hi"]?.signedChange, -500);
++    assert.equal(byId["cmp-hi"]?.contributesProvenLower, false);
++    assert.equal(byId["cmp-hi"]?.saving.status, "higher");
++    assert.equal(report.families[0]?.comparisons.length, 2);
++  } finally {
++    store.close();
++  }
++});
++
++test("mixed family lists every pair and proves only from a strictly-positive accepted pair", async () => {
++  const home = await mkdtemp(path.join(tmpdir(), "fl-m4c-mix-"));
++  const store = new StateStore(home);
++  acceptPair(store, "task-low", "cmp-low", "intop-low", { input: 4000, output: 500 }, { input: 1200, output: 300 }, "low");
++  acceptPair(store, "task-eq2", "cmp-eq2", "intop-eq2", { input: 2000, output: 0 }, { input: 2000, output: 0 }, "eq2");
++  createReadyTask(store, "task-rej");
++  seedSamples(store, "task-rej", "cmp-rej", { input: 3000, output: 0 }, { input: 1000, output: 0 }, "rej");
++  seedCurrentDelivery(store, "task-rej", "intop-rej");
++  const rejected = assessMainPair(store, assessInput("task-rej", "cmp-rej", "intop-rej", { sameScope: false }));
++  assert.equal(rejected.outcome, "rejected");
++  createReadyTask(store, "task-inc");
++  seedSamples(store, "task-inc", "cmp-inc", { input: 900, output: 0 }, { input: 100, output: 0 }, "inc");
++  acceptPair(store, "task-stale", "cmp-stale", "intop-stale", { input: 5000, output: 0 }, { input: 1000, output: 0 }, "stale");
++  store.addEvent("task-stale", "att-task-stale", "verification.completed", "passed-again", { passed: true });
++  try {
++    const report = readMainTokenValueReport(store, { families: [FAMILY_STORAGE] });
++    assert.equal(report.overall, "proven");
++    assert.equal(report.families[0]?.claim, "proven-lower");
++    const statuses = report.families[0]!.comparisons.map((entry) => [entry.comparisonId, entry.listingStatus]);
++    assert.deepEqual(statuses, [
++      ["cmp-eq2", "accepted"],
++      ["cmp-inc", "incomplete"],
++      ["cmp-low", "accepted"],
++      ["cmp-rej", "rejected"],
++      ["cmp-stale", "stale"],
++    ]);
++    const low = report.families[0]!.comparisons.find((entry) => entry.comparisonId === "cmp-low")!;
++    const eq = report.families[0]!.comparisons.find((entry) => entry.comparisonId === "cmp-eq2")!;
++    const stale = report.families[0]!.comparisons.find((entry) => entry.comparisonId === "cmp-stale")!;
++    assert.equal(low.contributesProvenLower, true);
++    assert.equal(eq.contributesProvenLower, false);
++    assert.equal(stale.contributesProvenLower, false);
++    assert.equal(stale.pairValidity, "cannot-determine");
++    assert.equal("averagePercentage" in report, false);
++    for (const entry of report.families[0]!.comparisons) {
++      if (entry.directGrossTokens === undefined || entry.delegatedGrossTokens === undefined) continue;
++      const expected = computeMainPairArithmetic(
++        entry.directGrossTokens,
++        entry.delegatedGrossTokens,
++        entry.listingStatus === "accepted",
++      );
++      assert.equal(entry.signedChange, expected.signedChange);
++      assert.deepEqual(entry.percentageChange, expected.percentageChange);
++    }
++  } finally {
++    store.close();
++  }
++});
++
++test("two-family set is proven only when every requested family is proven-lower", async () => {
++  const home = await mkdtemp(path.join(tmpdir(), "fl-m4c-two-"));
++  const store = new StateStore(home);
++  acceptPair(store, "task-a", "cmp-a", "intop-a", { input: 4000, output: 0 }, { input: 1000, output: 0 }, "a", FAMILY_STORAGE);
++  acceptPair(store, "task-b", "cmp-b", "intop-b", { input: 2000, output: 0 }, { input: 2000, output: 0 }, "b", FAMILY_RUNTIME);
++  try {
++    const partial = readMainTokenValueReport(store, { families: [FAMILY_STORAGE, FAMILY_RUNTIME] });
++    assert.equal(partial.overall, "cannot-determine");
++    assert.equal(partial.families[0]?.claim, "proven-lower");
++    assert.equal(partial.families[1]?.claim, "cannot-determine");
++    assert.ok(partial.families[1]?.reasons.includes("not-strictly-positive"));
++
++    const onlyStorage = readMainTokenValueReport(store, { families: [FAMILY_STORAGE] });
++    assert.equal(onlyStorage.overall, "proven");
++
++    const filtered = readMainTokenValueReport(store, {
++      families: [FAMILY_STORAGE, FAMILY_RUNTIME],
++      comparisons: ["cmp-a"],
++    });
++    assert.equal(filtered.families[0]?.comparisons.length, 1);
++    assert.equal(filtered.families[0]?.comparisons[0]?.comparisonId, "cmp-a");
++    assert.equal(filtered.families[1]?.comparisons.length, 0);
++    assert.equal(filtered.overall, "cannot-determine");
++  } finally {
++    store.close();
++  }
++});
++
++test("partial economics stay separate from exact Main pair arithmetic", async () => {
++  const home = await mkdtemp(path.join(tmpdir(), "fl-m4c-econ-"));
++  const store = new StateStore(home);
++  acceptPair(store, "task-econ", "cmp-econ", "intop-econ", { input: 4000, output: 500 }, { input: 1200, output: 300 }, "econ");
++  store.createAttempt(makeAttempt("att-e1", "task-econ", 1, {
++    usage: completeUsage(100, 20),
++    runtimeCostEstimateUsd: 1.25,
++    officialCost: quotedCost("USD", 2.5, "https://example.test/usd"),
++    executionKind: "standard",
++  }));
++  store.createAttempt({
++    id: "att-e2",
++    taskId: "task-econ",
++    ordinal: 2,
++    status: "succeeded",
++    sessionId: "s-att-e2",
++    rawLogPath: "/tmp/att-e2.log",
++    startedAt: TS,
++    exitCode: 0,
++    officialCost: quotedCost("CNY", 8, "https://example.test/cny"),
++    executionKind: "main-correction",
++  });
++  store.addEvent("task-econ", "att-e1", "worker.validation-repair.authorized", "repair", { kind: "worker-validation-repair" });
++  store.addEvent("task-econ", "att-e1", "candidate.reverification.authorized", "reverify", { kind: "reverification" });
++  store.addEvent("task-econ", "att-e1", "worker.message", SECRET, { prompt: SECRET });
++  store.saveMainDirectDecision({
++    id: "md-econ",
++    taskClass: TASK_CLASS,
++    taskFamily: FAMILY_STORAGE,
++    reason: "user-requested",
++    note: "bounded",
++    consideredWorkerProfileIds: [],
++    consideredWorkers: [],
++    evidenceSnapshot: [],
++    status: "completed",
++    startedAt: TS,
++    closedState: {
++      outcome: "completed",
++      note: "bounded",
++      closedAt: "2026-08-17T12:00:05.000Z",
++    },
++  } as MainDirectDecisionRecord);
++  try {
++    const report = readMainTokenValueReport(store, { families: [FAMILY_STORAGE] });
++    const comparison = report.families[0]!.comparisons[0]!;
++    assert.equal(comparison.signedChange, 3000);
++    assert.equal(comparison.contributesProvenLower, true);
++    assert.equal(comparison.deliveryValue.workerTokens.status, "incomplete");
++    assert.equal(comparison.deliveryValue.workerTokens.completeCount, 1);
++    assert.equal(comparison.deliveryValue.workerTokens.incompleteCount, 1);
++    assert.equal(comparison.deliveryValue.workerTokens.grossTokens, 120);
++    assert.equal(comparison.deliveryValue.runtimeEstimate.status, "incomplete");
++    assert.equal(comparison.deliveryValue.runtimeEstimate.observedTotalUsd, 1.25);
++    assert.equal(comparison.deliveryValue.officialCost.status, "quoted");
++    assert.deepEqual(
++      comparison.deliveryValue.officialCost.totals.map((total) => total.currency),
++      ["CNY", "USD"],
++    );
++    assert.equal(comparison.deliveryValue.officialCost.totals.length, 2);
++    assert.equal("fxTotal" in comparison.deliveryValue.officialCost, false);
++    assert.equal(comparison.deliveryValue.attemptElapsed.status, "incomplete");
++    assert.equal(comparison.deliveryValue.attemptElapsed.measuredCount, 1);
++    assert.equal(comparison.deliveryValue.corrections.workerValidationRepairCount, 1);
++    assert.equal(comparison.deliveryValue.corrections.mainCorrectionCount, 1);
++    assert.equal(comparison.deliveryValue.corrections.mainReverificationCount, 1);
++    assert.equal(comparison.deliveryValue.corrections.handoffCount, 0);
++    assert.equal(report.families[0]?.mainDirectElapsed.status, "complete");
++    assert.equal(report.families[0]?.mainDirectElapsed.binding, "task-family");
++    assert.equal(report.families[0]?.mainDirectElapsed.totalMs, 5000);
++    assertPrivacy(report);
++    const json = JSON.stringify(report);
++    assert.equal(json.includes(SECRET), false);
++    assert.equal("directCodexSavings" in report, false);
++    const pairTokens = (comparison.directGrossTokens ?? 0) + (comparison.deliveryValue.workerTokens.grossTokens ?? 0);
++    assert.notEqual(comparison.signedChange, pairTokens);
++  } finally {
++    store.close();
++  }
++});
++
++test("comparison filter mismatch and missing ids are typed and do not invent zeros", async () => {
++  const home = await mkdtemp(path.join(tmpdir(), "fl-m4c-filter-"));
++  const store = new StateStore(home);
++  acceptPair(store, "task-f", "cmp-f", "intop-f", { input: 4000, output: 0 }, { input: 1000, output: 0 }, "f");
++  try {
++    const missing = readMainTokenValueReport(store, {
++      families: [FAMILY_STORAGE],
++      comparisons: ["cmp-missing"],
++    });
++    assert.equal(missing.overall, "cannot-determine");
++    assert.ok(missing.reasons.includes("comparison-not-found"));
++    assert.equal(missing.families[0]?.comparisons.length, 0);
++
++    const mismatch = readMainTokenValueReport(store, {
++      families: [FAMILY_RUNTIME],
++      comparisons: ["cmp-f"],
++    });
++    assert.ok(mismatch.reasons.includes("comparison-family-mismatch"));
++    assert.equal(mismatch.families[0]?.comparisons.length, 0);
++    assert.equal(mismatch.families[0]?.claim, "cannot-determine");
++  } finally {
++    store.close();
++  }
++});
++
++test("value-report CLI reads flags from the full remainder after the command", async () => {
++  const source = await readFile(new URL("../src/cli.ts", import.meta.url), "utf8");
++  const start = source.indexOf('if (command === "value-report")');
++  assert.ok(start >= 0);
++  const block = source.slice(start, start + 700);
++  assert.match(block, /positional === undefined \? rest : \[positional, \.\.\.rest\]/);
++  assert.match(block, /--families/);
++  assert.match(block, /--comparisons/);
++  assert.match(block, /switches\.has\("--json"\)/);
++});
+diff --git a/baseline/tests/mcp.test.ts b/workspace/tests/mcp.test.ts
+index 4588660..eb0d90a 100644
+--- a/baseline/tests/mcp.test.ts
++++ b/workspace/tests/mcp.test.ts
+@@ -121,6 +121,7 @@ test("MCP exposes ForkLight tools and reaches the daemon", async () => {
+         "forklight_main_token_capture",
+         "forklight_main_token_pair_report",
+         "forklight_main_token_status",
++        "forklight_main_token_value_report",
+         "forklight_model_routing",
+         "forklight_outcome_intake_confirm",
+         "forklight_outcome_intake_create",
+@@ -3880,3 +3881,131 @@ test("MCP main-token assess and pair-report are privacy-safe and report is read-
+     await daemon.close();
+   }
+ });
++
++test("MCP main-token value report is read-only and matches two launches", async () => {
++  const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-m4c-"));
++  const store = new StateStore(home);
++  const { parseTaskSpec } = await import("../src/core/task.js");
++  const { buildTaskRecord } = await import("../src/core/runner.js");
++  const spec = parseTaskSpec({
++    version: 1, name: "mcp-value", project: "/tmp", goal: "T",
++    taskClass: "edit-task", taskFamily: "forklight-storage-lifecycle",
++    directCodexProfileId: "codex-main-v1", acceptance: { commands: ["true"] },
++  }, "/tmp");
++  store.createTask(buildTaskRecord({
++    spec, taskFile: "/tmp/mcp-value.yaml", home, id: "mcp-value",
++    sessionId: "s-mcp-value", createdAt: "2026-08-17T12:00:00.000Z",
++  }));
++  store.saveMainUsageSample({
++    sampleId: "mcpvalued", forklightTaskId: "mcp-value", comparisonId: "cmp-mcp-value",
++    role: "direct-main", taskClass: "edit-task", taskFamily: "forklight-storage-lifecycle",
++    directCodexProfileId: "codex-main-v1", inputTokens: 4000, outputTokens: 500,
++    cacheReadInputTokens: 0, cacheCreationInputTokens: 0, grossTokens: 4500,
++    source: "codex-terminal-result", runRef: "codex-run:mcp-value-d",
++    capturedAt: "2026-08-17T12:00:00.000Z", schemaVersion: 1,
++  });
++  store.saveMainUsageSample({
++    sampleId: "mcpvalueg", forklightTaskId: "mcp-value", comparisonId: "cmp-mcp-value",
++    role: "delegated-main", taskClass: "edit-task", taskFamily: "forklight-storage-lifecycle",
++    directCodexProfileId: "codex-main-v1", inputTokens: 1200, outputTokens: 300,
++    cacheReadInputTokens: 0, cacheCreationInputTokens: 0, grossTokens: 1500,
++    source: "codex-terminal-result", runRef: "codex-run:mcp-value-g",
++    capturedAt: "2026-08-17T12:00:00.000Z", schemaVersion: 1,
++  });
++  const digest = "a".repeat(64);
++  const verification = store.addEvent("mcp-value", "att-mcp-value", "verification.completed", "passed", { passed: true });
++  store.addEvent("mcp-value", "att-mcp-value", "main-review.completed", "accept", {
++    decision: "accept", reason: "accepted", attemptId: "att-mcp-value",
++    verificationEventSequence: verification.sequence,
++    candidateRevisionId: "rev-mcp-value", acceptedPatchDigest: digest,
++  });
++  store.saveIntegrationReceipt({
++    id: "rcpt-mcp-value", taskId: "mcp-value", patchDigest: digest, affectedFiles: ["src/cli.ts"],
++    rejectionReasons: [], sourceEvidence: {}, createdAt: "2026-08-17T12:00:00.000Z",
++    expiresAt: "2099-01-01T00:00:00.000Z", consumed: true,
++  });
++  store.saveIntegrationResult({
++    id: "intopmcpv", receiptId: "rcpt-mcp-value", taskId: "mcp-value", status: "applied",
++    appliedAt: "2026-08-17T12:00:00.000Z", createdAt: "2026-08-17T12:00:00.000Z",
++    stages: [
++      { stage: "source-applied", status: "passed" },
++      { stage: "source-verified", status: "passed" },
++      { stage: "artifact-built", status: "passed" },
++      { stage: "runtime-activated", status: "passed" },
++    ],
++  });
++  const before = {
++    events: store.listEvents("mcp-value").length,
++    tasks: store.listTasks().length,
++    assessments: store.countMainPairAssessments(),
++  };
++  store.close();
++
++  const daemon = new ForkLightDaemon(home, 0);
++  await daemon.start();
++  const server = createForkLightMcpServer(home);
++  const client = new Client({ name: "forklight-test", version: "1.0.0" });
++  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
++  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
++  try {
++    const listed = await client.listTools();
++    const valueTool = listed.tools.find((tool) => tool.name === "forklight_main_token_value_report");
++    assert.equal(valueTool?.annotations?.readOnlyHint, true);
++
++    const empty = await client.callTool({
++      name: "forklight_main_token_value_report",
++      arguments: { families: ["worker-runtime"] },
++    });
++    assert.equal(empty.isError, undefined, toolErrorText(empty));
++    const emptyData = empty.structuredContent as Record<string, unknown>;
++    assert.equal(emptyData.overall, "cannot-determine");
++    assert.ok((emptyData.reasons as string[]).includes("uncovered-family"));
++
++    await client.callTool({
++      name: "forklight_main_token_assess",
++      arguments: {
++        taskId: "mcp-value",
++        comparisonId: "cmp-mcp-value",
++        confirm: true,
++        sameScope: true,
++        sameAcceptance: true,
++        delegatedQualityNotLower: true,
++        directVerificationRef: { referenceId: "dvref1" },
++        delegatedIntegrationOperationId: "intopmcpv",
++        reviewer: "main-codex",
++        assessedAt: "2026-08-17T12:30:00.000Z",
++        schemaVersion: 1,
++      },
++    });
++
++    const report1 = await client.callTool({
++      name: "forklight_main_token_value_report",
++      arguments: { families: ["forklight-storage-lifecycle"] },
++    });
++    const report2 = await client.callTool({
++      name: "forklight_main_token_value_report",
++      arguments: { families: ["forklight-storage-lifecycle"] },
++    });
++    assert.equal(report1.isError, undefined, toolErrorText(report1));
++    assert.deepEqual(report1.structuredContent, report2.structuredContent);
++    const report = report1.structuredContent as Record<string, unknown>;
++    assert.equal(report.overall, "proven");
++    assert.equal(report.createdWork, false);
++    const families = report.families as Array<Record<string, unknown>>;
++    assert.equal(families[0]?.claim, "proven-lower");
++    const comparisons = families[0]?.comparisons as Array<Record<string, unknown>>;
++    assert.equal(comparisons[0]?.signedChange, 3000);
++    for (const key of ["change", "savings", "directCodexSavings", "prompt", "averagePercentage"]) {
++      assert.equal(key in report, false);
++    }
++    const check = new StateStore(home);
++    assert.equal(check.listEvents("mcp-value").length, before.events);
++    assert.equal(check.listTasks().length, before.tasks);
++    assert.equal(check.countMainPairAssessments(), before.assessments + 1);
++    check.close();
++  } finally {
++    await client.close();
++    await server.close();
++    await daemon.close();
++  }
++});
+

@@ -1397,6 +1397,491 @@ export async function applyIntegration(
   return stripResultMeta(record);
 }
 
+// --- Source-only recovery continuation ---
+
+/** Fixed, privacy-safe refusal codes for source-only Integration recovery.
+ *  Each is a closed marker that never carries paths, digests, diff content,
+ *  command text, or diagnostics. */
+export const SOURCE_ONLY_RECOVERY_REFUSALS = {
+  resultAlreadyExists: "result-already-exists",
+  receiptMissing: "receipt-missing",
+  receiptTaskMismatch: "receipt-task-mismatch",
+  receiptRejected: "receipt-rejected",
+  receiptNotConsumed: "receipt-not-consumed",
+  sourceAppliedNotProven: "source-applied-not-proven",
+  stageHistoryAmbiguous: "stage-history-ambiguous",
+  deliveryDeclaresBuildOrActivation: "delivery-declares-build-or-activation",
+  affectedFilesEmpty: "affected-files-empty",
+  sourceEvidenceIncomplete: "source-evidence-incomplete",
+  unsafePath: "unsafe-path",
+  candidateFinalMismatch: "candidate-final-source-mismatch",
+  backupMismatch: "backup-mismatch",
+  unreadableProofPath: "unreadable-proof-path",
+  executionFailed: "recovery-execution-failed",
+} as const;
+
+export type SourceOnlyRecoveryRefusalReason =
+  (typeof SOURCE_ONLY_RECOVERY_REFUSALS)[keyof typeof SOURCE_ONLY_RECOVERY_REFUSALS];
+
+export type SourceOnlyRecoveryEligibility =
+  | {
+      eligible: true;
+      task: TaskRecord;
+      receipt: IntegrationReceiptRecord;
+      stages: IntegrationStageEvidence[];
+    }
+  | { eligible: false; reason: SourceOnlyRecoveryRefusalReason };
+
+export type SourceOnlyRecoveryOutcome =
+  | IntegrationResult
+  | { status: "outcome-unknown"; reason: SourceOnlyRecoveryRefusalReason };
+
+/** True exactly for one clean durable `source-applied: passed` evidence item. */
+function isSourceAppliedPassed(value: unknown): value is IntegrationStageEvidence {
+  if (value === null || typeof value !== "object") return false;
+  const candidate = value as Partial<IntegrationStageEvidence>;
+  return candidate.stage === "source-applied" && candidate.status === "passed";
+}
+
+/** One durable stage event keyed by operation identity plus its receipt binding. */
+interface DurableStageEvent {
+  receiptId: unknown;
+  evidence: unknown;
+}
+
+/** Collect every durable stage event for one operation. Malformed, missing, or
+ *  receipt-mismatched entries are kept so an unprovable history fails closed
+ *  instead of being silently rewritten into a clean single-stage history. */
+function stageEventsForOperation(
+  store: StateStore,
+  taskId: string,
+  operationId: string,
+): DurableStageEvent[] {
+  const events: DurableStageEvent[] = [];
+  for (const event of store.listEvents(taskId)) {
+    if (event.type !== "integration.stage.completed") continue;
+    if (event.payload === null || typeof event.payload !== "object") continue;
+    const payload = event.payload as {
+      operationId?: unknown;
+      receiptId?: unknown;
+      evidence?: unknown;
+    };
+    if (payload.operationId !== operationId) continue;
+    events.push({ receiptId: payload.receiptId, evidence: payload.evidence });
+  }
+  return events;
+}
+
+/**
+ * Classify one incomplete Integration operation for safe source-only recovery
+ * using durable evidence only (no live file reads). Eligible exactly when the
+ * original receipt is consumed without rejection, the canonical Task declares
+ * no build or activation work, the durable stage history is exactly one passed
+ * `source-applied` item, and the receipt's affected set and pre-apply evidence
+ * are complete. Never mutates the Store or source.
+ */
+export function classifySourceOnlyRecovery(
+  store: StateStore,
+  taskId: string,
+  receiptId: string,
+  operationId: string,
+): SourceOnlyRecoveryEligibility {
+  if (store.getIntegrationResult(operationId) !== undefined) {
+    return { eligible: false, reason: SOURCE_ONLY_RECOVERY_REFUSALS.resultAlreadyExists };
+  }
+  const task = store.getTask(taskId);
+  const stored = store.getIntegrationReceipt(receiptId);
+  if (stored === undefined) {
+    return { eligible: false, reason: SOURCE_ONLY_RECOVERY_REFUSALS.receiptMissing };
+  }
+  if (stored.taskId !== task.id) {
+    return { eligible: false, reason: SOURCE_ONLY_RECOVERY_REFUSALS.receiptTaskMismatch };
+  }
+  if (stored.rejectionReasons.length > 0) {
+    return { eligible: false, reason: SOURCE_ONLY_RECOVERY_REFUSALS.receiptRejected };
+  }
+  if (!stored.consumed) {
+    return { eligible: false, reason: SOURCE_ONLY_RECOVERY_REFUSALS.receiptNotConsumed };
+  }
+  if (
+    (task.spec.delivery?.buildCommands.length ?? 0) > 0
+    || (task.spec.delivery?.activationCommands.length ?? 0) > 0
+    || (task.spec.delivery?.activationCheckCommands.length ?? 0) > 0
+  ) {
+    return {
+      eligible: false,
+      reason: SOURCE_ONLY_RECOVERY_REFUSALS.deliveryDeclaresBuildOrActivation,
+    };
+  }
+
+  const stageEvents = stageEventsForOperation(store, taskId, operationId);
+  if (stageEvents.length === 0) {
+    return { eligible: false, reason: SOURCE_ONLY_RECOVERY_REFUSALS.sourceAppliedNotProven };
+  }
+  const onlyStageEvent = stageEvents[0]!;
+  const onlyStageEvidence = onlyStageEvent.evidence;
+  if (
+    stageEvents.length !== 1
+    || onlyStageEvent.receiptId !== receiptId
+    || !isSourceAppliedPassed(onlyStageEvidence)
+  ) {
+    return { eligible: false, reason: SOURCE_ONLY_RECOVERY_REFUSALS.stageHistoryAmbiguous };
+  }
+  const stages: IntegrationStageEvidence[] = [onlyStageEvidence];
+  if (stored.affectedFiles.length === 0) {
+    return { eligible: false, reason: SOURCE_ONLY_RECOVERY_REFUSALS.affectedFilesEmpty };
+  }
+  for (const file of stored.affectedFiles) {
+    if (detectUnsafePath(file) !== undefined) {
+      return { eligible: false, reason: SOURCE_ONLY_RECOVERY_REFUSALS.unsafePath };
+    }
+    if (typeof stored.sourceEvidence[file] !== "string") {
+      return { eligible: false, reason: SOURCE_ONLY_RECOVERY_REFUSALS.sourceEvidenceIncomplete };
+    }
+  }
+
+  return { eligible: true, task, receipt: stored, stages };
+}
+
+type FileProof =
+  | { kind: "digest"; value: string }
+  | { kind: "absent" }
+  | { kind: "refusal" };
+
+/** Walk every relative path component from a canonical root with lstat and
+ *  prove the final node is an exact regular-file digest, an exact `absent`
+ *  (ENOENT), or an unprovable refusal. A symlink in ANY component - including
+ *  an ancestor directory under the Candidate workspace, live source, or backup
+ *  root - can redirect digest proof and later rollback outside the owned path
+ *  while appearing as a regular final file, so each component is inspected with
+ *  lstat and refused before any digest or rollback authority. Only ENOENT (on
+ *  the final node or an ancestor whose absence implies the final node is also
+ *  absent) means absent; a symlink, non-directory ancestor, directory or
+ *  non-file final node, unreadable component, or root escape refuses so no I/O
+ *  failure or redirection can be mistaken for absence or content. */
+async function proveOwnedFile(root: string, file: string): Promise<FileProof> {
+  // Root-escape defence: detectUnsafePath rejects absolute, backslash, null,
+  // empty, and ".."/"." traversal. The caller also checks this for a precise
+  // unsafePath reason; this guard keeps proveOwnedFile fail-closed on its own.
+  if (detectUnsafePath(file) !== undefined) {
+    return { kind: "refusal" };
+  }
+  const parts = file.split("/");
+  let current = root;
+  for (let index = 0; index < parts.length; index += 1) {
+    current = path.join(current, parts[index]!);
+    try {
+      const stats = await lstat(current);
+      // A symlink in any component - ancestor or final - can redirect proof and
+      // rollback outside the owned root. lstat does not follow a final-node
+      // symlink, but it DOES follow parent-component symlinks, so an ancestor
+      // symlink would otherwise make a redirected outside file appear as a
+      // regular file. Refuse on any symlink component.
+      if (stats.isSymbolicLink()) {
+        return { kind: "refusal" };
+      }
+      if (index < parts.length - 1) {
+        // An ancestor that is not a directory cannot contain the final node.
+        if (!stats.isDirectory()) {
+          return { kind: "refusal" };
+        }
+      } else if (!stats.isFile()) {
+        // The final node must be a regular file; a directory or other node refuses.
+        return { kind: "refusal" };
+      }
+    } catch (error) {
+      // Only ENOENT means absent: the final node, or an ancestor whose absence
+      // implies the final node is also absent. Any other I/O error refuses
+      // without guessing, so an unreadable component is never mistaken for
+      // absence or content.
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return { kind: "absent" };
+      }
+      return { kind: "refusal" };
+    }
+  }
+  try {
+    return { kind: "digest", value: await fileDigest(current) };
+  } catch {
+    return { kind: "refusal" };
+  }
+}
+
+type SourceOnlyProof =
+  | { kind: "refusal"; reason: SourceOnlyRecoveryRefusalReason }
+  | { kind: "proven"; postApplyDigests: Record<string, string>; backups: BackupRecord[] };
+
+/** Prove that the live affected source matches the reviewed Candidate final
+ *  bytes (or intended absence) and that the deterministic backup matches the
+ *  receipt's pre-apply evidence. Any mismatch refuses without mutation. */
+async function proveCandidateFinalAndBackup(
+  task: TaskRecord,
+  receipt: IntegrationReceiptRecord,
+): Promise<SourceOnlyProof> {
+  const postApplyDigests: Record<string, string> = {};
+  const backups: BackupRecord[] = [];
+  const bkpDir = backupDirPath(task.paths.root, receipt.id);
+
+  for (const file of receipt.affectedFiles) {
+    if (detectUnsafePath(file) !== undefined) {
+      return { kind: "refusal", reason: SOURCE_ONLY_RECOVERY_REFUSALS.unsafePath };
+    }
+    const preApply = receipt.sourceEvidence[file]!;
+    const candidateProof = await proveOwnedFile(task.paths.workspace, file);
+    if (candidateProof.kind === "refusal") {
+      return { kind: "refusal", reason: SOURCE_ONLY_RECOVERY_REFUSALS.unreadableProofPath };
+    }
+    const liveProof = await proveOwnedFile(task.sourcePath, file);
+    if (liveProof.kind === "refusal") {
+      return { kind: "refusal", reason: SOURCE_ONLY_RECOVERY_REFUSALS.unreadableProofPath };
+    }
+    const candidateDigest = candidateProof.kind === "digest" ? candidateProof.value : "absent";
+    const liveDigest = liveProof.kind === "digest" ? liveProof.value : "absent";
+
+    if (candidateDigest !== liveDigest) {
+      return { kind: "refusal", reason: SOURCE_ONLY_RECOVERY_REFUSALS.candidateFinalMismatch };
+    }
+
+    if (preApply === "absent") {
+      backups.push({ file, existed: false, backupPath: "", digest: "" });
+    } else {
+      const backupProof = await proveOwnedFile(bkpDir, file);
+      if (backupProof.kind === "refusal") {
+        return { kind: "refusal", reason: SOURCE_ONLY_RECOVERY_REFUSALS.unreadableProofPath };
+      }
+      const backupDigest = backupProof.kind === "digest" ? backupProof.value : "absent";
+      if (backupDigest !== preApply) {
+        return { kind: "refusal", reason: SOURCE_ONLY_RECOVERY_REFUSALS.backupMismatch };
+      }
+      backups.push({ file, existed: true, backupPath: path.join(bkpDir, file), digest: preApply });
+    }
+    postApplyDigests[file] = liveDigest;
+  }
+
+  return { kind: "proven", postApplyDigests, backups };
+}
+
+/** Run isolated acceptance on the already-applied source and persist exactly
+ *  one ordinary terminal result. Mirrors applyIntegration's source-only tail
+ *  (verification, concurrent-change detection, rollback/retained policy) so a
+ *  recovered result is indistinguishable from an ordinary one. */
+async function verifyAndFinalizeSourceOnly(
+  store: StateStore,
+  task: TaskRecord,
+  receipt: IntegrationReceiptRecord,
+  operationId: string,
+  settings: IntegrationSettings,
+  stages: IntegrationStageEvidence[],
+  postApplyDigests: Record<string, string>,
+  backups: BackupRecord[],
+): Promise<IntegrationResult> {
+  const receiptId = receipt.id;
+  let verifyEnv: Awaited<ReturnType<typeof copyForVerification>> | undefined;
+  const verificationCommands: VerificationCommandResult[] = [];
+  let verificationPassed = true;
+  let verificationError: string | undefined;
+
+  try {
+    verifyEnv = await copyForVerification(task.sourcePath, task.spec.workspace.exclude);
+    const { env: verificationEnvironment, shellGitPrefix } = await verifierProcessEnvironment(
+      task,
+      verifyEnv.projectCwd,
+    );
+    for (const command of task.spec.acceptance.commands) {
+      const result = await runCaptured(
+        "/bin/zsh",
+        ["-lc", shellGitPrefix + command],
+        {
+          cwd: verifyEnv.projectCwd,
+          env: verificationEnvironment,
+          timeoutMs: settings.verificationTimeoutMs,
+        },
+      );
+      const cmdResult: VerificationCommandResult = {
+        command,
+        exitCode: result.exitCode,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        durationMs: result.durationMs,
+        timedOut: result.timedOut,
+      };
+      verificationCommands.push(cmdResult);
+      if (result.exitCode !== 0) verificationPassed = false;
+    }
+  } catch (err) {
+    verificationPassed = false;
+    verificationError = `Verification infrastructure failed: ${
+      err instanceof Error ? err.message : String(err)
+    }`;
+  } finally {
+    if (verifyEnv !== undefined) {
+      await rm(verifyEnv.cleanupRoot, { recursive: true, force: true });
+    }
+  }
+
+  const concurrentChanged = await detectConcurrentChanges(
+    task.sourcePath,
+    postApplyDigests,
+  );
+
+  const sourceVerificationEvidence: IntegrationStageEvidence = {
+    stage: "source-verified",
+    status: verificationPassed && concurrentChanged.length === 0 ? "passed" : "failed",
+    ...(verificationCommands.length === 0 ? {} : { commands: verificationCommands }),
+    ...(verificationError === undefined && concurrentChanged.length === 0
+      ? {}
+      : {
+          error: verificationError
+            ?? `Concurrent file edits detected: ${concurrentChanged.join(", ")}`,
+        }),
+  };
+  recordStage(
+    store,
+    task.id,
+    operationId,
+    receiptId,
+    stages,
+    sourceVerificationEvidence,
+  );
+
+  if (concurrentChanged.length > 0) {
+    const verificationSummary = verificationPassed
+      ? "Source verification passed"
+      : (verificationError ?? "Source verification failed");
+    const record = buildResultRecord(
+      operationId,
+      receiptId, task.id, "retained-failure", backupDirPath(task.paths.root, receiptId),
+      verificationCommands.length > 0 ? verificationCommands : undefined,
+      `${verificationSummary}; concurrent file edits detected ` +
+      `during verification: ${concurrentChanged.join(", ")}. ` +
+      `Changes retained per safety policy.`,
+      undefined,
+      stages,
+    );
+    record.postApplyDigests = postApplyDigests;
+    store.saveIntegrationResult(record);
+    store.addEvent(
+      task.id, undefined, "integration.apply.completed",
+      "Integration applied but verification failed with concurrent edits (retained)",
+      record,
+    );
+    return stripResultMeta(record);
+  }
+
+  if (verificationPassed) {
+    recordStage(
+      store, task.id, operationId, receiptId, stages,
+      { stage: "artifact-built", status: "not-applicable" },
+    );
+    recordStage(
+      store, task.id, operationId, receiptId, stages,
+      { stage: "runtime-activated", status: "not-applicable" },
+    );
+    const record = buildResultRecord(
+      operationId,
+      receiptId, task.id, "applied", backupDirPath(task.paths.root, receiptId),
+      verificationCommands.length > 0 ? verificationCommands : undefined,
+      undefined,
+      new Date().toISOString(),
+      stages,
+    );
+    record.postApplyDigests = postApplyDigests;
+    store.saveIntegrationResult(record);
+    store.addEvent(
+      task.id, undefined, "integration.apply.completed",
+      "Integration applied successfully", record,
+    );
+    return stripResultMeta(record);
+  }
+
+  const failureReason = verificationError ?? "Source verification failed";
+
+  if (settings.autoRollback) {
+    const rollbackFailures = await rollbackSource(
+      task.sourcePath,
+      backups,
+    );
+    const error =
+      rollbackFailures.length > 0
+        ? `${failureReason}; rollback incomplete: ${rollbackFailures.join(", ")}`
+        : `${failureReason}; patch rolled back`;
+    const status: IntegrationStatus = rollbackFailures.length > 0
+      ? "retained-failure"
+      : "rolled-back";
+    const record = buildResultRecord(
+      operationId,
+      receiptId, task.id, status, backupDirPath(task.paths.root, receiptId),
+      verificationCommands.length > 0 ? verificationCommands : undefined,
+      error,
+      undefined,
+      stages,
+    );
+    record.postApplyDigests = postApplyDigests;
+    if (rollbackFailures.length > 0) record.rollbackFailures = rollbackFailures;
+    store.saveIntegrationResult(record);
+    store.addEvent(
+      task.id, undefined, "integration.rollback.completed",
+      "Integration rolled back after verification failure", record,
+    );
+    return stripResultMeta(record);
+  }
+
+  const record = buildResultRecord(
+    operationId,
+    receiptId, task.id, "retained-failure", backupDirPath(task.paths.root, receiptId),
+    verificationCommands.length > 0 ? verificationCommands : undefined,
+    `${failureReason}; changes retained per settings`,
+    undefined,
+    stages,
+  );
+  record.postApplyDigests = postApplyDigests;
+  store.saveIntegrationResult(record);
+  store.addEvent(
+    task.id, undefined, "integration.apply.completed",
+    "Integration applied but verification failed (retained)", record,
+  );
+  return stripResultMeta(record);
+}
+
+/**
+ * Continue one source-only Integration operation after its durable
+ * `source-applied: passed` stage. Proves the live affected source equals the
+ * reviewed Candidate final bytes and that the deterministic backup matches the
+ * receipt pre-apply evidence, then runs the Task's acceptance commands in the
+ * existing isolated verification copy and persists exactly one ordinary
+ * terminal result. Never replays `git apply`, never consumes a second receipt,
+ * and never touches build/activation work.
+ */
+export async function continueSourceOnlyIntegration(
+  store: StateStore,
+  taskId: string,
+  receiptId: string,
+  operationId: string,
+  settings: IntegrationSettings,
+): Promise<SourceOnlyRecoveryOutcome> {
+  const eligibility = classifySourceOnlyRecovery(store, taskId, receiptId, operationId);
+  if (!eligibility.eligible) {
+    return { status: "outcome-unknown", reason: eligibility.reason };
+  }
+  const { task, receipt, stages } = eligibility;
+
+  const proof = await proveCandidateFinalAndBackup(task, receipt);
+  if (proof.kind === "refusal") {
+    return { status: "outcome-unknown", reason: proof.reason };
+  }
+
+  return verifyAndFinalizeSourceOnly(
+    store,
+    task,
+    receipt,
+    operationId,
+    settings,
+    stages,
+    proof.postApplyDigests,
+    proof.backups,
+  );
+}
+
 // --- Result construction ---
 
 function persistRejection(

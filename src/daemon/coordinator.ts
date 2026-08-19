@@ -59,6 +59,17 @@ import {
 import type { DaemonShutdownIntent } from "./protocol.js";
 import { latestMainReview, recordMainReview } from "../core/main-review.js";
 import {
+  decideMainDelivery,
+  defaultReadDiff,
+  findLatestIntegrationOperation,
+  findLatestIntegrationReceipt,
+  prepareMainDelivery,
+  type DecideMainDeliveryInput,
+  type MainDeliveryHost,
+  type PrepareMainDeliveryInput,
+} from "../core/main-delivery.js";
+import type { MainDeliveryCheckpoint } from "../core/types.js";
+import {
   projectMainFailureAttribution,
   recordMainFailureAttribution,
   type FailureAttributionCause,
@@ -190,12 +201,15 @@ import {
   type StatisticsFilter,
 } from "../core/statistics.js";
 import {
+  attachExecutableRoutingAdvice,
   provideRoutingAdvice,
   type CompetitionTrigger,
   type RoutingAdvisoryResponse,
   type RoutingPolicySettings,
+  type RoutingReadinessProjection,
 } from "../core/model-routing.js";
 import { resolveProfileRoutingCandidates } from "../core/profile-routing.js";
+import { projectStrategyPolicyFromStore } from "../core/strategy-advice.js";
 import {
   SettingsService,
   type ForkLightSettings,
@@ -205,7 +219,10 @@ import type { StateStore } from "../state/store.js";
 import { clearTaskPreparationArtifacts, isWorkspaceReady } from "../workspace/copy.js";
 import {
   applyIntegration,
+  classifySourceOnlyRecovery,
+  continueSourceOnlyIntegration,
   preflightIntegration,
+  SOURCE_ONLY_RECOVERY_REFUSALS,
   type PreflightReceipt,
 } from "../core/integration.js";
 import { getTaskEconomicsReport, type TaskEconomicsReport } from "../core/task-economics-report.js";
@@ -242,12 +259,30 @@ import type { DirectCodexPairedSample } from "../core/direct-codex-calibration.j
 import type { DirectCodexSampleReview } from "../core/direct-codex-review.js";
 import type { DirectCodexPublicationPreview, DirectCodexRegistrationResult } from "../core/direct-codex-publication-service.js";
 import { guidedDirectCodexCapture } from "../core/direct-codex-guided-capture-service.js";
+import {
+  captureMainUsage,
+  captureMainUsageEpisode,
+  readMainUsageStatus,
+  type MainUsageSample,
+  type MainUsageStatus,
+} from "../core/main-token-usage.js";
+import {
+  assessMainPair,
+  readMainPairReport,
+  type MainPairAssessResult,
+  type MainPairReport,
+} from "../core/main-token-pair.js";
+import {
+  readMainTokenValueReport,
+  type MainTokenValueReport,
+} from "../core/main-token-value-report.js";
 import { currentBuildIdentity } from "../core/build-identity.js";
 import {
   buildIntegrationOperationView,
   type IntegrationOperationContext,
 } from "../core/integration-operation.js";
 import { buildTaskDecisionView } from "../core/task-decision-view.js";
+import { buildMainDecisionPacketForTask } from "../core/main-decision-packet.js";
 import {
   projectTaskSurface,
   type SafeTaskSummary,
@@ -326,7 +361,21 @@ import {
   getReviewGraphStatus,
   reconcileAllReviewGraphs,
   reconcileReviewGraphForTask,
+  repairReviewResult,
 } from "../core/review-graph.js";
+import {
+  auditStorage,
+  previewStorage,
+  reclaimStorage,
+  retainStorage,
+  storageHomeFromStore,
+} from "../core/storage-lifecycle.js";
+import type {
+  StorageAuditView,
+  StoragePreviewView,
+  StorageReclaimView,
+  StorageRetainView,
+} from "../core/types.js";
 
 export interface PlanRegistrationResult {
   planId: string;
@@ -2029,6 +2078,30 @@ export class DaemonCoordinator {
     return registerDirectCodexCalibrationPublication(this.store, params);
   }
 
+  mainTokenCapture(params: unknown): MainUsageSample {
+    return captureMainUsage(this.store, params);
+  }
+
+  mainTokenCaptureEpisode(params: unknown): MainUsageSample {
+    return captureMainUsageEpisode(this.store, params);
+  }
+
+  mainTokenStatus(taskId: unknown, comparisonId: unknown): MainUsageStatus {
+    return readMainUsageStatus(this.store, taskId, comparisonId);
+  }
+
+  mainTokenAssess(params: unknown): MainPairAssessResult {
+    return assessMainPair(this.store, params);
+  }
+
+  mainTokenPairReport(taskId: unknown, comparisonId: unknown): MainPairReport {
+    return readMainPairReport(this.store, taskId, comparisonId);
+  }
+
+  mainTokenValueReport(params: unknown): MainTokenValueReport {
+    return readMainTokenValueReport(this.store, params);
+  }
+
   list(statuses?: TaskStatus[], limit = 20): TaskRecord[] {
     return this.store.listTasks(statuses).slice(0, Math.max(1, Math.min(limit, 100)));
   }
@@ -2311,7 +2384,64 @@ export class DaemonCoordinator {
     if (normalizedTriggers !== undefined) {
       adviceInput.competitionTriggers = normalizedTriggers;
     }
-    return provideRoutingAdvice(adviceInput);
+    const historical = provideRoutingAdvice(adviceInput);
+    const familyTrimmed = taskFamily !== undefined && taskFamily.trim().length > 0
+      ? taskFamily.trim()
+      : undefined;
+    const strategyPolicy = projectStrategyPolicyFromStore(this.store, {
+      taskClass: taskClass.trim(),
+      ...(familyTrimmed === undefined ? {} : { taskFamily: familyTrimmed }),
+      policy,
+      competitionIntent: normalizedIntent ?? "none",
+      competitionTriggers: normalizedTriggers ?? [],
+      shouldRunCompetition: historical.shouldRunCompetition,
+      exactEvidence: stats.modeAwareRoutingEvidence(taskClass.trim()),
+      ...(familyTrimmed === undefined
+        ? {}
+        : { familyEvidence: stats.modeAwareRoutingEvidenceByFamily(familyTrimmed) }),
+    });
+    const withStrategy = { ...historical, strategyPolicy };
+    if (!profilePath) {
+      return withStrategy;
+    }
+    return attachExecutableRoutingAdvice(
+      withStrategy,
+      this.resolveRoutingProfileReadiness(),
+    );
+  }
+
+  /** Current bounded readiness for saved Profiles. Reuses the same resolver
+   *  as Competition admission. Never probes a Provider or mutates state. */
+  private resolveRoutingProfileReadiness(): Map<string, RoutingReadinessProjection> {
+    const settings = this.settings.get();
+    const providers = providerReadiness(settings.providerDefaults, this.providerAuthInspector);
+    const runtimes: Partial<Record<RuntimeName, { ok: boolean }>> = {};
+    for (const adapter of listWorkerAdapters()) {
+      const doctor = adapter.doctor();
+      if (!(doctor instanceof Promise)) {
+        runtimes[adapter.name] = { ok: doctor.ok };
+      }
+    }
+    const results = resolveWorkerReadiness({
+      workerProfiles: settings.workerProfiles,
+      providerDefaults: settings.providerDefaults,
+      providers: providers.providers,
+      runtimes,
+      ...(settings.modelCatalog === undefined ? {} : { modelCatalog: settings.modelCatalog }),
+    });
+    const byId = new Map<string, RoutingReadinessProjection>();
+    for (const result of results) {
+      byId.set(result.workerId, {
+        workerProfileId: result.workerId,
+        executionPreference: result.executionPreference,
+        resolvedExecutionMode: result.resolvedExecutionMode,
+        state: result.state,
+        reason: result.reason,
+        canLaunch: result.canLaunch,
+        nextAction: result.nextAction,
+      });
+    }
+    return byId;
   }
 
   /** Return a detached deeply-frozen portfolio economics summary for all
@@ -2413,18 +2543,20 @@ export class DaemonCoordinator {
     }
     const reviewGraph = getReviewGraphStatus(this.store, taskId);
     const attentionResolution = latestTaskResolutionState(events);
+    const decision = buildTaskDecisionView({
+      task,
+      attempts,
+      events,
+      integrationResults: this.store.listIntegrationResults(taskId),
+      ...(remediationDisposition === undefined ? {} : { remediationDisposition }),
+    });
     return {
       task,
       attempts,
       events,
       mainReview: latestMainReview(events),
-      decision: buildTaskDecisionView({
-        task,
-        attempts,
-        events,
-        integrationResults: this.store.listIntegrationResults(taskId),
-        ...(remediationDisposition === undefined ? {} : { remediationDisposition }),
-      }),
+      decision,
+      decisionPacket: buildMainDecisionPacketForTask(this.store, taskId, decision),
       diff,
       ...(competitionContext === undefined ? {} : { competitionContext }),
       ...(reviewGraph === undefined ? {} : { reviewGraph }),
@@ -2903,8 +3035,13 @@ export class DaemonCoordinator {
       );
       // A started Worker-repair round has its own typed continuation. Do not
       // let generic resume/restart authority consume it or create a second
-      // Attempt identity.
-      if (pendingWorkerRepair !== null || currentAttemptIsWorkerValidationRepair) {
+      // Attempt identity. Same-Judge result-repair Tasks are one-shot
+      // (baseMaxAttempts=1); generic resume would mint Attempt 2 and fail closed.
+      if (
+        pendingWorkerRepair !== null
+        || currentAttemptIsWorkerValidationRepair
+        || this.isReviewResultRepairTask(task.id)
+      ) {
         // The durable pending marker is queued below with the exact auth.
         // A repair Attempt with terminal or corrupt history is also kept out
         // of generic resume; the dedicated repair recovery pass will close or
@@ -2921,6 +3058,7 @@ export class DaemonCoordinator {
     // Recover failed/interrupted tasks from the narrow post-grant crash window,
     // and recover already-queued corrections without inventing new feedback.
     for (const task of this.store.listTasks(["failed", "interrupted", "queued"])) {
+      if (this.isReviewResultRepairTask(task.id)) continue;
       if (this.active.has(task.id) || this.queue.some((job) => job.taskId === task.id)) continue;
       const exec = this.settings.get().execution;
       const baseMaxAttempts = task.effectivePolicy?.values.baseMaxAttempts ?? exec.maxAttempts;
@@ -2943,6 +3081,7 @@ export class DaemonCoordinator {
     // interrupted Attempt and scope auto-queue; ordinary stop leaves
     // interrupted Tasks for Main without inventing success or a new Task.
     for (const task of this.store.listTasks(["failed", "interrupted"])) {
+      if (this.isReviewResultRepairTask(task.id)) continue;
       if (this.active.has(task.id) || this.queue.some((job) => job.taskId === task.id)) continue;
       const exec = this.settings.get().execution;
       const baseMaxAttempts = task.effectivePolicy?.values.baseMaxAttempts ?? exec.maxAttempts;
@@ -3023,10 +3162,12 @@ export class DaemonCoordinator {
     // but not yet running when the daemon stopped.
     for (const task of this.store.listTasks(["queued"])) {
       if (this.store.getReviewAssignmentByReviewerTaskId(task.id) === undefined) continue;
+      if (this.isReviewResultRepairTask(task.id)) continue;
       if (this.active.has(task.id) || this.queue.some((job) => job.taskId === task.id)) continue;
       this.enqueue({ taskId: task.id, resuming: false }, true);
       recovered.push(task.id);
     }
+    this.recoverReviewResultRepairs(recovered);
     // Turn terminal reviewer resultText into validated evidence exactly once.
     reconcileAllReviewGraphs(this.store);
     this.recoverIntegrationOperations();
@@ -3036,6 +3177,40 @@ export class DaemonCoordinator {
       this.reconcileGoal(goal.id);
     }
     return recovered;
+  }
+
+  private isReviewResultRepairTask(taskId: string): boolean {
+    return this.store.getReviewAssignmentByRepairTaskId(taskId) !== undefined;
+  }
+
+  /** Re-queue the same durable same-Judge repair Task. Zero Attempts start
+   *  once; one interrupted Attempt reopens that exact Attempt. Never resumes
+   *  as a new Attempt and never mints a second repair Task. */
+  private recoverReviewResultRepairs(recovered: string[]): void {
+    for (const task of this.store.listTasks(["queued", "interrupted"])) {
+      if (!this.isReviewResultRepairTask(task.id)) continue;
+      if (this.active.has(task.id) || this.queue.some((job) => job.taskId === task.id)) continue;
+      const attempts = this.store.listAttempts(task.id);
+      if (attempts.length === 0) {
+        this.enqueue({ taskId: task.id, resuming: false }, true);
+        if (!recovered.includes(task.id)) recovered.push(task.id);
+        continue;
+      }
+      const interrupted = attempts.filter((attempt) => attempt.status === "interrupted");
+      if (attempts.length === 1 && interrupted.length === 1) {
+        const attempt = interrupted[0]!;
+        this.enqueue({
+          taskId: task.id,
+          resuming: false,
+          executionOptions: {
+            attemptId: attempt.id,
+            maximumOrdinal: 1,
+            ...(attempt.executionKind === undefined ? {} : { executionKind: attempt.executionKind }),
+          },
+        }, true);
+        if (!recovered.includes(task.id)) recovered.push(task.id);
+      }
+    }
   }
 
   /** Collect only the typed evidence needed by the Worker-repair allowlist. */
@@ -3467,6 +3642,21 @@ export class DaemonCoordinator {
         };
         this.integrationOperations.set(context.operationId, context);
         if (this.store.getIntegrationResult(context.operationId) !== undefined) continue;
+        // One in-memory owner per operation: a second reconstruction never
+        // starts a parallel continuation, and a live operation is reused.
+        if (this.activeIntegrations.has(context.operationId)) continue;
+
+        const eligibility = classifySourceOnlyRecovery(
+          this.store,
+          context.taskId,
+          context.receiptId,
+          context.operationId,
+        );
+        if (eligibility.eligible) {
+          this.launchSourceOnlyRecovery(context);
+          continue;
+        }
+
         const alreadyRecovered = events.some((candidate) => {
           if (
             candidate.type !== "integration.operation.recovered"
@@ -3484,7 +3674,7 @@ export class DaemonCoordinator {
             undefined,
             "integration.operation.recovered",
             "Daemon restart found Integration outcome unknown",
-            { ...context, status: "outcome-unknown" },
+            { ...context, status: "outcome-unknown", reason: eligibility.reason },
           );
         }
       }
@@ -3503,6 +3693,58 @@ export class DaemonCoordinator {
         }
       }
     }
+  }
+
+  /** Register one eligible source-only operation in activeIntegrations and
+   *  launch its continuation as background work. A proof refusal or unexpected
+   *  execution failure leaves the operation outcome-unknown with a bounded
+   *  fixed reason; no source is mutated and no second terminal row is written. */
+  private launchSourceOnlyRecovery(context: IntegrationOperationContext): void {
+    const execution = continueSourceOnlyIntegration(
+      this.store,
+      context.taskId,
+      context.receiptId,
+      context.operationId,
+      this.settings.get().integration,
+    )
+      .then((outcome) => {
+        if (outcome.status !== "outcome-unknown") return;
+        const alreadyRecovered = this.store.listEvents(context.taskId).some(
+          (event) =>
+            event.type === "integration.operation.recovered"
+            && event.payload !== null
+            && typeof event.payload === "object"
+            && (event.payload as { operationId?: unknown }).operationId
+              === context.operationId,
+        );
+        if (alreadyRecovered) return;
+        this.store.addEvent(
+          context.taskId,
+          undefined,
+          "integration.operation.recovered",
+          "Daemon restart found Integration outcome unknown",
+          { ...context, status: "outcome-unknown", reason: outcome.reason },
+        );
+      })
+      .catch(() => {
+        this.store.addEvent(
+          context.taskId,
+          undefined,
+          "integration.operation.recovered",
+          "Integration source-only recovery failed before a final result",
+          {
+            ...context,
+            status: "outcome-unknown",
+            reason: SOURCE_ONLY_RECOVERY_REFUSALS.executionFailed,
+          },
+        );
+      })
+      .finally(() => {
+        this.activeIntegrations.delete(context.operationId);
+        this.reconcileGoalsForTask(context.taskId);
+        this.reconcilePlans();
+      });
+    this.activeIntegrations.set(context.operationId, execution);
   }
 
   queueTask(taskId: string): TaskRecord {
@@ -3831,6 +4073,99 @@ export class DaemonCoordinator {
   reviewGraphStatus(taskId: string): ReviewGraphView | undefined {
     this.store.getTask(taskId);
     return getReviewGraphStatus(this.store, taskId);
+  }
+
+  private deliveryHost(): MainDeliveryHost {
+    return {
+      store: this.store,
+      submitFile: (taskFile) => this.submitFile(taskFile),
+      inspectTaskFile: async (taskFile) => {
+        const prepared = await prepareTaskAdmission(taskFile, this.settings.get());
+        const required = prepared.spec.reviewRequirement?.requiredJudges;
+        return { requiredJudges: required === 1 || required === 2 ? required : 0 };
+      },
+      createReviewGraph: (input) => this.createReviewGraph({
+        taskId: input.taskId,
+        reviewerWorkerProfileIds: input.reviewerWorkerProfileIds,
+        reason: input.reason,
+        confirm: true,
+      }),
+      recordMainReview: (taskId, decision, reason, confirm) =>
+        this.mainReview(taskId, decision, reason, confirm),
+      preflightIntegration: (taskId) => this.integrationPreflight(taskId),
+      startIntegration: (taskId, receiptId) => this.startIntegration(taskId, receiptId),
+      waitIntegration: (operationId, timeoutMs) => this.waitIntegration(operationId, timeoutMs),
+      findIntegration: (taskId) => {
+        for (const context of this.integrationOperations.values()) {
+          if (context.taskId === taskId) {
+            return { operationId: context.operationId, receiptId: context.receiptId };
+          }
+        }
+        return findLatestIntegrationOperation(this.store, taskId);
+      },
+      findLatestReceipt: (taskId) => findLatestIntegrationReceipt(this.store, taskId),
+      sleep: (milliseconds) => sleep(milliseconds),
+      now: () => Date.now(),
+      pollMs: this.settings.get().console.refreshIntervalMs,
+      readDiff: (task) => defaultReadDiff(task),
+    };
+  }
+
+  /** One resumable prepare: submit-or-observe, exact Review Graph, wait to
+   *  decision-ready. Never records Main review or Integration. */
+  async deliveryPrepare(input: PrepareMainDeliveryInput): Promise<MainDeliveryCheckpoint> {
+    return prepareMainDelivery(this.deliveryHost(), input);
+  }
+
+  /** One resumable decide: exact-bind Main decision; accept-only preflight
+   *  and one Integration. Reuses durable records on exact re-entry. */
+  async deliveryDecide(input: DecideMainDeliveryInput): Promise<MainDeliveryCheckpoint> {
+    return decideMainDelivery(this.deliveryHost(), input);
+  }
+
+  /** Explicit Main-confirmed one-shot same-Judge schema-only summary repair.
+   *  Does not increment Goal review rounds, assignment count, or Judge count. */
+  async repairReviewResult(input: {
+    taskId: string;
+    assignmentId: string;
+    reason: string;
+    confirm: true;
+  }): Promise<{
+    graph: ReviewGraphView;
+    assignmentId: string;
+    repairTaskId: string;
+    created: true;
+    originalFailureCode: string;
+  }> {
+    if (input.confirm !== true) throw new Error("review result repair requires confirm: true");
+    if (this.closing) throw new Error("ForkLight daemon is shutting down");
+    const result = await repairReviewResult(this.store, this.settings.get(), {
+      candidateTaskId: input.taskId,
+      assignmentId: input.assignmentId,
+      reason: input.reason,
+      confirm: true,
+    });
+    try {
+      this.queueTask(result.repairTaskId);
+    } catch {
+      this.store.addEvent(
+        result.repairTaskId,
+        undefined,
+        "task.ready",
+        "Repair Task persisted and will be recovered from the durable queue",
+      );
+    }
+    const graph = getReviewGraphStatus(this.store, input.taskId);
+    if (graph === undefined) {
+      throw new Error("review graph status missing after result repair");
+    }
+    return {
+      graph,
+      assignmentId: result.assignmentId,
+      repairTaskId: result.repairTaskId,
+      created: true,
+      originalFailureCode: result.originalFailureCode,
+    };
   }
 
   /** Authorize and execute one bounded candidate reverification. Never enters a
@@ -4368,6 +4703,51 @@ export class DaemonCoordinator {
     }
   }
 
+  /** Continue one same-Judge schema-only repair without generic resume.
+   *  Reopens the exact interrupted Attempt when executionOptions.attemptId is
+   *  set; otherwise starts the single base Attempt. */
+  private async executeReviewResultRepair(
+    job: QueuedJob,
+    task: TaskRecord,
+    settings: ForkLightSettings,
+    onWorkerProfileSlotRelease: () => void,
+  ): Promise<void> {
+    const exec = settings.execution;
+    let currentTask = task;
+    const options = job.executionOptions;
+    const reopenAttempt = options?.attemptId !== undefined;
+    if (!reopenAttempt) {
+      try {
+        if (!(await isWorkspaceReady(currentTask.paths))) {
+          await clearTaskPreparationArtifacts(currentTask.paths);
+          currentTask = await prepareTaskWorkspace(this.store, currentTask);
+        }
+      } catch (error) {
+        const latest = this.store.getTask(task.id);
+        if (latest.status !== "failed") {
+          const message = error instanceof Error ? error.message : String(error);
+          this.store.setTaskStatus(task.id, "failed", {
+            finishedAt: timestamp(),
+            workerPid: null,
+            error: `Workspace preparation failed: recovery cleanup: ${message}`,
+          });
+        }
+        return;
+      }
+    }
+    await executeAttempt(
+      this.store,
+      currentTask,
+      reopenAttempt,
+      undefined,
+      undefined,
+      exec,
+      settings.providerDefaults,
+      options,
+      onWorkerProfileSlotRelease,
+    );
+  }
+
   private async execute(job: QueuedJob, settings: ForkLightSettings): Promise<void> {
     const exec = settings.execution;
     const task = this.store.getTask(job.taskId);
@@ -4407,6 +4787,11 @@ export class DaemonCoordinator {
         settings.providerDefaults,
         onWorkerProfileSlotRelease,
       );
+      return;
+    }
+
+    if (this.isReviewResultRepairTask(job.taskId)) {
+      await this.executeReviewResultRepair(job, task, settings, onWorkerProfileSlotRelease);
       return;
     }
 
@@ -4967,5 +5352,53 @@ export class DaemonCoordinator {
     } finally {
       this.outcomeIntakeConfirmInFlight.delete(intakeId);
     }
+  }
+
+  private storageObservations(): {
+    extraActiveTaskIds: string[];
+  } {
+    const runningIntegrationTaskIds = [...this.integrationOperations.values()]
+      .filter((operation) => this.activeIntegrations.has(operation.operationId))
+      .map((operation) => operation.taskId);
+    return {
+      extraActiveTaskIds: [...new Set([...this.active.keys(), ...runningIntegrationTaskIds])],
+    };
+  }
+
+  /** Read-only Task storage audit. Never mutates Store, filesystem, or processes. */
+  storageAudit(): StorageAuditView {
+    return auditStorage(this.store, storageHomeFromStore(this.store), this.storageObservations());
+  }
+
+  /** Read-only exact preview of known regenerable targets. */
+  storagePreview(taskId?: string): StoragePreviewView {
+    return previewStorage(
+      this.store,
+      storageHomeFromStore(this.store),
+      taskId === undefined ? {} : { taskId },
+      this.storageObservations(),
+    );
+  }
+
+  /** Confirmed reclaim. Re-evaluates current truth immediately before deletion. */
+  storageReclaim(params: { taskId?: string; allEligible?: boolean; confirm: true }): StorageReclaimView {
+    if (this.closing) throw new Error("ForkLight daemon is shutting down");
+    return reclaimStorage(
+      this.store,
+      storageHomeFromStore(this.store),
+      params,
+      this.storageObservations(),
+    );
+  }
+
+  /** Explicit keep-full-space disposition for an otherwise reclaimable Task. */
+  storageRetain(params: { taskId: string; reason: string; confirm: true }): StorageRetainView {
+    if (this.closing) throw new Error("ForkLight daemon is shutting down");
+    return retainStorage(
+      this.store,
+      storageHomeFromStore(this.store),
+      params,
+      this.storageObservations(),
+    );
   }
 }

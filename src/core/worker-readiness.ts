@@ -7,7 +7,10 @@
  */
 
 import type { ModelCatalogSettings } from "./model-catalog.js";
-import { nativeGoalSupportForRuntime } from "./execution-mode.js";
+import {
+  executionCapabilitiesForRuntime,
+  projectResolvedExecutionMode,
+} from "./execution-mode.js";
 import type { ProviderName, ProviderReadiness } from "./providers.js";
 import { assertProviderRuntimePair, type RuntimeName } from "./runtime-names.js";
 import type { ProviderDefaultsSettings } from "./settings.js";
@@ -37,7 +40,8 @@ export type WorkerReadinessReason =
   | "runtime-unavailable"
   | "pairing-invalid"
   | "model-invalid"
-  | "native-goal-unsupported";
+  | "native-goal-unsupported"
+  | "persistent-session-unsupported";
 
 export type WorkerReadinessNextAction =
   | "none"
@@ -57,6 +61,8 @@ export interface WorkerReadinessChecks {
   connection: ProviderHealthStatus;
   /** Whether the selected Runtime proves a native Goal contract. */
   nativeGoal: "ready" | "unsupported" | "unknown";
+  /** Whether the selected Runtime proves a Task-bound persistent Session. */
+  persistentSession: "ready" | "unsupported" | "unknown";
 }
 
 export interface WorkerReadinessResult {
@@ -103,6 +109,7 @@ function checks(
     runtime: "unknown",
     connection: "unverified",
     nativeGoal: "unknown",
+    persistentSession: "unknown",
     ...patch,
   };
 }
@@ -110,23 +117,17 @@ function checks(
 function readinessExecutionMode(
   profile: WorkerProfile,
 ): { preference: ExecutionPreference; resolved: ResolvedExecutionMode } {
-  const nativeGoalSupported = nativeGoalSupportForRuntime(profile.runtime);
-  const preference: ExecutionPreference = profile.executionPreference ?? "single-run";
-  if (preference === "auto") {
-    return { preference, resolved: nativeGoalSupported ? "native-goal" : "single-run" };
-  }
-  if (preference === "native-goal") {
-    // Forced native-goal never falls back: when unsupported the Worker is
-    // blocked, and the projected mode still names what was requested.
-    return { preference, resolved: "native-goal" };
-  }
-  return { preference, resolved: "single-run" };
+  const projected = projectResolvedExecutionMode(
+    profile.executionPreference,
+    executionCapabilitiesForRuntime(profile.runtime),
+  );
+  return { preference: projected.preference, resolved: projected.mode };
 }
 
 function blocked(
   profile: WorkerProfile,
   reason: Extract<WorkerReadinessReason,
-    "authentication-missing" | "runtime-unavailable" | "pairing-invalid" | "model-invalid" | "native-goal-unsupported">,
+    "authentication-missing" | "runtime-unavailable" | "pairing-invalid" | "model-invalid" | "native-goal-unsupported" | "persistent-session-unsupported">,
   nextAction: Extract<WorkerReadinessNextAction,
     "configure-authentication" | "fix-runtime" | "change-pairing" | "choose-model" | "choose-execution-mode">,
   componentChecks: WorkerReadinessChecks,
@@ -220,12 +221,12 @@ function resolveOne(
   }
 
   const connection = input.providerVerification?.[provider]?.status ?? "unverified";
-  // Forced native-goal must fail closed when the selected Runtime cannot prove
-  // the native Goal contract. `auto` silently falls back to single-run.
-  const nativeGoalSupported = nativeGoalSupportForRuntime(profile.runtime);
+  // Forced unsupported modes fail closed. `auto` falls back by proven
+  // capability: native Goal, then persistent Session, then single-run.
+  const capabilities = executionCapabilitiesForRuntime(profile.runtime);
   const { preference: executionPreference, resolved: resolvedExecutionMode } =
     readinessExecutionMode(profile);
-  if (executionPreference === "native-goal" && !nativeGoalSupported) {
+  if (executionPreference === "native-goal" && !capabilities.nativeGoalSupported) {
     return blocked(
       profile,
       "native-goal-unsupported",
@@ -236,6 +237,27 @@ function resolveOne(
         authentication: auth.authMode,
         runtime: "ready",
         nativeGoal: "unsupported",
+        persistentSession: capabilities.persistentSessionSupported ? "ready" : "unsupported",
+      }),
+      provider,
+      model,
+    );
+  }
+  if (
+    executionPreference === "persistent-session"
+    && !capabilities.persistentSessionSupported
+  ) {
+    return blocked(
+      profile,
+      "persistent-session-unsupported",
+      "choose-execution-mode",
+      checks({
+        model: "ready",
+        pairing: "allowed",
+        authentication: auth.authMode,
+        runtime: "ready",
+        nativeGoal: capabilities.nativeGoalSupported ? "ready" : "unsupported",
+        persistentSession: "unsupported",
       }),
       provider,
       model,
@@ -248,7 +270,8 @@ function resolveOne(
     authentication: auth.authMode,
     runtime: "ready",
     connection,
-    nativeGoal: nativeGoalSupported ? "ready" : "unsupported",
+    nativeGoal: capabilities.nativeGoalSupported ? "ready" : "unsupported",
+    persistentSession: capabilities.persistentSessionSupported ? "ready" : "unsupported",
   });
   if (connection === "verified") {
     return {

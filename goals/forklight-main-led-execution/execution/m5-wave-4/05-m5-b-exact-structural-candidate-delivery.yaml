@@ -1,0 +1,166 @@
+version: 2
+name: M5-B exact structural Candidate legacy-driver delivery
+project: /Users/yijunwang/code/forklight
+taskClass: m5-human-first-hub-exact-structural-candidate-delivery
+taskFamily: forklight-product-graduation
+workerProfileId: grok-4-6-xhigh
+executionPreference: auto
+routingDecision:
+  taskFamily: forklight-product-graduation
+  shortlist:
+    - provider: xai
+      model: grok-4.6
+      runtime: grok-build
+      effort: xhigh
+      workerProfileId: grok-4-6-xhigh
+  selectedWorker:
+    provider: xai
+    model: grok-4.6
+    runtime: grok-build
+    effort: xhigh
+    workerProfileId: grok-4-6-xhigh
+  selectedBecause:
+    code: user-specified
+    note: 一骏长期授权同一 Goal 内持续推进并优先使用 Grok CLI 4.6 Xhigh Goal 模式；本任务只交付已经通过 Main 构建和 424 项聚焦测试的精确 UI Candidate，避开已证明会在十分钟取消仍在工作的 host-owned classifier 通道。
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+reviewRequirement:
+  requiredJudges: 2
+  reason: 最终 Hub 同时影响信息理解、真实响应式布局、触控与键盘交互、焦点和减弱动效；产品体验与技术可访问性两个独立视角必须检查同一最终 Revision。
+runtime:
+  name: grok-build
+  executable: /Users/yijunwang/code/forklight/goals/forklight-main-led-execution/execution/m5-wave-4/m5-b-legacy-goal-delivery-bootstrap.mjs
+  effort: xhigh
+  maxBudgetUsd: null
+contract:
+  outcome: Deliver the exact already-built M5-B structural-mobile Candidate through one truthful Grok 4.6 Xhigh native Goal terminal result, independent ForkLight verification, real browser acceptance, two Judges and Main serial Integration without changing the Candidate.
+  presentation:
+    summary: 不重做 UI，只让已通过构建和聚焦测试的精确 Candidate 完成真实 Goal 交接与后续验收。
+    language: zh-CN
+  context:
+    - Read AGENTS.md and specs/m5-product-graduation/work-items/hub-redesign/spec.md completely. Its legacy-driver terminal recovery section is the sole accepted boundary; create no second Spec or roadmap.
+    - 一骏 has granted standing authority for ordinary follow-on Tasks and requires UI interaction and motion to meet user expectations. Do not ask for another per-Task approval.
+    - Task 2fea24e4-b053-4b18-b1b0-fa1f1a3e2d75 remains failed and protected. It made the complete structural-mobile Candidate but ForkLight captured no Revision because Grok returned unknown native Goal status after its host-owned completion classifier canceled both still-running reviewers at 599,996ms.
+    - The two reviewers had reached the final verdict turn after inspecting the Candidate. This is terminal-handoff loss, not evidence that the UI Candidate failed.
+    - "Main independently ran npm build and the exact focused suite against that Workspace: build passed and all 424 tests passed, including the shell hierarchy, System dismissal/focus, Back/resize, short motion and reduced-motion checks. This diagnostic does not replace ForkLight verification."
+    - Grok 1.0.5 documents two /goal drivers. GROK_WORKFLOWS=0 selects the legacy model-facing update_goal driver, which still performs completion verification. The wrapper accepts ForkLight's native Goal environment, then selects only that documented driver for the real Grok child.
+    - The wrapper also freezes GROK_FOREGROUND_BLOCK_BUDGET_MS=86400000 for any foreground verification child. This is the already accepted 24-hour Runtime process breaker, not a Task deadline.
+    - Bootstrap materializes the original exact seven-path Candidate seed plus the retained Task's exact four-path structural delta. It checks only the accepted path sets and source apply feasibility needed to prevent wrong-Candidate/source-base use.
+    - DESIGN.md, i18n.js and tests/hub-ui-assets.test.ts are byte-identical to the prior seed. The structural delta changes only index.html, app.css, app.js and tests/hub-responsive-layout.test.ts.
+    - The Impeccable detector already ran exactly once for M5-B. Do not run it again.
+    - ForkLight serves one local developer. Add no checksum, content hash, lock, lease, version handshake, state store or coordination mechanism.
+    - No absolute Worker duration, Token or no-progress limit applies. If the same ten-minute terminal loss repeats, stop with the exact Candidate protected; do not create another replacement.
+  inScope:
+    - Materialize the exact accepted seven-path structural-mobile Candidate on a fresh matching source snapshot.
+    - Read only the accepted Spec and seven Candidate paths, confirm the implementation matches the stated hierarchy, interaction, motion and reduced-motion contract, and complete the real native /goal.
+    - Return a concise handoff naming the unchanged paths, existing static verification and Main's remaining real-browser/two-Judge gates.
+  outOfScope:
+    - Any source, test, copy, style, DOM, behavior, API, backend, Core, Store, schema, routing, Runtime-product or Goal-SSOT edit.
+    - Re-running Candidate implementation, the Impeccable detector, acceptance commands inside the Worker, a new design choice, new responsive state, additional integrity machinery, fallback, Competition, commit, push or reset.
+  executionSteps:
+    - Inspect only DESIGN.md, index.html, app.css, app.js, i18n.js and the two focused UI tests.
+    - Confirm product row versus page row, System close/focus, Back/tree/resize, bounded motion and reduced-motion behavior from the exact files; do not modify them.
+    - Complete the Goal with evidence from the exact Candidate and state clearly that Main still owns rendered 320/360/390/landscape/desktop geometry and two independent Judges.
+  deliverables:
+    - One exact seven-path Candidate Revision with zero delta from the protected structural-mobile Workspace.
+    - Truthful native Goal complete plus achieved evidence under Grok 4.6 Xhigh current-model-only and the documented legacy Goal driver.
+    - Independent ForkLight build, 424-test, JavaScript/copy and diff validation ready for Main browser acceptance.
+  modules:
+    - name: exact Candidate materialization
+      responsibility: Apply the retained seven-path seed and exact four-path structural delta before Grok starts.
+      consumes: [fresh source snapshot, Workspace-local seed patch, Workspace-local structural delta]
+      produces: [exact structural-mobile Candidate, Task-local materialization marker]
+      boundaries: [No sibling Workspace read, source mutation, content hash or extra integrity protocol]
+    - name: native Goal terminal delivery
+      responsibility: Finish one real current-model-only Grok Goal without the host-owned ten-minute classifier channel.
+      consumes: [ForkLight native Goal environment, documented legacy update_goal driver, 24-hour foreground process breaker]
+      produces: [complete plus achieved terminal truth and concise handoff]
+      boundaries: [No Candidate edit, fallback, retry, extra attempt or duration-based completion claim]
+    - name: independent acceptance
+      responsibility: Let ForkLight verify the exact Candidate after normal Worker return.
+      consumes: [frozen Candidate, five accepted commands]
+      produces: [verified Revision and evidence for browser/Judges]
+      boundaries: [Worker claims do not substitute for command results or real rendered geometry]
+  callChain:
+    - ForkLight daemon snapshots current source and starts one Grok native Goal Attempt.
+    - Bootstrap checks and applies the seven-path seed, then the four-path structural delta, and launches Grok 4.6 Xhigh current-model-only with GROK_WORKFLOWS=0 and the 24-hour foreground breaker.
+    - Grok inspects but does not edit the exact Candidate, records Goal completion and returns normally.
+    - ForkLight independently runs the five commands and captures one Revision.
+    - Main checks exact equality with the protected Candidate, runs one batched real-browser gate, obtains two different-view Judge opinions and alone decides serial Integration.
+  scenarios:
+    - name: exact Candidate survives handoff
+      given: The fresh Workspace matches the retained source base.
+      when: Bootstrap applies the seed and structural delta.
+      then: Exactly seven Candidate paths differ and every byte matches the protected structural-mobile Workspace.
+    - name: truthful Goal terminal
+      given: Grok receives one current-model-only native /goal.
+      when: It finishes the read-only evidence review.
+      then: Native Goal truth is complete plus achieved before ForkLight captures and verifies the Candidate.
+    - name: no ten-minute false terminal
+      given: A completion verifier remains productive beyond ten minutes.
+      when: The documented legacy Goal driver waits for it.
+      then: The 24-hour foreground process breaker, not the prior 600-second channel, governs that wait and elapsed time never invents success.
+    - name: UI acceptance remains human
+      given: Static verification passes.
+      when: Main opens the final Candidate at 320, 360, 390, 667x375 and 1440x900.
+      then: Real bounding boxes, touch/keyboard behavior, focus, restrained motion and reduced-motion decide acceptance; hidden overflow or test text alone does not.
+  risks:
+    - The legacy Goal driver could still fail to emit complete plus achieved truth; that exact recurrence stops this recovery without another replacement.
+    - A bootstrap mismatch could silently deliver different bytes; exact path sets and sequential git apply checks stop before Grok starts.
+    - Static tests cannot prove viewport geometry or perceived interaction quality; Main browser QA and two different Judge views remain mandatory.
+  changeBudget:
+    maxFiles: 7
+    maxDiffLines: 3500
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 60000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxWorkerValidationRepairs: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, coverage]
+  generatedPaths: [dist/**, coverage/**]
+worker:
+  allowEdits: false
+  allowedCommands: []
+  focusPaths:
+    - DESIGN.md
+    - src/hub/public/index.html
+    - src/hub/public/app.css
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - tests/hub-ui-assets.test.ts
+    - tests/hub-responsive-layout.test.ts
+acceptance:
+  criteria:
+    - The exact retained seven-path Candidate is materialized on a matching source base; Task 2fea24e4-b053-4b18-b1b0-fa1f1a3e2d75 remains immutable and no sibling Workspace is read.
+    - Grok 4.6 Xhigh uses one current-model-only native Goal with the documented legacy model-facing driver and reaches complete plus achieved; no elapsed-time event is treated as completion.
+    - Candidate bytes are unchanged by the read-only Worker and remain limited to DESIGN.md, four Hub public assets and two focused UI tests.
+    - Product/page hierarchy, System selection/outside/Escape dismissal and focus return, Back/tree/resize, 120-160ms restrained feedback and complete reduced-motion behavior remain present.
+    - ForkLight independently passes build, all 424 focused tests, JavaScript/visible-copy validation and diff validation on the exact Candidate.
+    - Main then passes real 320/360/390/landscape/desktop rendering and interaction, exactly two different-view Judges inspect the same Revision and Main alone decides serial Integration.
+  commands:
+    - node goals/forklight-main-led-execution/execution/m5-wave-4/m5-b-legacy-goal-delivery-bootstrap.test.mjs
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/hub-ui-assets.test.ts tests/hub-responsive-layout.test.ts tests/hub-contract-quality.test.ts tests/hub-settings.test.ts tests/hub-operations.test.ts tests/hub-ops-mutations.test.ts
+    - node -e "const fs=require('fs'); const src=fs.readFileSync('src/hub/public/app.js','utf8'); new Function(src); const visible=[fs.readFileSync('src/hub/public/index.html','utf8'),src,fs.readFileSync('src/hub/public/i18n.js','utf8')].join('\\n'); if(/[—–]/.test(visible)) throw new Error('page-visible Hub source contains em/en dash');"
+    - git diff --check

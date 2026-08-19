@@ -1,0 +1,86 @@
+version: 2
+name: M2-C inspect post-Integration protection and reclaim authority
+project: /Users/yijunwang/code/forklight
+taskClass: m2-storage-protection-audit
+taskFamily: forklight-storage-lifecycle
+workerProfileId: grok-4-6-xhigh
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 0
+  reason: Read-only deterministic post-Integration authority audit changes no product files.
+contract:
+  outcome: Verify from integrated source that active, review-open, Integration-open, unresolved-partial, ambiguous, and unknown Task space is protected and only durable terminal dispositions make known regenerable targets reclaimable, without editing files.
+  presentation: { summary: 合入后只读核对保护优先级、终态资格与未知内容保留。, language: zh-CN }
+  context:
+    - Starts only after the M2-C implementation Candidate is safely integrated.
+    - The sole accepted Work Item remains specs/m2-c-task-storage-lifecycle/spec.md.
+  inScope:
+    - Inspect canonical classification, protection precedence, terminal disposition, handoff partial, path containment, process ownership, and temporary-home tests.
+  outOfScope:
+    - No edits, real-home reclaim, process kill, Integration, Judge, Hub, backup deletion, commit, or push.
+  executionSteps:
+    - Read the integrated lifecycle authority and its focused Core and Store tests.
+    - Compare every protection and terminal-disposition case with the accepted spec.
+    - Return a bounded pass or exact mismatch without mutation.
+  deliverables: [A read-only protection and eligibility audit.]
+  modules:
+    - name: Integrated protection authority
+      responsibility: Confirm protection precedes reclaim eligibility and unknown or unresolved state fails closed.
+      consumes: [Integrated lifecycle projection, Store truth, path/process observations, and focused tests.]
+      produces: [A bounded pass or named mismatch.]
+      boundaries: [No state mutation, deletion, new consistency mechanism, or inferred terminal eligibility.]
+  callChain:
+    - Goal waits for safe M2-C Integration.
+    - This isolated read-only Task inspects integrated Core and Store truth.
+    - ForkLight runs the focused acceptance commands.
+    - Machine success releases the public-surface audit once.
+  scenarios:
+    - name: Protection agrees
+      given: Integrated tests cover active, open review, partial handoff, delivered, changed state, and unknown ownership.
+      when: Authority and tests are inspected.
+      then: Only exact eligible known targets are reclaimable and every other state remains protected or unknown.
+    - name: Authority mismatch
+      given: Any unresolved or ambiguous state can be reclaimed.
+      when: Inspection or tests run.
+      then: The audit fails and the Goal stops advancing.
+  risks: [Read-only evidence must not be mistaken for permission to reclaim the real local home.]
+  changeBudget: { maxFiles: 1, maxDiffLines: 20 }
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: false
+  allowedCommands: []
+  focusPaths:
+    - src/core/storage-lifecycle.ts
+    - src/core/config.ts
+    - src/core/task-decision-view.ts
+    - src/state/store.ts
+    - tests/storage-lifecycle.test.ts
+    - tests/store.test.ts
+acceptance:
+  criteria:
+    - Integrated protection and terminal-disposition rules match the accepted spec and preserve unknown or unresolved space.
+    - quick_check and foreign-key access are bounded durable integrity evidence, not a second consistency system.
+    - No source file changes.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/storage-lifecycle.test.ts tests/store.test.ts
+    - git diff --check

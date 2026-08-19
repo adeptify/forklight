@@ -1,0 +1,80 @@
+version: 2
+name: M2 materialize exact final Coding Candidate for fresh review
+project: /Users/yijunwang/code/forklight
+taskClass: m2-source-only-integration-review-recovery
+taskFamily: forklight-integration-recovery
+workerProfileId: default
+deliveryProfileId: forklight-self-upgrade
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 2
+  reason: Source-mutating Integration restart recovery requires two usable independent exact-Candidate reviews.
+contract:
+  outcome: >-
+    Materialize exact verified Revision ebd14c70-400f-4f99-aab6-adc938e54938 into this clean
+    isolated Workspace without any behavior change, prove its identity and accepted machine
+    surface, and return it for one fresh two-Judge review.
+  presentation: { summary: 原样物化最终 Coding Candidate，重新独立验证并交给新的双 Judge。, language: zh-CN }
+  context:
+    - Read specs/m2-delivery-journeys/work-items/coding-source-only-integration-recovery/spec.md and specs/m2-delivery-journeys/work-items/coding-review-cap-recovery/spec.md completely before acting.
+    - The exact read-only seed is goals/forklight-main-led-execution/execution/m2-coding-review-recovery/ebd14c70-400f-4f99-aab6-adc938e54938.patch with sha256 a862bfe4abcec99ae32e364ae7df12eb85a30e15d3d65bce67965cbfe054f651.
+    - Verify the full digest and git apply -p2 --check before applying the seed exactly once. If already applied after runtime continuation, do not apply it twice.
+    - This is evidence recovery only. Do not correct, refactor, rewrite, or add tests even if an alternative implementation seems preferable.
+    - ForkLight serves one local developer. Add no lock, lease, manifest, version handshake, distributed coordination, or repeated consistency check.
+    - Never mutate the source project, ForkLight Home, Store, backup, Integration, credentials, remotes, or another repository.
+  inScope:
+    - Verify the one seed identity and current baseline compatibility.
+    - Apply the exact patch once inside this isolated Workspace and inspect the resulting four-path diff.
+    - Run every approved acceptance command and report exact Candidate identity or a stop.
+  outOfScope:
+    - Any behavior, source, test, docs, schema, protocol, API, Runtime, Profile, routing, Hub, or policy change beyond the exact seed.
+    - Correction, second handoff, source patching, Candidate filtering, Integration, commit, push, credentials, or real-home mutation.
+  executionSteps:
+    - Verify the seed's full digest; stop without edits if it differs.
+    - Run git apply -p2 --check and apply the seed exactly once; stop on source-base mismatch.
+    - Confirm only the frozen four paths changed and make no manual edits.
+    - Run all acceptance commands, inspect the exact diff, and return bounded identity evidence.
+  deliverables:
+    - One exact four-path Candidate with no behavioral delta from Revision ebd14c70.
+    - Worker self-check and independent verifier evidence, or one precise stop reason.
+  modules:
+    - name: Exact Candidate adoption
+      responsibility: Recreate one verified prior Candidate on a clean current-source baseline.
+      consumes: [Frozen patch, full digest, current baseline, and four allowed paths.]
+      produces: [Byte-identical ForkLight Candidate or a source/digest mismatch stop.]
+      boundaries: [No implementation work, general hash protocol, Store rewrite, or source mutation.]
+  callChain:
+    - Main binds the Task to the exact prior Revision, digest, four paths, accepted spec, and source base.
+    - DeepSeek Pro honestly runs as a single-run Worker and applies only the read-only seed in its isolated Workspace.
+    - ForkLight independently verifies and captures one exact Candidate Revision.
+    - Two fresh read-only Judges inspect that exact Revision; Main alone decides and may safely integrate.
+  scenarios:
+    - name: Exact recovery
+      given: The seed digest and source base match.
+      when: The Worker applies the seed once and verifier runs.
+      then: The new Candidate is byte-identical to the frozen final Candidate and changes only four paths.
+    - name: Identity or source mismatch
+      given: The seed, source base, or produced Candidate differs.
+      when: A check runs.
+      then: Work stops without compensation, correction, extra review, or Integration.
+  risks: [A wrong seed or source drift could review the wrong code; the single full-digest and apply check prevent that concrete unsafe Integration.]
+  changeBudget: { maxFiles: 4, maxDiffLines: 1400 }
+advancedPolicy: { maxDurationMs: null, observedTokenCeiling: null, noProgressTimeoutMs: null, workerStopGraceMs: 60000, fileLimit: null, fileLimitMode: warn, changedLineLimit: null, changedLineLimitMode: warn, baseMaxAttempts: 1, maxExtraAttempts: 0, maxMainCorrections: 0, maxMainReverifications: 0, maxConcurrency: 1, completionMode: warn, changeBudgetMode: warn, maxAdaptationRounds: 0 }
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths: [src/core/integration.ts, src/daemon/coordinator.ts, tests/integration-operation.test.ts, tests/integration.test.ts]
+acceptance:
+  criteria:
+    - The exact seed is applied once to a clean compatible baseline and the resulting Candidate digest equals the frozen final Revision digest.
+    - Candidate changes exactly four accepted paths and contains no seed, generated, Goal, Hub, or unrelated change.
+    - Build, the complete focused recovery suite, and diff validation pass with no behavior correction.
+  commands:
+    - test "$(shasum -a 256 goals/forklight-main-led-execution/execution/m2-coding-review-recovery/ebd14c70-400f-4f99-aab6-adc938e54938.patch | awk '{print $1}')" = "a862bfe4abcec99ae32e364ae7df12eb85a30e15d3d65bce67965cbfe054f651"
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/integration.test.ts tests/integration-operation.test.ts tests/daemon.test.ts
+    - git diff --check

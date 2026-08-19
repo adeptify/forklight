@@ -1,0 +1,125 @@
+version: 2
+name: M3-B one-shot exact-Candidate fixture recovery
+project: /Users/yijunwang/code/forklight
+taskClass: m3-durable-routing-override-recovery
+taskFamily: forklight-routing-decision
+workerProfileId: grok-4-6-xhigh
+executionPreference: auto
+routingDecision:
+  taskFamily: forklight-routing-decision
+  shortlist:
+    - provider: xai
+      model: grok-4.6
+      runtime: grok-build
+      effort: xhigh
+      workerProfileId: grok-4-6-xhigh
+  selectedWorker:
+    provider: xai
+    model: grok-4.6
+    runtime: grok-build
+    effort: xhigh
+    workerProfileId: grok-4-6-xhigh
+  selectedBecause:
+    code: user-specified
+    note: 一骏 explicitly authorized the exact retained M3-B Candidate recovery; this selection does not claim a model recommendation.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+reviewRequirement:
+  requiredJudges: 2
+  reason: Exact-Candidate recovery still delivers durable Task admission and public routing truth, so two fresh different-view Judges must inspect the final Revision before Integration.
+runtime:
+  name: grok-build
+  executable: /Users/yijunwang/code/forklight/goals/forklight-main-led-execution/execution/m3-wave-2/m3-b-exact-candidate-recovery-bootstrap.mjs
+  effort: xhigh
+  maxBudgetUsd: null
+contract:
+  outcome: Materialize the exact protected 11-path M3-B Candidate in one fresh isolated Workspace, align the sole mismatched MCP task-family fixture, and return the unchanged product behavior through the original full acceptance chain.
+  presentation: { summary: 原样复用M3-B Candidate，只补一个MCP测试数据的Task family。, language: zh-CN }
+  context:
+    - Read specs/m3-b-durable-routing-override/spec.md and goals/forklight-main-led-execution/evidence/m3-b-verification-stop-decision-packet.md completely before editing; the authorized recovery section is the sole accepted boundary.
+    - Failed Task f5481469-2d82-4223-972d-2f250470e15f, its Workspace, Runtime Home, Revision and stale Review Graph are immutable and protected. Do not resume, repair, reverify or modify them.
+    - Main's operational bootstrap verifies and materializes exact Revision 23b7f864-6f6f-44ac-9726-6b0c83bbfe50, digest 7fb1fdcf9f156964ac4444c1611e91c77c6b958538eaf34088b9c8780bf30a3a, before Grok starts.
+    - The frozen Candidate already closes Profile-distinct recommendation binding and selected execution-mode binding. Build and diff validation pass; 465/466 focused tests pass.
+    - The only remaining failure is the new modeMismatch MCP request. Its nested routing fixture uses taskFamily main-orchestration-metadata while its top-level qualityContractArgs omits that same family, so the older family-coherence guard fires before the expected mode guard.
+    - ForkLight serves one local developer. The exact seed check only prevents wrong Candidate/source-base use; add no other digest, manifest, checksum, lock, lease, handshake or consistency mechanism.
+    - This Task has one Attempt and zero validation repair, Main correction, Main reverify, adaptation, fallback, reroute, model switch or replacement. Any failure is terminal.
+  inScope:
+    - Confirm the exact retained Candidate is present.
+    - Relative to the frozen Candidate, edit only tests/mcp.test.ts by setting the modeMismatch request's top-level taskFamily to main-orchestration-metadata.
+    - Run the original M3-B build, focused suite and diff validation without weakening or excluding any command.
+  outOfScope:
+    - Any production edit, retained-hunk rewrite, new test, assertion change, schema redesign, routing rescore, historical migration, Store change, Competition, Judge creation by Worker, retry, correction, M3-C, Hub/UI, commit, push or reset.
+    - Checksums beyond the exact authorized seed digest, manifests, locks, leases, version handshakes, multi-user or distributed coordination.
+  executionSteps:
+    - Read the authorized recovery boundary and inspect only the failing modeMismatch fixture in tests/mcp.test.ts.
+    - Add the missing top-level taskFamily with the exact nested value and make no other delta relative to the materialized Candidate.
+    - Run the accepted commands, inspect the diff and stop immediately on pass or any mismatch.
+  deliverables:
+    - Exact retained 11-path M3-B Candidate plus the one family-fixture alignment.
+    - Passing unchanged independent acceptance evidence and one exact Revision for two fresh Judges.
+  modules:
+    - name: Exact M3-B Candidate adoption
+      responsibility: Reuse the accepted production and test bytes without reopening design.
+      consumes: [Frozen Candidate artifact, current source base, accepted M3-B Spec.]
+      produces: [The same 11-path Candidate in one isolated Workspace.]
+      boundaries: [Ten retained paths are model-write-denied; no new product or coordination behavior.]
+    - name: MCP mode-mismatch fixture
+      responsibility: Make the test input pass the existing family guard so it reaches the intended execution-mode guard.
+      consumes: [Existing modeMismatch request and nested taskFamily value.]
+      produces: [One matching top-level taskFamily in tests/mcp.test.ts.]
+      boundaries: [No production edit, new test or assertion change.]
+  callChain:
+    - Main-owned bootstrap validates and applies the exact Candidate inside the fresh Task Workspace.
+    - Grok 4.6 Xhigh native Goal edits the sole allowed fixture and self-checks.
+    - ForkLight independently runs the original commands and captures one exact Candidate Revision.
+    - Exactly two fresh independent Judges inspect that Revision; Main reviews all 11 paths and alone may integrate serially.
+  scenarios:
+    - name: Exact recovery passes
+      given: The Candidate and current source base match and only the fixture field is missing.
+      when: Grok aligns the top-level family and runs the unchanged suite.
+      then: All commands pass and the Candidate is ready for two fresh Judges.
+    - name: Any boundary differs
+      given: Seed, source, path set, Goal truth, fixture or verification differs from the frozen evidence.
+      when: Materialization, execution or verification runs.
+      then: The Task stops without repair, retry, replacement or Integration.
+  risks:
+    - Recreating the implementation could regress accepted behavior; exact seed adoption plus model-write denial on ten retained paths prevents that concrete failure.
+    - A wrong source base could apply stale behavior; forward apply fails before Grok starts.
+  changeBudget: { maxFiles: 11, maxDiffLines: 1720 }
+advancedPolicy: { maxDurationMs: null, observedTokenCeiling: null, noProgressTimeoutMs: null, workerStopGraceMs: 60000, fileLimit: null, fileLimitMode: warn, changedLineLimit: null, changedLineLimitMode: warn, baseMaxAttempts: 1, maxExtraAttempts: 0, maxMainCorrections: 0, maxMainReverifications: 0, maxWorkerValidationRepairs: 0, maxConcurrency: 1, completionMode: warn, changeBudgetMode: warn, maxAdaptationRounds: 0 }
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test, .forklight-boundary-capture, .forklight-receipt-retry, plans]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/routing-explanation.ts
+    - src/core/task-preview.ts
+    - src/core/task.ts
+    - src/core/types.ts
+    - src/mcp/server.ts
+    - tests/daemon-cli.test.ts
+    - tests/daemon.test.ts
+    - tests/mcp.test.ts
+    - tests/routing-explanation.test.ts
+    - tests/task-preview.test.ts
+    - tests/task.test.ts
+acceptance:
+  criteria:
+    - The exact protected Revision is materialized, ten retained paths remain byte-equivalent to it, and only tests/mcp.test.ts differs relative to that seed.
+    - The modeMismatch MCP request has matching top-level and nested taskFamily values and reaches the intended resolved execution-mode rejection.
+    - All original M3-B behavior, legacy compatibility, privacy and cross-surface tests pass unchanged.
+    - Candidate changes exactly the original 11 paths and adds no production delta beyond the retained Candidate, new test, coordination mechanism, M3-C or Hub/UI work.
+    - One native Goal Attempt completes with achieved truth, ForkLight independent verification passes, and the exact Revision proceeds to two fresh Judges before Main Integration.
+  commands:
+    - node goals/forklight-main-led-execution/execution/m3-wave-2/m3-b-exact-candidate-recovery-bootstrap.test.mjs
+    - git apply -p2 --reverse --check --exclude=tests/mcp.test.ts goals/forklight-main-led-execution/execution/m3-wave-2/23b7f864-6f6f-44ac-9726-6b0c83bbfe50.patch
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/task.test.ts tests/task-preview.test.ts tests/daemon.test.ts tests/daemon-cli.test.ts tests/mcp.test.ts
+    - git diff --check

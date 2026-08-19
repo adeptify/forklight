@@ -1,0 +1,120 @@
+version: 2
+name: M5-A3 installed checkout loyalty delivery
+project: /Users/yijunwang/code/fl-a3-01/project
+taskClass: m5-installed-checkout-loyalty-order
+taskFamily: forklight-product-graduation
+workerProfileId: grok-4-6-xhigh
+executionPreference: auto
+routingDecision:
+  taskFamily: forklight-product-graduation
+  shortlist:
+    - provider: xai
+      model: grok-4.6
+      runtime: grok-build
+      effort: xhigh
+      workerProfileId: grok-4-6-xhigh
+  selectedWorker:
+    provider: xai
+    model: grok-4.6
+    runtime: grok-build
+    effort: xhigh
+    workerProfileId: grok-4-6-xhigh
+  selectedBecause:
+    code: user-specified
+    note: 一骏 authorizes Grok CLI 4.6 Xhigh native Goal work, and the packaged fixture is a small bounded behavior repair.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+reviewRequirement:
+  requiredJudges: 1
+  reason: This is an ordinary one-file checkout behavior correction with one deterministic acceptance command; one independent read-only Judge is sufficient.
+contract:
+  outcome: Make loyalty credit reduce the taxable subtotal before tax while preserving coupon order, validation, rounding and the non-negative total floor.
+  presentation:
+    summary: 积分抵扣应先减少计税金额，再计算税费；其他结账规则保持不变。
+    language: zh-CN
+  context:
+    - This project is one untouched copy of the installed ForkLight package fixture. Main verified all three copied files match the packaged source before submission.
+    - The current loyalty case returns 900 cents for subtotal 1000, loyalty 200 and tax 10%, but the accepted result is 880 cents.
+    - Work only in the isolated ForkLight Workspace. Do not edit the disposable source project directly, the ForkLight source checkout, Goal evidence, settings, credentials or external run artifacts.
+  inScope:
+    - Correct calculate_total so loyalty credit reduces the post-coupon taxable amount before tax.
+    - Preserve current integer rounding, input validation, coupon behavior and zero floor.
+  outOfScope:
+    - Public signature changes, new checkout features, test rewrites, documentation changes, dependencies, retries, UI, setup, backup, Git operations or any file other than checkout.py.
+  executionSteps:
+    - Read README.md, checkout.py and tests/test_checkout.py to confirm the exact arithmetic contract.
+    - Make the smallest coherent checkout.py change that handles ordinary and over-credit cases.
+    - Review validation, coupon, rounding and floor behavior, then leave verification to ForkLight's accepted command.
+  deliverables:
+    - One-file Candidate changing only checkout.py.
+    - A short final explanation of the arithmetic order and preserved behavior.
+  modules:
+    - name: checkout total calculation
+      responsibility: Validate inputs and calculate a non-negative coupon-, loyalty- and tax-adjusted total.
+      consumes: [subtotal cents, coupon percent, loyalty cents, tax rate]
+      produces: [final total cents]
+      boundaries: [unchanged signature, unchanged validation, unchanged integer rounding]
+  callChain:
+    - Callers provide validated checkout inputs to calculate_total.
+    - calculate_total applies coupon, then loyalty credit with a zero floor, then tax.
+    - The function returns the taxable remainder plus its rounded tax.
+  scenarios:
+    - name: ordinary loyalty credit
+      given: A 1000-cent subtotal, 200-cent loyalty credit and 10% tax.
+      when: calculate_total runs.
+      then: The taxable amount is 800 cents and the final total is 880 cents.
+    - name: combined coupon and over-credit
+      given: Coupon and loyalty credit reduce the taxable amount to zero or below.
+      when: calculate_total runs.
+      then: Tax and final total remain zero, never negative.
+    - name: validation compatibility
+      given: Existing invalid subtotal, coupon, loyalty or tax inputs.
+      when: calculate_total validates them.
+      then: Existing ValueError behavior and messages remain unchanged.
+  risks:
+    - Applying loyalty before coupon or after tax would preserve the original bug in another order.
+    - Removing the pre-tax zero floor could calculate negative tax before the final floor.
+  changeBudget:
+    maxFiles: 1
+    maxDiffLines: 20
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 60000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxWorkerValidationRepairs: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude: [.git, node_modules, .runtime, .forklight, plans, __pycache__]
+  generatedPaths: [__pycache__/**, tests/__pycache__/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - checkout.py
+acceptance:
+  criteria:
+    - Loyalty credit reduces the post-coupon taxable amount before tax and the four packaged fixture tests pass.
+    - Existing validation, coupon order, rounding, public signature and non-negative floor remain unchanged.
+    - The Candidate changes only checkout.py; no source-project write occurs before exact Main-approved Integration.
+    - Grok 4.6 Xhigh runs as native Goal, ForkLight independently verifies the Candidate, one read-only Judge reviews it and Main alone decides serial Integration.
+  commands:
+    - python3 -m unittest discover -s tests -v

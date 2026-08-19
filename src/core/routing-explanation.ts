@@ -4,7 +4,8 @@
  * One pure projection that converts the immutable Task-file `routingDecision`
  * into a bounded, closed, serializable explanation of why the selected Worker
  * was chosen, how many candidates Main compared, what historical evidence
- * exists in aggregate, and whether a Competition is recorded as planned.
+ * exists in aggregate, whether a Competition is recorded as planned, and the
+ * frozen advisory/Main relationship when Main recorded one.
  *
  * Shared by CLI validate, daemon/MCP validate_file, and the Hub submit preview
  * so no surface ever re-derives the decision or duplicates Core inference.
@@ -16,7 +17,12 @@
  * frozen copy that cannot pollute the TaskSpec or any other consumer.
  */
 
-import type { CompetitionTrigger, RoutingDecisionSnapshot } from "./types.js";
+import type {
+  CompetitionTrigger,
+  FrozenRoutingAdvisorySnapshot,
+  FrozenWorkerIdentity,
+  RoutingDecisionSnapshot,
+} from "./types.js";
 
 /** Closed selection-basis category — the only reason vocabulary users see. */
 export type RoutingSelectionBasis =
@@ -72,6 +78,8 @@ export interface SafeRoutingExplanation {
   competition: SafeRoutingCompetition | null;
   /** Closed next-action code. */
   nextAction: RoutingExplanationNextAction;
+  /** Frozen advisory/Main relationship. null when the Task did not record one. */
+  advisory: FrozenRoutingAdvisorySnapshot | null;
 }
 
 /** Bounded known reason-code map to the closed basis vocabulary. Custom codes
@@ -157,6 +165,7 @@ export function projectSafeRoutingExplanation(input: {
       evidence: null,
       competition: null,
       nextAction: "not-recorded",
+      advisory: null,
     } satisfies SafeRoutingExplanation);
   }
 
@@ -186,7 +195,39 @@ export function projectSafeRoutingExplanation(input: {
       triggers: [...decision.competition.triggers],
     },
     nextAction: nextActionForCompetition(decision.competition.intent),
+    advisory: projectSafeAdvisory(decision.advisory),
   } satisfies SafeRoutingExplanation);
+}
+
+function copyFrozenIdentity(identity: FrozenWorkerIdentity): FrozenWorkerIdentity {
+  return {
+    provider: identity.provider,
+    model: identity.model,
+    runtime: identity.runtime,
+    effort: identity.effort,
+    ...(identity.workerProfileId === undefined
+      ? {}
+      : { workerProfileId: identity.workerProfileId }),
+  };
+}
+
+/** Copy only the closed public advisory facts. Never invent a relationship. */
+function projectSafeAdvisory(
+  advisory: FrozenRoutingAdvisorySnapshot | undefined,
+): FrozenRoutingAdvisorySnapshot | null {
+  if (advisory === undefined) return null;
+  return {
+    overallResult: advisory.overallResult,
+    selection: advisory.selection,
+    ...(advisory.recommendedWorker === undefined
+      ? {}
+      : { recommendedWorker: copyFrozenIdentity(advisory.recommendedWorker) }),
+    ...(advisory.confidence === undefined ? {} : { confidence: advisory.confidence }),
+    ...(advisory.cannotDetermineReasons === undefined
+      ? {}
+      : { cannotDetermineReasons: [...advisory.cannotDetermineReasons] }),
+    selectedExecution: { ...advisory.selectedExecution },
+  };
 }
 
 /** Concise CLI lines for the safe routing explanation. Closed codes only. */
@@ -213,6 +254,30 @@ export function formatRoutingExplanationHuman(
   }
   lines.push(`  Shortlist: ${explanation.shortlistSize} candidate(s) compared`);
   lines.push(`  Selection basis: ${explanation.basis ?? "not-recorded"}`);
+  if (explanation.advisory != null) {
+    const advisory = explanation.advisory;
+    lines.push(`  Advisory result: ${advisory.overallResult}`);
+    lines.push(`  Selection: ${advisory.selection}`);
+    if (advisory.recommendedWorker !== undefined) {
+      const recommended = advisory.recommendedWorker;
+      lines.push(
+        `  Recommended: ${recommended.provider}/${recommended.model} — ${recommended.runtime}, ${recommended.effort}`,
+      );
+    }
+    if (advisory.confidence !== undefined) {
+      lines.push(`  Confidence: ${advisory.confidence}`);
+    }
+    if (advisory.cannotDetermineReasons !== undefined) {
+      lines.push(
+        `  Cannot determine because: ${advisory.cannotDetermineReasons.join(", ")}`,
+      );
+    }
+    const execution = advisory.selectedExecution;
+    lines.push(`  Selected execution mode: ${execution.resolvedExecutionMode}`);
+    lines.push(`  Selected readiness: ${execution.readinessState}`);
+    lines.push(`  Can launch: ${execution.canLaunch ? "yes" : "no"}`);
+    lines.push(`  Selected next action: ${execution.nextAction}`);
+  }
   if (explanation.evidence !== null) {
     lines.push(`  Evidence scope: ${explanation.evidence.scope}`);
     lines.push(

@@ -1,19 +1,23 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  attachExecutableRoutingAdvice,
   DEFAULT_ROUTING_POLICY,
   failureImpactFor,
   provideRoutingAdvice,
   type CompetitionIntent,
   type CompetitionTrigger,
   type RoutingPolicySettings,
+  type RoutingReadinessProjection,
 } from "../src/core/model-routing.js";
 import {
   classifyFailure,
   deriveRoutingEvidence,
+  strategyIdentityKey,
   type RoutingEvidence,
 } from "../src/core/statistics.js";
 import type { AttemptRecord, EventRecord, TaskRecord, VerificationResult } from "../src/core/types.js";
+import { projectStrategyPolicyAdvice } from "../src/core/strategy-advice.js";
 
 const passedVerification: VerificationResult = {
   passed: true,
@@ -2338,4 +2342,587 @@ test("evidence-ready cohort: zero-history candidates across the board produce sc
     assert.equal(c.totalScore, 0);
     assert.ok(c.uncertainty.insufficientSamples);
   }
+});
+
+// --- Executable overall result and readiness attachment (M3-A) -------------
+
+function profileReadiness(
+  workerProfileId: string,
+  canLaunch: boolean,
+): RoutingReadinessProjection {
+  return {
+    workerProfileId,
+    executionPreference: "auto",
+    resolvedExecutionMode: "single-run",
+    state: canLaunch ? "launchable" : "blocked",
+    reason: canLaunch ? "connection-unverified" : "authentication-missing",
+    canLaunch,
+    nextAction: canLaunch ? "run-smoke-check" : "configure-authentication",
+  };
+}
+
+function profileBackedAdvice() {
+  return provideRoutingAdvice({
+    taskClass: "coding:executable",
+    candidates: [
+      {
+        provider: "deepseek", model: "v4", runtime: "claude-code", effort: "high",
+        workerProfileId: "deepseek-primary", workerLabel: "DeepSeek Primary",
+      },
+      {
+        provider: "qwen", model: "plus", runtime: "claude-code", effort: "medium",
+        workerProfileId: "qwen-secondary", workerLabel: "Qwen Secondary",
+      },
+    ],
+    evidenceMap: new Map([
+      ["deepseek\0v4\0claude-code\0high", evidence("deepseek", "v4")],
+      ["qwen\0plus\0claude-code\0medium", evidence("qwen", "plus", {
+        modelQualityFailureCount: 8, modelQualityFailureRate: 0.8,
+        correctionChurn: 8, correctionChurnRate: 0.8,
+        acceptedDeliveryCount: 2, acceptedDeliveryRate: 0.2,
+        verifiedBehaviorCount: 2, verifiedBehaviorRate: 0.2,
+      })],
+    ]),
+    policy: DEFAULT_ROUTING_POLICY,
+    competitionIntent: "none",
+  });
+}
+
+function snapshotScores(advisory: ReturnType<typeof provideRoutingAdvice>) {
+  return advisory.candidates.map((candidate) => ({
+    provider: candidate.provider,
+    model: candidate.model,
+    runtime: candidate.runtime,
+    effort: candidate.effort,
+    workerProfileId: candidate.workerProfileId,
+    totalScore: candidate.totalScore,
+    cohortParticipation: candidate.cohortParticipation,
+  }));
+}
+
+test("Profile-backed launchable winner becomes recommended with complete executable identity", () => {
+  const historical = profileBackedAdvice();
+  assert.equal(historical.knowledge, "recommendation");
+  assert.equal(historical.recommendation?.workerProfileId, "deepseek-primary");
+  assert.equal(historical.recommendation?.runtime, "claude-code");
+  assert.equal(historical.recommendation?.effort, "high");
+  assert.equal(historical.recommendation?.canLaunch, undefined);
+
+  const result = attachExecutableRoutingAdvice(historical, new Map([
+    ["deepseek-primary", profileReadiness("deepseek-primary", true)],
+    ["qwen-secondary", profileReadiness("qwen-secondary", true)],
+  ]));
+  assert.equal(result.overallResult, "recommended");
+  assert.deepEqual(result.cannotDetermineReasons, []);
+  assert.equal(result.recommendation?.provider, "deepseek");
+  assert.equal(result.recommendation?.model, "v4");
+  assert.equal(result.recommendation?.runtime, "claude-code");
+  assert.equal(result.recommendation?.effort, "high");
+  assert.equal(result.recommendation?.workerProfileId, "deepseek-primary");
+  assert.equal(result.recommendation?.workerLabel, "DeepSeek Primary");
+  assert.equal(result.recommendation?.resolvedExecutionMode, "single-run");
+  assert.equal(result.recommendation?.executionPreference, "auto");
+  assert.equal(result.recommendation?.readinessState, "launchable");
+  assert.equal(result.recommendation?.canLaunch, true);
+  assert.equal(result.recommendation?.nextAction, "run-smoke-check");
+  assert.equal(result.recommendation?.confidence, historical.recommendation?.confidence);
+  assert.equal(result.evidenceScope, "exact-class");
+  assert.equal(result.shouldRunCompetition, false);
+  const winner = result.candidates.find((c) => c.workerProfileId === "deepseek-primary")!;
+  assert.equal(winner.canLaunch, true);
+  assert.equal(winner.resolvedExecutionMode, "single-run");
+  assert.deepEqual(snapshotScores(result), snapshotScores(historical));
+});
+
+test("non-launchable historical winner stays visible and is not substituted", () => {
+  const historical = profileBackedAdvice();
+  const historicalScores = snapshotScores(historical);
+  const launchable = attachExecutableRoutingAdvice(historical, new Map([
+    ["deepseek-primary", profileReadiness("deepseek-primary", true)],
+    ["qwen-secondary", profileReadiness("qwen-secondary", false)],
+  ]));
+  const blocked = attachExecutableRoutingAdvice(historical, new Map([
+    ["deepseek-primary", profileReadiness("deepseek-primary", false)],
+    ["qwen-secondary", profileReadiness("qwen-secondary", true)],
+  ]));
+
+  assert.equal(launchable.overallResult, "recommended");
+  assert.equal(blocked.overallResult, "historical-best-not-launchable");
+  assert.equal(blocked.knowledge, "recommendation");
+  assert.equal(blocked.recommendation?.workerProfileId, "deepseek-primary");
+  assert.equal(blocked.recommendation?.provider, "deepseek");
+  assert.equal(blocked.recommendation?.canLaunch, false);
+  assert.equal(blocked.recommendation?.readinessState, "blocked");
+  assert.equal(blocked.recommendation?.nextAction, "configure-authentication");
+  assert.notEqual(blocked.recommendation?.workerProfileId, "qwen-secondary");
+  assert.equal(blocked.candidates[0]!.workerProfileId, "deepseek-primary");
+  assert.deepEqual(snapshotScores(launchable), historicalScores);
+  assert.deepEqual(snapshotScores(blocked), historicalScores);
+  assert.equal(historical.recommendation?.canLaunch, undefined);
+  assert.equal(historical.candidates[0]!.canLaunch, undefined);
+  assert.equal(blocked.shouldRunCompetition, false);
+});
+
+test("cannot-determine reasons stay stable and never advise Competition under intent none", () => {
+  const sparse = advice(
+    evidence("deepseek", "v4", { terminalTaskCount: 2, relevantSampleCount: 2 }),
+    evidence("qwen", "plus", { terminalTaskCount: 1, relevantSampleCount: 1 }),
+    DEFAULT_ROUTING_POLICY,
+    { competitionIntent: "none" },
+  );
+  assert.equal(sparse.overallResult, "cannot-determine");
+  assert.ok(sparse.cannotDetermineReasons.includes("insufficient-relevant-samples"));
+  assert.equal(sparse.shouldRunCompetition, false);
+
+  const close = advice(
+    evidence("deepseek", "v4"),
+    evidence("qwen", "plus"),
+    DEFAULT_ROUTING_POLICY,
+    { competitionIntent: "none" },
+  );
+  assert.equal(close.overallResult, "cannot-determine");
+  assert.ok(close.cannotDetermineReasons.includes("score-gap-too-small"));
+  assert.equal(close.shouldRunCompetition, false);
+
+  const noFactors = advice(
+    evidence("deepseek", "v4"),
+    evidence("qwen", "plus"),
+    {
+      ...DEFAULT_ROUTING_POLICY,
+      weights: {
+        acceptedDelivery: 0,
+        verifiedBehavior: 0,
+        modelQualityFailure: 0,
+        correctionChurn: 0,
+        firstPassSuccess: 0,
+        officialCost: 0,
+        duration: 0,
+        budgetReliability: 0,
+      },
+    },
+    { competitionIntent: "none" },
+  );
+  assert.equal(noFactors.overallResult, "cannot-determine");
+  assert.ok(noFactors.cannotDetermineReasons.includes("no-active-factors"));
+  assert.equal(noFactors.shouldRunCompetition, false);
+
+  const singleIdentity = provideRoutingAdvice({
+    taskClass: "coding:test",
+    candidates: [
+      { provider: "deepseek", model: "v4", runtime: "claude-code", effort: "high", workerProfileId: "ds-1" },
+      { provider: "deepseek", model: "v4", runtime: "claude-code", effort: "high", workerProfileId: "ds-2" },
+    ],
+    evidenceMap: new Map([
+      ["deepseek\0v4\0claude-code\0high", evidence("deepseek", "v4")],
+    ]),
+    policy: DEFAULT_ROUTING_POLICY,
+    competitionIntent: "none",
+  });
+  assert.equal(singleIdentity.overallResult, "cannot-determine");
+  assert.ok(singleIdentity.cannotDetermineReasons.includes("single-comparable-identity"));
+  assert.equal(singleIdentity.shouldRunCompetition, false);
+});
+
+test("legacy candidates keep scoring and never invent Profile, execution, or readiness", () => {
+  const result = advice(evidence("deepseek", "v4"), evidence("qwen", "plus", {
+    modelQualityFailureCount: 5, modelQualityFailureRate: 0.5,
+    correctionChurn: 5, correctionChurnRate: 0.5,
+    acceptedDeliveryCount: 5, acceptedDeliveryRate: 0.5,
+    verifiedBehaviorCount: 5, verifiedBehaviorRate: 0.5,
+  }));
+  assert.equal(result.knowledge, "recommendation");
+  assert.equal(result.overallResult, "cannot-determine");
+  assert.ok(result.cannotDetermineReasons.includes("profile-identity-unavailable"));
+  assert.equal(result.recommendation?.workerProfileId, undefined);
+  assert.equal(result.recommendation?.resolvedExecutionMode, undefined);
+  assert.equal(result.recommendation?.canLaunch, undefined);
+  assert.equal(result.recommendation?.nextAction, undefined);
+  for (const candidate of result.candidates) {
+    assert.equal(candidate.workerProfileId, undefined);
+    assert.equal(candidate.resolvedExecutionMode, undefined);
+    assert.equal(candidate.readinessState, undefined);
+    assert.equal(candidate.canLaunch, undefined);
+    assert.equal(candidate.nextAction, undefined);
+  }
+});
+
+test("executable advisory serialization stays privacy-safe", () => {
+  const result = attachExecutableRoutingAdvice(profileBackedAdvice(), new Map([
+    ["deepseek-primary", profileReadiness("deepseek-primary", true)],
+    ["qwen-secondary", profileReadiness("qwen-secondary", false)],
+  ]));
+  const serialized = JSON.stringify(result);
+  assert.doesNotMatch(serialized, /taskId|attemptId|rawLog|apiKey|endpoint|sourcePath|diagnostic|prompt|keychain|\/Users\/|auth\.json/i);
+  assert.match(serialized, /"overallResult":"recommended"/);
+  assert.match(serialized, /"canLaunch":true/);
+  assert.match(serialized, /"resolvedExecutionMode":"single-run"/);
+});
+
+function modeRow(
+  executionMode: "single-run" | "persistent-session" | "native-goal" | "legacy-unknown",
+  overrides: Partial<RoutingEvidence> = {},
+): RoutingEvidence {
+  return {
+    ...evidence("deepseek", "v4", {
+      runtime: "claude-code",
+      effort: "high",
+      executionMode,
+      ...overrides,
+    }),
+    runtime: "claude-code",
+    effort: "high",
+    executionMode,
+  };
+}
+
+function strategyMap(rows: RoutingEvidence[]): Map<string, RoutingEvidence> {
+  return new Map(rows.map((row) => [
+    strategyIdentityKey(
+      row.provider,
+      row.model,
+      row.runtime ?? "claude-code",
+      row.effort ?? "high",
+      row.executionMode ?? "legacy-unknown",
+    ),
+    row,
+  ]));
+}
+
+test("strategy advice recommends only when two mode-aware rows clear sample and score-gap gates", () => {
+  const strong = modeRow("single-run", {
+    relevantSampleCount: 5,
+    modelQualityFailureCount: 0,
+    modelQualityFailureRate: 0,
+    verifiedBehaviorSampleCount: 5,
+    verifiedBehaviorCount: 5,
+    verifiedBehaviorRate: 1,
+    firstPassVerifiedSampleCount: 5,
+    firstPassVerifiedSuccessCount: 5,
+    firstPassVerifiedSuccessRate: 1,
+    acceptedDeliverySampleCount: 5,
+    acceptedDeliveryCount: 5,
+    acceptedDeliveryRate: 1,
+  });
+  const weak = modeRow("native-goal", {
+    relevantSampleCount: 5,
+    modelQualityFailureCount: 4,
+    modelQualityFailureRate: 0.8,
+    verifiedBehaviorSampleCount: 5,
+    verifiedBehaviorCount: 1,
+    verifiedBehaviorRate: 0.2,
+    firstPassVerifiedSampleCount: 5,
+    firstPassVerifiedSuccessCount: 1,
+    firstPassVerifiedSuccessRate: 0.2,
+    acceptedDeliverySampleCount: 5,
+    acceptedDeliveryCount: 1,
+    acceptedDeliveryRate: 0.2,
+    correctionChurn: 4,
+    correctionChurnRate: 0.8,
+  });
+  const advised = projectStrategyPolicyAdvice({
+    taskClass: "coding:strategy",
+    policy: DEFAULT_ROUTING_POLICY,
+    competitionIntent: "none",
+    competitionTriggers: [],
+    shouldRunCompetition: false,
+    exactEvidence: strategyMap([strong, weak]),
+  });
+  assert.equal(advised.strategy.determination, "recommendation");
+  assert.equal(advised.strategy.evidenceScope, "exact-class");
+  assert.equal(advised.strategy.recommendation?.executionMode, "single-run");
+  assert.equal(advised.strategy.createsWork, false);
+  assert.equal(advised.strategy.rows.length, 2);
+  const single = advised.strategy.rows.find((row) => row.executionMode === "single-run")!;
+  const native = advised.strategy.rows.find((row) => row.executionMode === "native-goal")!;
+  assert.equal(single.relevantSampleCount, 5);
+  assert.equal(native.relevantSampleCount, 5);
+  assert.notEqual(single.relevantSampleCount, native.modelQualityFailureCount);
+
+  const oneReady = projectStrategyPolicyAdvice({
+    taskClass: "coding:strategy",
+    policy: DEFAULT_ROUTING_POLICY,
+    competitionIntent: "none",
+    competitionTriggers: [],
+    shouldRunCompetition: false,
+    exactEvidence: strategyMap([strong]),
+  });
+  assert.equal(oneReady.strategy.determination, "cannot-determine");
+  assert.ok(oneReady.strategy.reasons.includes("single-comparable-strategy"));
+  assert.equal(oneReady.strategy.createsWork, false);
+
+  const tooFew = projectStrategyPolicyAdvice({
+    taskClass: "coding:strategy",
+    policy: DEFAULT_ROUTING_POLICY,
+    competitionIntent: "none",
+    competitionTriggers: [],
+    shouldRunCompetition: false,
+    exactEvidence: strategyMap([
+      modeRow("single-run", { relevantSampleCount: 2, terminalTaskCount: 2 }),
+      modeRow("native-goal", { relevantSampleCount: 2, terminalTaskCount: 2 }),
+    ]),
+  });
+  assert.equal(tooFew.strategy.determination, "cannot-determine");
+  assert.ok(tooFew.strategy.reasons.includes("insufficient-relevant-samples"));
+
+  const tied = projectStrategyPolicyAdvice({
+    taskClass: "coding:strategy",
+    policy: DEFAULT_ROUTING_POLICY,
+    competitionIntent: "none",
+    competitionTriggers: [],
+    shouldRunCompetition: false,
+    exactEvidence: strategyMap([strong, modeRow("persistent-session", { ...strong, executionMode: "persistent-session" })]),
+  });
+  assert.equal(tied.strategy.determination, "cannot-determine");
+  assert.ok(tied.strategy.reasons.includes("score-gap-too-small"));
+});
+
+test("strategy advice uses exact-class when it can compare and family only as a complete set", () => {
+  const exactStrong = modeRow("single-run", {
+    relevantSampleCount: 5,
+    verifiedBehaviorSampleCount: 5,
+    verifiedBehaviorRate: 1,
+    firstPassVerifiedSampleCount: 5,
+    firstPassVerifiedSuccessRate: 1,
+    acceptedDeliverySampleCount: 5,
+    acceptedDeliveryRate: 1,
+    modelQualityFailureRate: 0,
+  });
+  const exactWeak = modeRow("native-goal", {
+    relevantSampleCount: 5,
+    verifiedBehaviorSampleCount: 5,
+    verifiedBehaviorRate: 0.2,
+    firstPassVerifiedSampleCount: 5,
+    firstPassVerifiedSuccessRate: 0.2,
+    acceptedDeliverySampleCount: 5,
+    acceptedDeliveryRate: 0.2,
+    modelQualityFailureRate: 0.8,
+    correctionChurnRate: 0.8,
+  });
+  const familyInverted = strategyMap([
+    modeRow("single-run", {
+      relevantSampleCount: 5,
+      verifiedBehaviorSampleCount: 5,
+      verifiedBehaviorRate: 0.1,
+      firstPassVerifiedSampleCount: 5,
+      firstPassVerifiedSuccessRate: 0.1,
+      acceptedDeliverySampleCount: 5,
+      acceptedDeliveryRate: 0.1,
+      modelQualityFailureRate: 0.9,
+    }),
+    modeRow("native-goal", {
+      relevantSampleCount: 5,
+      verifiedBehaviorSampleCount: 5,
+      verifiedBehaviorRate: 1,
+      firstPassVerifiedSampleCount: 5,
+      firstPassVerifiedSuccessRate: 1,
+      acceptedDeliverySampleCount: 5,
+      acceptedDeliveryRate: 1,
+      modelQualityFailureRate: 0,
+    }),
+  ]);
+  const exactWins = projectStrategyPolicyAdvice({
+    taskClass: "coding:family",
+    taskFamily: "family-a",
+    policy: DEFAULT_ROUTING_POLICY,
+    competitionIntent: "none",
+    competitionTriggers: [],
+    shouldRunCompetition: false,
+    exactEvidence: strategyMap([exactStrong, exactWeak]),
+    familyEvidence: familyInverted,
+  });
+  assert.equal(exactWins.strategy.evidenceScope, "exact-class");
+  assert.equal(exactWins.strategy.recommendation?.executionMode, "single-run");
+
+  const familyFallback = projectStrategyPolicyAdvice({
+    taskClass: "coding:family",
+    taskFamily: "family-a",
+    policy: DEFAULT_ROUTING_POLICY,
+    competitionIntent: "none",
+    competitionTriggers: [],
+    shouldRunCompetition: false,
+    exactEvidence: strategyMap([modeRow("single-run", { relevantSampleCount: 1 })]),
+    familyEvidence: familyInverted,
+  });
+  assert.equal(familyFallback.strategy.evidenceScope, "task-family");
+  assert.equal(familyFallback.strategy.recommendation?.executionMode, "native-goal");
+
+  const incompleteFamily = projectStrategyPolicyAdvice({
+    taskClass: "coding:family",
+    taskFamily: "family-a",
+    policy: DEFAULT_ROUTING_POLICY,
+    competitionIntent: "none",
+    competitionTriggers: [],
+    shouldRunCompetition: false,
+    exactEvidence: strategyMap([modeRow("single-run", { relevantSampleCount: 1 })]),
+    familyEvidence: strategyMap([
+      modeRow("single-run", { relevantSampleCount: 5 }),
+      modeRow("native-goal", { relevantSampleCount: 1, terminalTaskCount: 1 }),
+    ]),
+  });
+  assert.equal(incompleteFamily.strategy.determination, "cannot-determine");
+  assert.equal(incompleteFamily.strategy.evidenceScope, "none");
+  assert.ok(incompleteFamily.strategy.reasons.includes("incomplete-family-coverage"));
+});
+
+test("legacy-unknown strategy rows stay display-only and never become the recommendation", () => {
+  const unknownStrong = modeRow("legacy-unknown", {
+    relevantSampleCount: 5,
+    modelQualityFailureCount: 0,
+    modelQualityFailureRate: 0,
+    verifiedBehaviorSampleCount: 5,
+    verifiedBehaviorCount: 5,
+    verifiedBehaviorRate: 1,
+    firstPassVerifiedSampleCount: 5,
+    firstPassVerifiedSuccessCount: 5,
+    firstPassVerifiedSuccessRate: 1,
+    acceptedDeliverySampleCount: 5,
+    acceptedDeliveryCount: 5,
+    acceptedDeliveryRate: 1,
+  });
+  const knownWeak = modeRow("single-run", {
+    relevantSampleCount: 5,
+    modelQualityFailureCount: 4,
+    modelQualityFailureRate: 0.8,
+    verifiedBehaviorSampleCount: 5,
+    verifiedBehaviorCount: 1,
+    verifiedBehaviorRate: 0.2,
+    firstPassVerifiedSampleCount: 5,
+    firstPassVerifiedSuccessCount: 1,
+    firstPassVerifiedSuccessRate: 0.2,
+    acceptedDeliverySampleCount: 5,
+    acceptedDeliveryCount: 1,
+    acceptedDeliveryRate: 0.2,
+    correctionChurn: 4,
+    correctionChurnRate: 0.8,
+  });
+  const knownStrong = modeRow("native-goal", {
+    relevantSampleCount: 5,
+    modelQualityFailureCount: 0,
+    modelQualityFailureRate: 0,
+    verifiedBehaviorSampleCount: 5,
+    verifiedBehaviorCount: 5,
+    verifiedBehaviorRate: 1,
+    firstPassVerifiedSampleCount: 5,
+    firstPassVerifiedSuccessCount: 5,
+    firstPassVerifiedSuccessRate: 1,
+    acceptedDeliverySampleCount: 5,
+    acceptedDeliveryCount: 5,
+    acceptedDeliveryRate: 1,
+  });
+
+  const unknownAndOne = projectStrategyPolicyAdvice({
+    taskClass: "coding:unknown-strategy",
+    policy: DEFAULT_ROUTING_POLICY,
+    competitionIntent: "none",
+    competitionTriggers: [],
+    shouldRunCompetition: false,
+    exactEvidence: strategyMap([unknownStrong, knownWeak]),
+  });
+  assert.equal(unknownAndOne.strategy.determination, "cannot-determine");
+  assert.ok(unknownAndOne.strategy.reasons.includes("single-comparable-strategy"));
+  assert.equal(unknownAndOne.strategy.recommendation, undefined);
+  assert.equal(unknownAndOne.strategy.createsWork, false);
+  const loneUnknown = unknownAndOne.strategy.rows.find((row) => row.executionMode === "legacy-unknown")!;
+  const loneKnown = unknownAndOne.strategy.rows.find((row) => row.executionMode === "single-run")!;
+  assert.equal(loneUnknown.compared, false);
+  assert.equal(loneUnknown.relevantSampleCount, 5);
+  assert.equal(loneKnown.compared, false);
+
+  const mixed = projectStrategyPolicyAdvice({
+    taskClass: "coding:unknown-strategy",
+    policy: DEFAULT_ROUTING_POLICY,
+    competitionIntent: "none",
+    competitionTriggers: [],
+    shouldRunCompetition: false,
+    exactEvidence: strategyMap([unknownStrong, knownWeak, knownStrong]),
+  });
+  assert.equal(mixed.strategy.determination, "recommendation");
+  assert.equal(mixed.strategy.recommendation?.executionMode, "native-goal");
+  assert.notEqual(mixed.strategy.recommendation?.executionMode, "legacy-unknown");
+  assert.equal(mixed.strategy.createsWork, false);
+  const unknownRow = mixed.strategy.rows.find((row) => row.executionMode === "legacy-unknown")!;
+  const weakRow = mixed.strategy.rows.find((row) => row.executionMode === "single-run")!;
+  const strongRow = mixed.strategy.rows.find((row) => row.executionMode === "native-goal")!;
+  assert.equal(unknownRow.compared, false);
+  assert.equal(weakRow.compared, true);
+  assert.equal(strongRow.compared, true);
+  assert.ok(strongRow.score > weakRow.score);
+});
+
+test("strict missing positive evidence cannot yield a strategy recommendation", () => {
+  const missingAccepted = {
+    acceptedDeliverySampleCount: 0,
+    acceptedDeliveryCount: 0,
+    acceptedDeliveryRate: 0,
+  };
+  const strong = modeRow("single-run", {
+    relevantSampleCount: 5,
+    modelQualityFailureCount: 0,
+    modelQualityFailureRate: 0,
+    verifiedBehaviorSampleCount: 5,
+    verifiedBehaviorCount: 5,
+    verifiedBehaviorRate: 1,
+    firstPassVerifiedSampleCount: 5,
+    firstPassVerifiedSuccessCount: 5,
+    firstPassVerifiedSuccessRate: 1,
+    ...missingAccepted,
+  });
+  const weak = modeRow("native-goal", {
+    relevantSampleCount: 5,
+    modelQualityFailureCount: 4,
+    modelQualityFailureRate: 0.8,
+    verifiedBehaviorSampleCount: 5,
+    verifiedBehaviorCount: 1,
+    verifiedBehaviorRate: 0.2,
+    firstPassVerifiedSampleCount: 5,
+    firstPassVerifiedSuccessCount: 1,
+    firstPassVerifiedSuccessRate: 0.2,
+    correctionChurn: 4,
+    correctionChurnRate: 0.8,
+    ...missingAccepted,
+  });
+  const flexible = projectStrategyPolicyAdvice({
+    taskClass: "coding:strict-strategy",
+    policy: { ...DEFAULT_ROUTING_POLICY, missingEvidenceMode: "flexible" },
+    competitionIntent: "none",
+    competitionTriggers: [],
+    shouldRunCompetition: false,
+    exactEvidence: strategyMap([strong, weak]),
+  });
+  assert.equal(flexible.strategy.determination, "recommendation");
+  assert.equal(flexible.strategy.recommendation?.executionMode, "single-run");
+  assert.equal(flexible.strategy.createsWork, false);
+
+  const strict = projectStrategyPolicyAdvice({
+    taskClass: "coding:strict-strategy",
+    policy: { ...DEFAULT_ROUTING_POLICY, missingEvidenceMode: "strict" },
+    competitionIntent: "none",
+    competitionTriggers: [],
+    shouldRunCompetition: false,
+    exactEvidence: strategyMap([strong, weak]),
+  });
+  assert.equal(strict.strategy.determination, "cannot-determine");
+  assert.ok(strict.strategy.reasons.includes("positive-factor-unavailable"));
+  assert.equal(strict.strategy.recommendation, undefined);
+  assert.equal(strict.strategy.createsWork, false);
+  assert.equal(strict.strategy.evidenceScope, "exact-class");
+});
+
+test("legacy provideRoutingAdvice stays compatible without a strategyPolicy field", () => {
+  const result = advice(evidence("deepseek", "v4"), evidence("qwen", "plus", {
+    modelQualityFailureCount: 5,
+    modelQualityFailureRate: 0.5,
+    acceptedDeliveryCount: 5,
+    acceptedDeliveryRate: 0.5,
+    verifiedBehaviorCount: 5,
+    verifiedBehaviorRate: 0.5,
+    correctionChurn: 5,
+    correctionChurnRate: 0.5,
+  }));
+  assert.equal(result.overallResult, "cannot-determine");
+  assert.ok(Array.isArray(result.cannotDetermineReasons));
+  assert.ok(Array.isArray(result.candidates));
+  assert.equal(typeof result.shouldRunCompetition, "boolean");
+  assert.ok(result.competition);
+  assert.equal(result.strategyPolicy, undefined);
 });

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "name": "M2-C reclaim result observation",
+  "objective": "Apply the smallest shared daemon-client transport correction for storage reclaim, verify it independently, review it from two safety views, integrate it serially, and audit integrated truth without replaying real deletion.",
+  "items": [
+    { "id": "reclaim-transport-fix", "task": "./01-implementation.yaml", "dependsOn": [] },
+    { "id": "integrated-timeout-audit", "task": "./02-integrated-audit.yaml", "dependsOn": ["reclaim-transport-fix"] },
+    { "id": "cli-mcp-parity-audit", "task": "./03-cli-mcp-parity-audit.yaml", "dependsOn": ["integrated-timeout-audit"] },
+    { "id": "no-replay-boundary-audit", "task": "./04-no-replay-boundary-audit.yaml", "dependsOn": ["cli-mcp-parity-audit"] }
+  ]
+}

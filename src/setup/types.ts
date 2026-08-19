@@ -9,11 +9,14 @@ export interface SetupPrerequisite {
   fix?: string;
 }
 
+export type SetupAuthMode = "api-key" | "local-sign-in" | "none";
+
 export interface SetupProviderOption {
   name: ProviderName;
   label: string;
   variantLabel: string;
   configured: boolean;
+  authMode: SetupAuthMode;
   defaultModel: string;
   defaultEndpoint: string;
   variants: ProviderVariant[];
@@ -37,8 +40,69 @@ export interface ResolvedSetupProvider {
 }
 
 export interface SetupProviderCommit extends ResolvedSetupProvider {
-  stored: true;
+  stored: boolean;
   settingsUpdated: true;
+  authMode: Exclude<SetupAuthMode, "none">;
+}
+
+export interface SetupWorkerOption {
+  id: string;
+  label: string;
+  runtime: string;
+  provider: ProviderName;
+  model: string;
+  selected: boolean;
+}
+
+export interface SetupWorkerSelection {
+  id: string;
+  label: string;
+  runtime: string;
+  provider: ProviderName;
+  model: string;
+}
+
+export type SetupNextActionCode =
+  | "fix-prerequisite"
+  | "select-provider"
+  | "select-worker"
+  | "install-main"
+  | "ready";
+
+export interface SetupNextAction {
+  code: SetupNextActionCode;
+  message: string;
+  command: string;
+}
+
+export interface SetupStatusView {
+  ready: boolean;
+  fact: string;
+  reason: string;
+  nextAction: SetupNextAction;
+  provider: {
+    name: ProviderName | null;
+    label: string | null;
+    authMode: SetupAuthMode;
+    ready: boolean;
+  };
+  worker: {
+    id: string | null;
+    label: string | null;
+    ready: boolean;
+  };
+  main: {
+    anyInstalled: boolean;
+    clients: Array<{ client: string; installed: boolean }>;
+  };
+}
+
+export interface SetupStatusInput {
+  prerequisites: SetupPrerequisite[];
+  providers: SetupProviderOption[];
+  defaultProvider: ProviderName;
+  workers: SetupWorkerOption[];
+  mains: Array<{ client: string; installed: boolean }>;
 }
 
 export interface SetupBootstrap {
@@ -53,6 +117,7 @@ export interface SetupSystemInspector {
   account(): string;
   commandExists(command: string): boolean;
   hasLocalCodexSignIn?(): boolean;
+  hasLocalGrokSignIn?(): boolean;
 }
 
 export interface SetupKeychainStore {

@@ -58,6 +58,14 @@ export function defaultModelCatalog(
         model: providerDefaults.xai.defaultModel,
         endpoint: providerDefaults.xai.defaultEndpoint,
       },
+      {
+        id: "xai-grok-4-6",
+        label: "xAI Grok 4.6",
+        provider: "xai",
+        model: "grok-4.6",
+        endpoint: providerDefaults.xai.defaultEndpoint,
+        supportedEfforts: ["low", "medium", "high", "xhigh", "max"],
+      },
     ],
   };
 }

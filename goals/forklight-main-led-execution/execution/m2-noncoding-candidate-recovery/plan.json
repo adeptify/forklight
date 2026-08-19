@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "name": "M2 exact non-Coding Candidate recovery",
+  "objective": "Recover the frozen final documentation Candidate without rewriting it, then re-run the original integrated-source audits in strict serial order.",
+  "items": [
+    { "id": "exact-candidate-materialization", "task": "./01-exact-candidate.yaml", "dependsOn": [] },
+    { "id": "integrated-primary-flow-audit", "task": "./02-integrated-primary-flow-audit.yaml", "dependsOn": ["exact-candidate-materialization"] },
+    { "id": "cli-link-accuracy-audit", "task": "./03-cli-link-accuracy-audit.yaml", "dependsOn": ["integrated-primary-flow-audit"] },
+    { "id": "scope-recovery-boundary-audit", "task": "./04-scope-recovery-boundary-audit.yaml", "dependsOn": ["cli-link-accuracy-audit"] }
+  ]
+}

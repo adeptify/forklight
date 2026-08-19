@@ -1,0 +1,140 @@
+version: 2
+name: M4-E acceptance-contract-only exact Candidate recovery
+project: /Users/yijunwang/code/forklight
+taskClass: m4-main-efficient-delivery-acceptance-recovery
+taskFamily: worker-runtime
+workerProfileId: grok-4-6-xhigh
+executionPreference: auto
+routingDecision:
+  taskFamily: worker-runtime
+  shortlist:
+    - { provider: xai, model: grok-4.6, runtime: grok-build, effort: xhigh, workerProfileId: grok-4-6-xhigh }
+  selectedWorker:
+    { provider: xai, model: grok-4.6, runtime: grok-build, effort: xhigh, workerProfileId: grok-4-6-xhigh }
+  selectedBecause:
+    code: user-specified
+    note: 一骏's standing authorization continues later Tasks and prefers Grok 4.6 Xhigh; the predecessor's exact Candidate is reused after a Main-owned acceptance-phase error.
+  competition: { intent: none, triggers: [] }
+  evidenceSnapshot: { scope: none, exactSampleCounts: {} }
+reviewRequirement:
+  requiredJudges: 2
+  reason: Main authority and safe Integration behavior remain core delivery paths requiring two different-view Judges.
+runtime:
+  name: grok-build
+  executable: /Users/yijunwang/code/forklight/goals/forklight-main-led-execution/execution/m4-e/m4-e-workspace-local-seed-bootstrap.mjs
+  effort: xhigh
+  maxBudgetUsd: null
+contract:
+  outcome: Reproduce the already-proven exact 19-path M4-E Candidate while correcting only the operational bootstrap test's source-versus-Candidate phase, then complete the unchanged independent verification, dual Judge and Main serial Integration chain.
+  presentation: { summary: 产品成果不变，只纠正验收脚本所处阶段并完成交付。, language: zh-CN }
+  context:
+    - Read AGENTS.md, specs/m4-e-main-efficient-delivery/spec.md, goals/forklight-main-led-execution/evidence/m4-e-acceptance-contract-recovery-decision.md and retained-candidate.diff completely. They are the unique boundary.
+    - Original Task 6928dd28-bf5a-413c-9545-59ce96648b99 and recovery Task 7894fcfc-f0d3-4493-b065-28cef14f281a are immutable and protected. Do not resume, relabel, mutate or read either sibling Workspace.
+    - The predecessor completed Grok native Goal without subagents and captured exact 19-path Revision bec48c2e-084c-4a0b-be79-5be9729b49dc. Build, 456 tests, retained Candidate reverse check and diff validation passed.
+    - Main recorded exact acceptance-contract/non-model attribution because the operational wrapper policy test attempted source forward-apply after the patch was already materialized. Product code and tests are not implicated.
+    - The Task-local wrapper again validates and applies retained-candidate.diff before Grok starts. The policy test now uses explicit --candidate reverse mode during independent acceptance; pre-admission uses --source.
+    - Do not spawn a subagent, use Bash, redesign, edit product files or add a hunk. Inspect the materialized result and explicitly complete this fresh native Goal.
+    - One Attempt; zero validation repair, Main correction/reverify, adaptation, retry, fallback or further replacement. Failure stops with Workspace protected.
+    - ForkLight serves one local developer. Add no checksum, hash, lock, lease, version handshake or distributed coordination. M5/Hub/UI stays closed.
+  inScope:
+    - Exact Task-local materialization and handoff of retained-candidate.diff.
+    - Explicit Candidate-phase bootstrap policy verification plus unchanged build, 456-test, reverse-Candidate and diff checks.
+    - Two different-view Judges and Main serial safe Integration after all independent commands pass.
+  outOfScope:
+    - Any product edit beyond the retained patch; fresh implementation, failed-Task resume, subagent, Bash, model switch, retry, correction, reverify, adaptation, fallback or further replacement.
+    - Hub/UI, calibration, routing, storage, credentials, remote, commit, push, reset or coordination mechanism.
+  executionSteps:
+    - Read the accepted Spec, exact failure packet and Task-local retained patch.
+    - Inspect the already-materialized 19 paths without edits or delegation.
+    - Explicitly finish the native Goal with the exact schema/public-call/reuse/timeout handoff; ForkLight runs all commands independently.
+  deliverables:
+    - Exact 19-path Candidate identical to retained-candidate.diff.
+    - Passing Candidate-phase wrapper policy, build, 456 focused tests, exact reverse and diff validation.
+    - Handoff ready for two Judges and Main Integration.
+  modules:
+    - name: Exact retained Candidate
+      responsibility: Materialize the proven 19-path result on the matching source base.
+      consumes: [Task-local retained patch, accepted Spec, current source.]
+      produces: [One exact Candidate with no extra hunk.]
+      boundaries: [No sibling Workspace, reimplementation or path expansion.]
+    - name: Phase-correct operational acceptance
+      responsibility: Check source applicability before materialization and reverse applicability after Candidate materialization.
+      consumes: [Explicit --source or --candidate phase, retained patch.]
+      produces: [Truthful focused policy result.]
+      boundaries: [Operational test only; no product schema or state change.]
+  callChain:
+    - ForkLight snapshots current source and retained patch into a fresh Workspace.
+    - Wrapper checks source mode and applies the exact 19 paths locally.
+    - Grok inspects the result and completes one native Goal without subagents.
+    - ForkLight runs Candidate-mode policy plus unchanged product acceptance and captures one Revision.
+    - Two Judges inspect that Revision; Main alone accepts and integrates serially.
+  scenarios:
+    - name: Candidate-phase acceptance passes
+      given: The wrapper already materialized the retained patch.
+      when: Independent policy verification runs with --candidate.
+      then: Reverse applicability proves the exact Candidate instead of incorrectly requiring forward applicability.
+    - name: Any mismatch stops
+      given: Source, path set or Candidate differs from the retained patch.
+      when: Bootstrap or acceptance runs.
+      then: It fails closed without retry, replacement or Integration.
+  risks:
+    - Wrong phase could repeat the false failure; explicit required mode and focused policy assertions prevent omission.
+    - Any product drift could hide behind recovery; exact reverse check and unchanged full focused suite reject it.
+  changeBudget: { maxFiles: 20, maxDiffLines: 3600 }
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 60000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxWorkerValidationRepairs: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test, .forklight-boundary-capture, .forklight-receipt-retry, plans]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/main-delivery.ts
+    - src/core/types.ts
+    - src/daemon/coordinator.ts
+    - src/daemon/protocol.ts
+    - src/daemon/server.ts
+    - src/daemon/client.ts
+    - src/cli.ts
+    - src/cli/supervision.ts
+    - src/cli/exchange-receipts.ts
+    - src/mcp/server.ts
+    - src/mcp/exchange-receipts.ts
+    - tests/main-delivery.test.ts
+    - tests/cli-supervision.test.ts
+    - tests/cli-exchange-receipts.test.ts
+    - tests/daemon.test.ts
+    - tests/daemon-cli.test.ts
+    - tests/mcp.test.ts
+    - README.md
+    - docs/operations.md
+acceptance:
+  criteria:
+    - Workspace-local wrapper materializes retained-candidate.diff on the matching source and Candidate-mode policy verification proves the exact post-state.
+    - Candidate changes exactly 19 authorized paths, reverse-applies the retained patch and passes diff validation.
+    - Build and all focused M4-E tests pass; prepare/decide preserve explicit Main authority, durable reuse, safe timeouts, bounded schema and backward compatibility.
+    - Two different-view Judges and Main serial safe Integration complete with no Hub/UI or unrelated work.
+  commands:
+    - node goals/forklight-main-led-execution/execution/m4-e/m4-e-workspace-local-seed-bootstrap.test.mjs --candidate
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/main-delivery.test.ts tests/cli-supervision.test.ts tests/cli-exchange-receipts.test.ts tests/review-graph.test.ts tests/integration.test.ts tests/daemon.test.ts tests/daemon-cli.test.ts tests/mcp.test.ts
+    - node goals/forklight-main-led-execution/execution/m4-e/retained-candidate.test.mjs --candidate
+    - git diff --check

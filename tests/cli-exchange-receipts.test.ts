@@ -117,6 +117,37 @@ function makeReport(overrides: {
     } };
 }
 
+test("delivery prepare and decide each record one CLI exchange receipt", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-cli-delivery-"));
+  seedTask(home, "task-delivery");
+  const prepareOut = `delivery: prepare ready\ntask: task-delivery\n`;
+  await withCliExchangeReceipt({
+    operation: "forklight_delivery_prepare",
+    home,
+    args: { taskId: "task-delivery", reviewerProfileIds: [], reasonLength: 12, timeoutMs: 5, confirm: true },
+    taskId: "task-delivery",
+    invoke: async () => ({ kind: "main-delivery-checkpoint" }),
+    renderOutput: () => prepareOut,
+  });
+  const decideOut = `delivery: decide ready\ntask: task-delivery\n`;
+  await withCliExchangeReceipt({
+    operation: "forklight_delivery_decide",
+    home,
+    args: { taskId: "task-delivery", decision: "revise", reasonLength: 8, timeoutMs: 5, confirm: true },
+    taskId: "task-delivery",
+    invoke: async () => ({ kind: "main-delivery-checkpoint" }),
+    renderOutput: () => decideOut,
+  });
+  const receipts = listReceipts(home, "task-delivery");
+  assert.equal(receipts.length, 2);
+  assert.equal(receipts[0]!.operation, "forklight_delivery_prepare");
+  assert.equal(receipts[1]!.operation, "forklight_delivery_decide");
+  assert.equal(receipts[0]!.responseStructured, undefined);
+  assert.equal(receipts[1]!.responseStructured, undefined);
+  assertNoForbidden(receipts[0]!);
+  assertNoForbidden(receipts[1]!);
+});
+
 // --- CLI one-surface success (no responseStructured) ---------------------
 
 test("CLI success: one responseContent, no responseStructured, exact stdout bytes", async () => {

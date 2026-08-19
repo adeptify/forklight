@@ -1,0 +1,78 @@
+--- a/tests/main-token-value-report.test.ts
++++ b/tests/main-token-value-report.test.ts
+@@ -1,5 +1,6 @@
+ import assert from "node:assert/strict";
+-import { mkdtemp, readFile } from "node:fs/promises";
++import { execFile } from "node:child_process";
++import { mkdtemp } from "node:fs/promises";
+ import { tmpdir } from "node:os";
+ import path from "node:path";
+ import test from "node:test";
+@@ -11,6 +12,7 @@
+   readMainTokenValueReport,
+   type MainTokenValueReport,
+ } from "../src/core/main-token-value-report.js";
++import { ForkLightDaemon } from "../src/daemon/server.js";
+ import { StateStore } from "../src/state/store.js";
+ import type {
+   AttemptOfficialCostQuoted,
+@@ -184,6 +186,24 @@
+   for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+     assertDeepFrozen(entry, `${label}.${key}`);
+   }
++}
++
++function runValueReportCli(home: string, arguments_: string[]): Promise<{
++  stdout: string; stderr: string; exitCode: number;
++}> {
++  return new Promise((resolve) => {
++    execFile(process.execPath, [
++      "--disable-warning=ExperimentalWarning", "--import", "tsx",
++      path.join(process.cwd(), "src/cli.ts"), ...arguments_,
++    ], { cwd: process.cwd(), encoding: "utf8", env: { ...process.env, FORKLIGHT_HOME: home } },
++    (error, stdout, stderr) => {
++      const code = (error as (Error & { code?: unknown }) | null)?.code;
++      resolve({
++        stdout: String(stdout), stderr: String(stderr),
++        exitCode: error === null ? 0 : typeof code === "number" ? code : 1,
++      });
++    });
++  });
+ }
+ 
+ function quotedCost(currency: "USD" | "CNY", total: number, url: string): AttemptOfficialCostQuoted {
+@@ -573,12 +593,26 @@
+ });
+ 
+ test("value-report CLI reads flags from the full remainder after the command", async () => {
+-  const source = await readFile(new URL("../src/cli.ts", import.meta.url), "utf8");
+-  const start = source.indexOf('if (command === "value-report")');
+-  assert.ok(start >= 0);
+-  const block = source.slice(start, start + 700);
+-  assert.match(block, /positional === undefined \? rest : \[positional, \.\.\.rest\]/);
+-  assert.match(block, /--families/);
+-  assert.match(block, /--comparisons/);
+-  assert.match(block, /switches\.has\("--json"\)/);
++  const home = await mkdtemp(path.join(tmpdir(), "fl-m4c-cli-remainder-"));
++  const daemon = new ForkLightDaemon(home, 0);
++  await daemon.start();
++  try {
++    const launched = await runValueReportCli(home, [
++      "value-report",
++      "--families", JSON.stringify([FAMILY_STORAGE]),
++      "--comparisons", JSON.stringify(["cmp-remainder"]),
++      "--json",
++    ]);
++    assert.equal(launched.exitCode, 0, launched.stderr);
++    const report = JSON.parse(launched.stdout) as MainTokenValueReport;
++    assert.deepEqual(report.requestedFamilies, [FAMILY_STORAGE]);
++    assert.deepEqual(report.requestedComparisons, ["cmp-remainder"]);
++    assert.equal(report.overall, "cannot-determine");
++    assert.ok(report.reasons.includes("empty-store"));
++    assert.ok(report.reasons.includes("comparison-not-found"));
++    assert.equal(report.families[0]?.claim, "cannot-determine");
++    assert.equal(report.createdWork, false);
++  } finally {
++    await daemon.close();
++  }
+ });

@@ -1,0 +1,53 @@
+version: 2
+name: M2 audit resolved-terminal scope and destructive safety boundary
+project: /Users/yijunwang/code/forklight
+taskClass: m2-resolved-terminal-scope-safety-audit
+taskFamily: forklight-storage-lifecycle
+workerProfileId: volcengine-glm52-1m
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 0
+  reason: Read-only deterministic final audit changes no product files and verifies exact scope plus destructive safety regressions.
+contract:
+  outcome: Verify the activated Candidate changed only the accepted classifier/test paths, added no schema or coordination mechanism, and preserves every active, ambiguous, evidence, retain, and known-target safety boundary.
+  presentation: { summary: 最后只读核对范围、活动保护与可再生目标删除边界。, language: zh-CN }
+  context:
+    - Starts only after classifier and public-surface audits pass with zero diff.
+    - This is the final machine gate before Main's exact six-Task preview/reclaim; it never mutates the real ForkLight Home.
+  inScope: [Exact activated diff boundary, active and ambiguity protection, latest Revision artifact requirement, retain and known-target preservation, zero diff.]
+  outOfScope: [Edits, real Home mutation, Task resolution, broad reclaim, new validation/state, correction, review, Integration, Hub, commit, or push.]
+  executionSteps: [Inspect activated source and focused tests against the accepted spec, run approved commands, and return pass or one exact blocker.]
+  deliverables: [One final scope/safety verdict with zero Candidate change.]
+  modules:
+    - name: Destructive lifecycle boundary
+      responsibility: Audit that the narrow precedence correction cannot outrank live/unsafe/evidence guards or delete unknown/durable content.
+      consumes: [Integrated diff, accepted spec, storage and public regression suites.]
+      produces: [Pass or one exact blocker.]
+      boundaries: [No real cleanup, new mechanism, or source edit.]
+  callChain: [Main resolution is read from current Store truth, safety guards remain first, eligibility requires durable evidence, reclaim names known regenerable targets only.]
+  scenarios:
+    - name: Scope and safety remain exact
+      given: The supplement is activated.
+      when: Diff and regressions are inspected.
+      then: Only two approved paths changed and no active, ambiguous, missing-artifact, unknown, or durable target becomes deletable.
+    - name: No coordination or public expansion
+      given: ForkLight serves one local developer and the failure is only classifier precedence.
+      when: Activated source and diff are inspected.
+      then: No schema, Store rewrite, checksum, lock, lease, handshake, duplicate state, or public command is added.
+  risks: [Any public/schema expansion or weakened safety guard blocks M2 graduation.]
+  changeBudget: { maxFiles: 1, maxDiffLines: 20 }
+advancedPolicy: { maxDurationMs: null, observedTokenCeiling: null, noProgressTimeoutMs: null, fileLimit: null, fileLimitMode: warn, changedLineLimit: null, changedLineLimitMode: warn, baseMaxAttempts: 1, maxExtraAttempts: 0, maxMainCorrections: 0, maxMainReverifications: 0, maxConcurrency: 1, completionMode: warn, changeBudgetMode: warn, maxAdaptationRounds: 0 }
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: false
+  allowedCommands: []
+  focusPaths: [src/core/storage-lifecycle.ts, tests/storage-lifecycle.test.ts, src/daemon/protocol.ts, src/cli.ts, src/mcp/server.ts]
+acceptance:
+  criteria: [Activated diff and regressions preserve the exact two-path scope and all destructive safety boundaries with zero source change.]
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/storage-lifecycle.test.ts tests/daemon.test.ts tests/daemon-cli.test.ts tests/mcp.test.ts
+    - git diff --check

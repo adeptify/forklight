@@ -1,0 +1,183 @@
+version: 2
+name: M5-A1 no-Hub first setup through CLI and local API
+project: /Users/yijunwang/code/forklight
+taskClass: m5-cli-api-first-setup
+taskFamily: forklight-product-graduation
+workerProfileId: grok-4-6-xhigh
+executionPreference: auto
+routingDecision:
+  taskFamily: forklight-product-graduation
+  shortlist:
+    - provider: xai
+      model: grok-4.6
+      runtime: grok-build
+      effort: xhigh
+      workerProfileId: grok-4-6-xhigh
+    - provider: openai
+      model: gpt-5.6-luna
+      runtime: codex-cli
+      effort: max
+      workerProfileId: codex-luna-max
+  selectedWorker:
+    provider: xai
+    model: grok-4.6
+    runtime: grok-build
+    effort: xhigh
+    workerProfileId: grok-4-6-xhigh
+  selectedBecause:
+    code: user-specified
+    note: Current matched health and a direct read-only Grok 4.6 Xhigh smoke pass. Main follows 一骏's standing preference without claiming a routing recommendation.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+reviewRequirement:
+  requiredJudges: 2
+  reason: This setup path handles credential transport and modifies external Main-client configuration in production; two different-view read-only Judges inspect security, rollback and human usability before Main Integration.
+contract:
+  outcome: Let a clean installed developer understand readiness and complete Provider, built-in Worker and Main-client setup through public CLI and the existing local API without opening the old Hub, editing a settings file or exposing a credential.
+  presentation:
+    summary: 不打开旧Hub，也能看懂缺什么，并安全完成第一次设置。
+    language: zh-CN
+  context:
+    - Read AGENTS.md, specs/m5-product-graduation/work-items/cli-api-setup/spec.md and goals/forklight-main-led-execution/evidence/m5-entry-audit.md completely before editing. They are the unique accepted boundary; do not create another spec, roadmap or status file.
+    - M2-M4 are graduated. M5 must graduate clean-clone CLI/API truth before any Hub UI implementation.
+    - Current `forklight setup` is removed and points to the Hub. Reuse SetupService transactional Keychain/settings behavior, existing built-in Worker Profiles and tested Main installers.
+    - Provider secrets must enter through stdin only. Never place a secret in argv, Store, JSON, stdout, stderr, receipt, exception, fixture snapshot or handoff.
+    - Distinguish local Runtime sign-in from API-key Providers. A signed-in Grok or Codex path must not request or invent an API key.
+    - ForkLight is for one local developer. Add no lock, lease, checksum, content hash, version handshake, distributed coordination or second settings truth.
+    - Existing Hub setup HTTP routes are reusable API truth, but no HTML, CSS, client JavaScript or navigation path is writable.
+  inScope:
+    - Add one read-only setup status command with concise fact, reason and next action in human and JSON forms.
+    - Add CLI actions for selecting an already signed-in Provider or transactionally storing an API-key Provider from stdin after confirmation.
+    - Add CLI listing and simple selection of an existing built-in Worker Profile without authoring a settings file.
+    - Add CLI Main-client status, install and uninstall actions using existing safe backup behavior and explicit confirmation.
+    - Share setup semantics with the existing local authenticated API where it currently duplicates Provider/Main setup behavior.
+    - Keep current doctor, health, settings, model/Worker API and Main installer behavior compatible.
+    - Add focused tests and concise clean-install documentation.
+  outOfScope:
+    - Hub UI, GoalBoard, backup/restore, Store schema, Task/Attempt/Candidate/Integration changes, new Worker Profile editor, paid Provider probe, automatic Task or automatic retry.
+    - Reading or writing real Provider credentials, real Main configs or the source user's ForkLight home in tests.
+    - Commit, push, reset, source checkout writes outside Main Integration or unrelated refactor.
+  executionSteps:
+    - Trace only CLI setup removal, SetupService, Provider auth truth, built-in Worker settings, Main installer and existing setup API routes/tests.
+    - Define the smallest command/result shapes that answer readiness and the next action without internal terminology.
+    - Implement one vertical slice in the accepted focus paths and reuse current services rather than adding a second control plane.
+    - Prove secret non-disclosure and rollback first, then Main install and human output, then run every accepted command.
+    - Inspect the exact diff and stop when all acceptance passes; report a blocker rather than widening into Hub UI, backup or Store work.
+  deliverables:
+    - One exact Candidate implementing no-Hub first setup through CLI and compatible local API semantics.
+    - Focused tests for local sign-in, stdin-only API key, rollback/no-leak, built-in Worker selection, Main install/status/uninstall and readable errors.
+    - Updated usage and clean-install documentation that agree with the actual commands.
+    - Concise handoff with changed paths, final commands, verification and remaining M5-A2/A3 dependencies.
+  modules:
+    - name: Human setup projection
+      responsibility: Explain readiness, missing requirement and next exact action without starting work or a paid probe.
+      consumes: [Prerequisite facts, Provider auth/readiness, built-in Worker settings, Main install status.]
+      produces: [Concise human and JSON setup status.]
+      boundaries: [Read-only; no Hub UI, Worker, Task, probe or secret value.]
+    - name: Safe Provider selection
+      responsibility: Select local sign-in truth or store one API-key Provider transactionally from stdin.
+      consumes: [Provider, variant, optional model/endpoint, explicit confirmation, stdin secret only when required.]
+      produces: [Safe Provider/settings result with no credential content.]
+      boundaries: [Existing Keychain rollback; no argv secret, log, Store or receipt content.]
+    - name: Built-in Worker and Main connection
+      responsibility: Select one existing Worker and install/status/uninstall supported Main surfaces through tested backup behavior.
+      consumes: [Existing profile id, supported Main client/component, confirmation.]
+      produces: [Effective selection or install result and next-session guidance.]
+      boundaries: [No full profile editor, real config mutation in tests or automatic Main restart.]
+  callChain:
+    - Installed user runs setup status and sees one factual next step.
+    - CLI dispatches a bounded action to shared setup/Main services; secrets, when required, are read only from stdin.
+    - Settings/Keychain or Main installation completes transactionally and returns content-free truth.
+    - Existing doctor and health verify readiness, after which Main can use normal ForkLight delivery APIs.
+  scenarios:
+    - name: Existing local Grok sign-in
+      given: Grok CLI is installed and signed in, with no ForkLight xAI Keychain item.
+      when: The user selects the Grok Provider path.
+      then: Setup accepts local sign-in, asks for no API key and points to a launchable built-in Worker.
+    - name: API-key Provider succeeds
+      given: A supported API-key Provider and valid plan/model selection.
+      when: The user confirms and pipes one key through stdin.
+      then: Keychain and settings update transactionally while every output and stored record remains content-free.
+    - name: Existing key cannot be protected
+      given: A Keychain item exists but cannot be read for rollback.
+      when: Replacement is requested.
+      then: Setup refuses before overwrite, prints no credential and leaves settings unchanged.
+    - name: Main install completes
+      given: A supported Main and component with a test-only temp home.
+      when: Install is explicitly confirmed.
+      then: Existing config is backed up, the surface is installed, status agrees and the user is told whether a new session is needed.
+    - name: Invalid Worker is selected
+      given: A profile id is absent from current settings.
+      when: Selection is requested.
+      then: Setup explains the invalid choice and writes no settings.
+  risks:
+    - A CLI convenience flag could leak credentials through process listings; accept secret bytes only through stdin and test content-free argv/output.
+    - Setup API and CLI could drift; reuse shared services/result shapes and retain existing API tests.
+    - Main install could touch real client state in verification; inject temp homes/paths in tests and never run mutating setup commands against the source user.
+  changeBudget:
+    maxFiles: 16
+    maxDiffLines: 2600
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 60000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxWorkerValidationRepairs: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test, .forklight-boundary-capture, .forklight-receipt-retry, plans]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/cli.ts
+    - src/cli
+    - src/setup
+    - src/core/secrets.ts
+    - src/core/providers.ts
+    - src/core/settings.ts
+    - src/core/worker-profiles.ts
+    - src/hub/main-install.ts
+    - src/hub/server.ts
+    - tests/cli-setup.test.ts
+    - tests/setup-service.test.ts
+    - tests/hub-settings.test.ts
+    - tests/hub-main-install.test.ts
+    - tests/main-install-skill.test.ts
+    - README.md
+    - docs/configuration.md
+    - docs/operations.md
+    - docs/m1-clean-user-runbook.md
+acceptance:
+  criteria:
+    - A clean settings home exposes one concise readiness summary and one unambiguous next action without starting Hub, Task, Worker or paid probe.
+    - Local-sign-in and API-key Providers are distinguished correctly; credentials travel through stdin only and never appear in argv, output, Store, receipt, exception or handoff.
+    - Existing-key unreadability and settings failure preserve prior Keychain/settings truth; focused tests prove rollback and content-free failure.
+    - A built-in Worker is listable/selectable without file editing; invalid profile ids do not mutate settings.
+    - Supported Main status/install/uninstall use existing backups and explicit confirmation, with temp-only test state and clear new-session guidance.
+    - Existing authenticated setup API, doctor, health, settings and Main installer behavior remain compatible.
+    - No Hub UI, backup/restore, Store schema, auto-work, coordination machinery or unrelated path exists in the Candidate.
+    - Grok 4.6 Xhigh runs this Work Item through native Goal, ForkLight independently verifies it, two different-view Judges review it and Main alone decides serial Integration.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/cli-setup.test.ts tests/setup-service.test.ts tests/hub-main-install.test.ts tests/main-install-skill.test.ts tests/hub-settings.test.ts
+    - git diff --check

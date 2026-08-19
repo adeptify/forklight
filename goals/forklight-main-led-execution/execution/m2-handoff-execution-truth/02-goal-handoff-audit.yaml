@@ -1,0 +1,62 @@
+version: 2
+name: M2 audit activated direct Goal handoff execution truth
+project: /Users/yijunwang/code/forklight
+taskClass: m2-goal-handoff-execution-truth-audit
+taskFamily: forklight-runtime-continuation
+workerProfileId: default
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 0
+  reason: Read-only deterministic activated-source audit changes no product files and reruns the approved Goal handoff machine gate.
+contract:
+  outcome: Verify activated direct Goal handoff admission stores destination-owned execution preference and mode for the stopped Grok-to-Claude shape while preserving exact lineage, source immutability, one-hop, review, and Integration gating.
+  presentation: { summary: 合入后只读核对 direct Goal handoff 的 destination execution truth。, language: zh-CN }
+  context:
+    - Starts only after the implementation Candidate passes independent verification, two usable Judges, Main accept, safe Integration, activation, and matched health.
+    - Read the accepted handoff destination execution truth spec completely. Do not reopen implementation or touch the real stopped Task.
+  inScope:
+    - Inspect activated shared builder, direct Goal authorization, stored successor mode, canonical Task/runtime consumption, and focused tests.
+  outOfScope:
+    - No edits, real Home mutation, handoff execution, Store rewrite, correction, review, Integration, docs recovery, Hub, commit, or push.
+  executionSteps:
+    - Trace the direct Goal call from resolved destination selection to stored successor Task and later mode consumption.
+    - Confirm the authentic Grok auto/persistent to Claude auto/single regression and source immutability.
+    - Run approved commands and return pass or one exact blocker.
+  deliverables: [One bounded activated direct Goal handoff verdict with zero Candidate change.]
+  modules:
+    - name: Activated Goal handoff admission
+      responsibility: Audit destination-owned execution truth and unchanged Goal lineage/gates.
+      consumes: [Integrated source, focused Goal/Task/runtime tests, and accepted Work Item.]
+      produces: [Pass or one exact mismatch.]
+      boundaries: [No mutation, historical relabeling, Product correction, or UI.]
+  callChain:
+    - Main selects a different destination Profile for one Goal milestone Candidate.
+    - Shared admission freezes destination mode into the successor and keeps source immutable.
+    - Goal lineage follows the successor while review and Integration gates remain exact.
+  scenarios:
+    - name: Stopped lineage shape is now truthful
+      given: Grok source auto resolved persistent-session and Claude destination requests auto.
+      when: A new Goal successor is built under activated code.
+      then: Successor resolves single-run and source/history remain unchanged.
+    - name: Non-execution contracts do not drift
+      given: Handoff carries review, paths, gaps, policy and Integration authority.
+      when: Activated tests and source are inspected.
+      then: Only destination execution fields changed and all gates remain intact.
+  risks: [A passing pure helper without durable successor proof is insufficient.]
+  changeBudget: { maxFiles: 1, maxDiffLines: 20 }
+advancedPolicy: { maxDurationMs: null, observedTokenCeiling: null, noProgressTimeoutMs: null, fileLimit: null, fileLimitMode: warn, changedLineLimit: null, changedLineLimitMode: warn, baseMaxAttempts: 1, maxExtraAttempts: 0, maxMainCorrections: 0, maxMainReverifications: 0, maxConcurrency: 1, completionMode: warn, changeBudgetMode: warn, maxAdaptationRounds: 0 }
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: false
+  allowedCommands: []
+  focusPaths: [src/core/candidate-handoff.ts, src/core/execution-mode.ts, src/core/task.ts, src/core/runner.ts, tests/goal.test.ts, tests/task.test.ts, tests/worker-runtime.test.ts]
+acceptance:
+  criteria:
+    - Activated direct Goal successor truth matches destination Runtime capabilities with zero source change and existing gates intact.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/goal.test.ts tests/task.test.ts tests/worker-runtime.test.ts
+    - git diff --check

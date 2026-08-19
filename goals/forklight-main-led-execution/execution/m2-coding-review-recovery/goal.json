@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "name": "M2 Coding exact Candidate review recovery",
+  "objective": "Materialize the exact final source-only Integration recovery Candidate without behavior changes, independently re-verify it, obtain one fresh usable two-Judge Review Graph, safely integrate it after Main accept, and complete the existing three serial integrated-source audits.",
+  "planFile": "./plan.json",
+  "policy": {
+    "maxDurationMs": null,
+    "noProgressTimeoutMs": null,
+    "maxCorrectionRounds": 0,
+    "maxReviewRounds": 1,
+    "maxNoNewEvidenceCycles": 1
+  },
+  "milestones": [
+    { "itemId": "exact-candidate-review", "gate": "integration" },
+    { "itemId": "integrated-recovery-audit", "gate": "machine" },
+    { "itemId": "wrong-candidate-safety-audit", "gate": "machine" },
+    { "itemId": "operation-surface-audit", "gate": "machine" }
+  ]
+}

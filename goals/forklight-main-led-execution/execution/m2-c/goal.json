@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "name": "M2-C auditable Task storage lifecycle",
+  "objective": "Deliver a safely integrated and independently audited single-user storage lifecycle with exact read-only audit and preview, confirmed re-evaluating reclaim, durable disposition, unknown preservation, and Store/process integrity before Main exercises the real local preview.",
+  "planFile": "./plan.json",
+  "policy": {
+    "maxDurationMs": null,
+    "noProgressTimeoutMs": null,
+    "maxCorrectionRounds": 1,
+    "maxReviewRounds": 2,
+    "maxNoNewEvidenceCycles": 2
+  },
+  "milestones": [
+    { "itemId": "implement", "gate": "integration" },
+    { "itemId": "protection-audit", "gate": "machine" },
+    { "itemId": "surface-audit", "gate": "machine" },
+    { "itemId": "boundary-audit", "gate": "machine" }
+  ]
+}

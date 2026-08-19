@@ -1228,7 +1228,7 @@ export function resolveEffectiveMilestoneLineage(
   const handoffs = store.listCandidateHandoffsBySourceTaskId(originalTaskId);
   // Authoritative once any durable Goal-Task handoff exists (including failed prep).
   // Competition origin on a Goal Task is unexpected and is ignored for lineage.
-  const goalHandoffs = handoffs.filter((entry) => entry.origin.kind === "goal-task");
+  const goalHandoffs = handoffs.filter((entry) => entry.origin?.kind === "goal-task");
   const handoff = goalHandoffs.length === 0
     ? undefined
     : goalHandoffs.reduce((latest, entry) =>

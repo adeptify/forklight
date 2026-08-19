@@ -1,0 +1,2198 @@
+diff --git a/baseline/src/core/statistics.ts b/workspace/src/core/statistics.ts
+index 65d73f1..e5aaee1 100644
+--- a/baseline/src/core/statistics.ts
++++ b/workspace/src/core/statistics.ts
+@@ -15,6 +15,7 @@ import type {
+   FrozenWorkerIdentity,
+   MainReviewDecisionKind,
+   RemediationDisposition,
++  ResolvedExecutionMode,
+   RoutingDecisionSnapshot,
+   TaskRecord,
+   TaskStatus,
+@@ -867,10 +868,49 @@ export interface RoutingBudgetEvidence {
+   envelope: RoutingBudgetEnvelope | null;
+ }
+ 
++/** Closed token for a missing frozen Task execution mode. Never inferred. */
++export const LEGACY_UNKNOWN_EXECUTION_MODE = "legacy-unknown" as const;
++
++/** Frozen execution mode, or the closed unknown token when the Task omitted one. */
++export type StrategyExecutionMode = ResolvedExecutionMode | typeof LEGACY_UNKNOWN_EXECUTION_MODE;
++
++/** How routing evidence is grouped. `full-worker` is the existing Worker ranking
++ *  identity and must stay mode-free. `full-worker-mode` is the parallel
++ *  strategy identity and never borrows samples across modes. */
++export type RoutingIdentityMode = "provider-model" | "full-worker" | "full-worker-mode";
++
++/** Report a stored execution mode only when it is one of the three frozen
++ *  values. Missing or unrecognized values stay `legacy-unknown`. */
++export function frozenStrategyExecutionMode(
++  spec: { executionMode?: unknown } | undefined,
++): StrategyExecutionMode {
++  const mode = spec?.executionMode;
++  return mode === "single-run" || mode === "persistent-session" || mode === "native-goal"
++    ? mode
++    : LEGACY_UNKNOWN_EXECUTION_MODE;
++}
++
++/** Shared derivation/lookup key for one comparable execution strategy. */
++export function strategyIdentityKey(
++  provider: string,
++  model: string,
++  runtime: string,
++  effort: string,
++  executionMode: StrategyExecutionMode,
++): string {
++  return `${provider}\0${model}\0${runtime}\0${effort}\0${executionMode}`;
++}
++
+ /** Privacy-safe, exact-task-class evidence for one provider/model. */
+ export interface RoutingEvidence {
+   provider: string;
+   model: string;
++  /** Present for full-worker and full-worker-mode rows. */
++  runtime?: string;
++  /** Present for full-worker and full-worker-mode rows. */
++  effort?: string;
++  /** Present only on mode-aware rows. Missing frozen mode is `legacy-unknown`. */
++  executionMode?: StrategyExecutionMode;
+   /** All terminal Tasks observed for this exact class, including evidence that
+    * is intentionally ignored for model-quality routing. */
+   terminalTaskCount: number;
+@@ -1107,8 +1147,9 @@ export interface DeriveRoutingEvidenceInput {
+   /** Durable applied Integration presence — legacy delivery evidence. */
+   hasAppliedIntegration?: (taskId: string) => boolean;
+   /** New decisions compare the complete frozen Worker identity. Legacy callers
+-   * may explicitly aggregate by provider/model. */
+-  identityMode?: "provider-model" | "full-worker";
++   * may explicitly aggregate by provider/model. `full-worker-mode` is the
++   * parallel strategy identity and is never used for existing Worker ranking. */
++  identityMode?: RoutingIdentityMode;
+ }
+ 
+ function officialCostUnavailableReason(attempt: AttemptRecord): string {
+@@ -1127,6 +1168,10 @@ export function deriveRoutingEvidence(input: DeriveRoutingEvidenceInput): Map<st
+   const groups = new Map<string, TaskEvidence[]>();
+   for (const item of input.history) {
+     if (!isTerminalTaskStatus(item.task.status)) continue;
++    if (input.identityMode === "full-worker-mode"
++      && isReviewGraphReviewerTaskFile(item.task.taskFile)) {
++      continue;
++    }
+     if (useFamily) {
+       if (item.task.spec.taskFamily !== input.taskFamily) continue;
+     } else {
+@@ -1134,19 +1179,52 @@ export function deriveRoutingEvidence(input: DeriveRoutingEvidenceInput): Map<st
+     }
+     const providerModel = item.task.spec.provider.name + "\0" + item.task.spec.provider.model;
+     const runtime = item.task.spec.runtime;
+-    if (input.identityMode === "full-worker" && runtime === undefined) continue;
+-    const key = input.identityMode === "full-worker"
+-      ? providerModel + "\0" + runtime!.name + "\0" + runtime!.effort
+-      : providerModel;
++    if (
++      (input.identityMode === "full-worker" || input.identityMode === "full-worker-mode")
++      && runtime === undefined
++    ) {
++      continue;
++    }
++    const key = input.identityMode === "full-worker-mode"
++      ? strategyIdentityKey(
++          item.task.spec.provider.name,
++          item.task.spec.provider.model,
++          runtime!.name,
++          runtime!.effort,
++          frozenStrategyExecutionMode(item.task.spec),
++        )
++      : input.identityMode === "full-worker"
++        ? providerModel + "\0" + runtime!.name + "\0" + runtime!.effort
++        : providerModel;
+     groups.set(key, [...(groups.get(key) ?? []), item]);
+   }
+ 
+   const result = new Map<string, RoutingEvidence>();
+   for (const [key, items] of groups) {
+-    const [provider = "", model = ""] = key.split("\0");
++    const parts = key.split("\0");
++    const provider = parts[0] ?? "";
++    const model = parts[1] ?? "";
++    const runtimeName = parts[2];
++    const effortName = parts[3];
++    const modeToken = parts[4];
+     const evidence: RoutingEvidence = {
+       provider,
+       model,
++      ...(input.identityMode === "full-worker" || input.identityMode === "full-worker-mode"
++        ? {
++            runtime: runtimeName ?? "",
++            effort: effortName ?? "",
++          }
++        : {}),
++      ...(input.identityMode === "full-worker-mode"
++        ? {
++            executionMode: modeToken === "single-run"
++              || modeToken === "persistent-session"
++              || modeToken === "native-goal"
++              ? modeToken
++              : LEGACY_UNKNOWN_EXECUTION_MODE,
++          }
++        : {}),
+       terminalTaskCount: items.length,
+       relevantSampleCount: 0,
+       modelQualityFailureCount: 0,
+@@ -1675,7 +1753,7 @@ export class StatisticsService {
+    *  Tasks.  Read-only — never mutates state. */
+   routingEvidence(
+     taskClass: string,
+-    identityMode: "provider-model" | "full-worker" = "provider-model",
++    identityMode: RoutingIdentityMode = "provider-model",
+   ): Map<string, RoutingEvidence> {
+     const history = this.store.listTasks()
+       .filter((task) => isTerminalTaskStatus(task.status))
+@@ -1708,7 +1786,7 @@ export class StatisticsService {
+    *  Direct Codex Token calibration. */
+   routingEvidenceByFamily(
+     taskFamily: string,
+-    identityMode: "provider-model" | "full-worker" = "provider-model",
++    identityMode: RoutingIdentityMode = "provider-model",
+   ): Map<string, RoutingEvidence> {
+     // Collect all terminal tasks (deriveRoutingEvidence filters by family inside).
+     const history = this.store.listTasks()
+@@ -1736,6 +1814,17 @@ export class StatisticsService {
+     });
+   }
+ 
++  /** Mode-aware exact-class evidence. Parallel to Worker ranking; never
++   *  merges execution modes or infers a missing frozen mode. */
++  modeAwareRoutingEvidence(taskClass: string): Map<string, RoutingEvidence> {
++    return this.routingEvidence(taskClass, "full-worker-mode");
++  }
++
++  /** Mode-aware family evidence. Complete-set fallback only. */
++  modeAwareRoutingEvidenceByFamily(taskFamily: string): Map<string, RoutingEvidence> {
++    return this.routingEvidenceByFamily(taskFamily, "full-worker-mode");
++  }
++
+   /**
+    * Portfolio coverage of classification + Main-authored Worker-selection
+    * evidence. Read-only — never mutates state, never calls a Provider, never
+diff --git a/baseline/src/core/model-routing.ts b/workspace/src/core/model-routing.ts
+index d40f270..6f0de4b 100644
+--- a/baseline/src/core/model-routing.ts
++++ b/workspace/src/core/model-routing.ts
+@@ -17,6 +17,7 @@ import type {
+   WorkerReadinessReason,
+   WorkerReadinessState,
+ } from "./worker-readiness.js";
++import type { StrategyPolicyProjection } from "./strategy-advice.js";
+ 
+ export type FailureImpact = "model-quality" | "non-model" | "ambiguous";
+ 
+@@ -330,6 +331,10 @@ export interface RoutingAdvisoryResponse {
+    *  `"all-candidates"` when every requested candidate was compared;
+    *  `"evidence-ready-subset"` when the recommendation only covers the cohort. */
+   recommendationCoverage: "all-candidates" | "evidence-ready-subset" | null;
++  /** Additive mode-aware strategy and explicit-policy explanation.
++   *  Present on the canonical Daemon/CLI/MCP surface; omitted by legacy
++   *  provideRoutingAdvice callers that only score Worker identities. */
++  strategyPolicy?: StrategyPolicyProjection;
+ }
+ 
+ interface FactorPlan {
+diff --git a/workspace/src/core/strategy-advice.ts b/workspace/src/core/strategy-advice.ts
+new file mode 100644
+index 0000000..4eac771
+--- /dev/null
++++ b/workspace/src/core/strategy-advice.ts
+@@ -0,0 +1,778 @@
++/**
++ * Read-only execution-strategy and exceptional-policy projection.
++ *
++ * Explains what naturally accumulated history supports for one requested
++ * taskClass (and optional explicit taskFamily). It never starts a Task,
++ * Competition, Judge, retry, or Integration, and it never votes or changes
++ * Main authority.
++ */
++import { isReviewGraphReviewerTaskFile } from "./task.js";
++import { isTerminalTaskStatus } from "./task-progress.js";
++import type {
++  CompetitionIntent,
++  CompetitionTrigger,
++  EvidenceScope,
++  RoutingPolicySettings,
++} from "./model-routing.js";
++import {
++  strategyIdentityKey,
++  type RoutingEvidence,
++  type StrategyExecutionMode,
++} from "./statistics.js";
++import type {
++  CompetitionMainDecisionKind,
++  CompetitionRecord,
++  CompetitionStatus,
++  MainDirectDecisionReason,
++  MainDirectDecisionRecord,
++  MainDirectDecisionStatus,
++  ReviewAssignmentRecord,
++  ReviewGraphRecord,
++  TaskRecord,
++} from "./types.js";
++
++export type StrategyDetermination = "recommendation" | "cannot-determine";
++
++export type StrategyCannotDetermineReason =
++  | "insufficient-relevant-samples"
++  | "single-comparable-strategy"
++  | "incomplete-family-coverage"
++  | "score-gap-too-small"
++  | "no-active-factors";
++
++export interface StrategyEvidenceRow {
++  provider: string;
++  model: string;
++  runtime: string;
++  effort: string;
++  executionMode: StrategyExecutionMode;
++  terminalTaskCount: number;
++  relevantSampleCount: number;
++  acceptedDeliveryCount: number;
++  modelQualityFailureCount: number;
++  ignoredNonModelTaskCount: number;
++  ambiguousFailureCount: number;
++  score: number;
++  compared: boolean;
++}
++
++export interface StrategyRecommendation {
++  provider: string;
++  model: string;
++  runtime: string;
++  effort: string;
++  executionMode: StrategyExecutionMode;
++  confidence: number;
++  reasoning: string;
++}
++
++export interface ExecutionStrategyAdvice {
++  determination: StrategyDetermination;
++  reasons: StrategyCannotDetermineReason[];
++  evidenceScope: EvidenceScope;
++  rows: StrategyEvidenceRow[];
++  recommendation?: StrategyRecommendation;
++  createsWork: false;
++}
++
++export type CompetitionPolicyDetermination =
++  | "not-advised"
++  | "explained"
++  | "cannot-determine";
++
++export type CompetitionPolicyReason =
++  | "intent-none"
++  | "missing-valid-triggers"
++  | "no-matching-competition-history"
++  | "historical-explanation-only";
++
++export interface CompetitionPolicyExplanation {
++  determination: CompetitionPolicyDetermination;
++  reasons: CompetitionPolicyReason[];
++  intent: CompetitionIntent;
++  shouldRunCompetition: boolean;
++  validTriggers: CompetitionTrigger[];
++  matchingCompetitionCount: number;
++  admission: {
++    completed: number;
++    running: number;
++    pending: number;
++    legacyUnknownReason: number;
++  };
++  outcomes: {
++    accept: number;
++    reject: number;
++    revise: number;
++    noDecision: number;
++  };
++  createsWork: false;
++  historyCanOverrideIntentNone: false;
++}
++
++export type JudgePolicyDetermination = "explained" | "cannot-determine";
++
++export type JudgePolicyReason =
++  | "requirement-absent"
++  | "no-usable-history"
++  | "historical-explanation-only";
++
++export interface JudgePolicyExplanation {
++  determination: JudgePolicyDetermination;
++  reasons: JudgePolicyReason[];
++  declaredRequiredJudges: {
++    present: boolean;
++    depths: Array<0 | 1 | 2>;
++    mixed: boolean;
++  };
++  usableOutcomeCount: number;
++  unusableOutcomeCount: number;
++  distinctUnderlyingIdentityCount: number;
++  votes: false;
++  infersRequirement: false;
++  assignsOrReplacesJudge: false;
++  changesIntegrationAuthority: false;
++}
++
++export interface MainDirectHistorySection {
++  present: boolean;
++  recordCount: number;
++  openCount: number;
++  completedCount: number;
++  abandonedCount: number;
++  reasonDistribution: Partial<Record<MainDirectDecisionReason, number>>;
++  comparedAsWorkerEvidence: false;
++}
++
++export interface StrategyPolicyProjection {
++  strategy: ExecutionStrategyAdvice;
++  competitionPolicy: CompetitionPolicyExplanation;
++  judgePolicy: JudgePolicyExplanation;
++  mainDirectHistory: MainDirectHistorySection;
++}
++
++export interface CompetitionHistoryFact {
++  status: CompetitionStatus;
++  hasReason: boolean;
++  intent?: CompetitionIntent;
++  triggers: CompetitionTrigger[];
++  mainDecision?: CompetitionMainDecisionKind;
++  taskClass?: string;
++  taskFamily?: string;
++}
++
++export interface ReviewAssignmentHistoryFact {
++  provider: string;
++  model: string;
++  runtime: string;
++  effort: string;
++  terminal: boolean;
++  usable: boolean;
++}
++
++export interface ReviewGraphHistoryFact {
++  taskClass?: string;
++  taskFamily?: string;
++  assignments: ReviewAssignmentHistoryFact[];
++}
++
++export interface OrdinaryTaskPolicyFact {
++  taskClass?: string;
++  taskFamily?: string;
++  requiredJudges?: 0 | 1 | 2;
++}
++
++export interface MainDirectHistoryFact {
++  taskClass: string;
++  taskFamily?: string;
++  status: MainDirectDecisionStatus;
++  reason: MainDirectDecisionReason;
++}
++
++export interface ProjectStrategyPolicyInput {
++  taskClass: string;
++  taskFamily?: string;
++  policy: RoutingPolicySettings;
++  competitionIntent: CompetitionIntent;
++  competitionTriggers: readonly string[];
++  shouldRunCompetition: boolean;
++  exactEvidence: ReadonlyMap<string, RoutingEvidence>;
++  familyEvidence?: ReadonlyMap<string, RoutingEvidence>;
++  competitions?: readonly CompetitionHistoryFact[];
++  ordinaryTasks?: readonly OrdinaryTaskPolicyFact[];
++  reviewGraphs?: readonly ReviewGraphHistoryFact[];
++  mainDirect?: readonly MainDirectHistoryFact[];
++}
++
++export interface StrategyPolicyStore {
++  listTasks(): TaskRecord[];
++  listCompetitions(): CompetitionRecord[];
++  listReviewGraphs(): ReviewGraphRecord[];
++  listReviewAssignments(graphId: string): ReviewAssignmentRecord[];
++  listMainDirectDecisions(): MainDirectDecisionRecord[];
++}
++
++const VALID_TRIGGERS = new Set<CompetitionTrigger>([
++  "critical",
++  "multiple-plausible-solutions",
++  "new-family",
++  "user-requested",
++]);
++
++const STRATEGY_REASON_ORDER: readonly StrategyCannotDetermineReason[] = [
++  "insufficient-relevant-samples",
++  "single-comparable-strategy",
++  "incomplete-family-coverage",
++  "no-active-factors",
++  "score-gap-too-small",
++];
++
++function uniqueOrderedStrategyReasons(
++  reasons: Iterable<StrategyCannotDetermineReason>,
++): StrategyCannotDetermineReason[] {
++  const present = new Set(reasons);
++  return STRATEGY_REASON_ORDER.filter((reason) => present.has(reason));
++}
++
++function inRequestedScope(
++  record: { taskClass?: string; taskFamily?: string },
++  taskClass: string,
++  taskFamily: string | undefined,
++): boolean {
++  if (record.taskClass === taskClass) return true;
++  return taskFamily !== undefined && record.taskFamily === taskFamily;
++}
++
++function rowFromEvidence(evidence: RoutingEvidence, score: number, compared: boolean): StrategyEvidenceRow {
++  return {
++    provider: evidence.provider,
++    model: evidence.model,
++    runtime: evidence.runtime ?? "",
++    effort: evidence.effort ?? "",
++    executionMode: evidence.executionMode ?? "legacy-unknown",
++    terminalTaskCount: evidence.terminalTaskCount,
++    relevantSampleCount: evidence.relevantSampleCount,
++    acceptedDeliveryCount: evidence.acceptedDeliveryCount,
++    modelQualityFailureCount: evidence.modelQualityFailureCount,
++    ignoredNonModelTaskCount: evidence.ignoredNonModelTaskCount,
++    ambiguousFailureCount: evidence.ambiguousFailureCount,
++    score,
++    compared,
++  };
++}
++
++function sortRows(rows: StrategyEvidenceRow[]): StrategyEvidenceRow[] {
++  return [...rows].sort((left, right) =>
++    left.provider.localeCompare(right.provider)
++    || left.model.localeCompare(right.model)
++    || left.runtime.localeCompare(right.runtime)
++    || left.effort.localeCompare(right.effort)
++    || left.executionMode.localeCompare(right.executionMode));
++}
++
++function normalized(value: number, values: number[], lowerIsBetter: boolean): number {
++  const low = Math.min(...values);
++  const high = Math.max(...values);
++  if (high === low) return 1;
++  return lowerIsBetter ? (high - value) / (high - low) : (value - low) / (high - low);
++}
++
++function officialCostAverage(evidence: RoutingEvidence): number | undefined {
++  if (
++    evidence.officialCostAttemptCount === 0
++    || evidence.officialCostByCurrency.length !== 1
++    || evidence.officialCostUnavailableCount > 0
++    || evidence.officialCostQuotedAttemptCount !== evidence.officialCostAttemptCount
++    || evidence.relevantSampleCount <= 0
++  ) {
++    return undefined;
++  }
++  const group = evidence.officialCostByCurrency[0]!;
++  if (group.quotedAttemptCount !== evidence.officialCostAttemptCount) return undefined;
++  return group.totalQuotedCost / evidence.relevantSampleCount;
++}
++
++interface FactorPlan {
++  weight: number;
++  available: boolean;
++  values: number[];
++  lowerIsBetter: boolean;
++}
++
++function scoreStrategies(
++  rows: RoutingEvidence[],
++  policy: RoutingPolicySettings,
++  minSamples: number,
++): { scores: number[]; activeWeight: number } {
++  const weights = policy.weights;
++  const all = <T>(select: (item: RoutingEvidence) => T | undefined): T[] | undefined => {
++    const values: T[] = [];
++    for (const item of rows) {
++      const value = select(item);
++      if (value === undefined) return undefined;
++      values.push(value);
++    }
++    return values;
++  };
++
++  const acceptedValues = rows.every((item) => item.acceptedDeliverySampleCount >= minSamples)
++    ? rows.map((item) => item.acceptedDeliveryRate)
++    : undefined;
++  const behaviorValues = rows.every((item) => item.verifiedBehaviorSampleCount === item.relevantSampleCount)
++    ? rows.map((item) => item.verifiedBehaviorRate)
++    : undefined;
++  const firstPassValues = rows.every((item) => item.firstPassVerifiedSampleCount >= minSamples)
++    ? rows.map((item) => item.firstPassVerifiedSuccessRate)
++    : undefined;
++  const costValues = all(officialCostAverage);
++  const sameCostCurrency = costValues !== undefined && new Set(
++    rows.map((item) => item.officialCostByCurrency[0]?.currency),
++  ).size === 1;
++  const durationValues = rows.every((item) =>
++    item.durationSampleCount === item.relevantSampleCount && item.avgDurationMs !== undefined)
++    ? rows.map((item) => item.avgDurationMs!)
++    : undefined;
++  const budgetValues = rows.every((item) =>
++    item.budgetReliability.boundedSampleCount >= minSamples
++    && item.budgetReliability.envelope !== null
++    && item.budgetReliability.completedWithoutExhaustionRate !== null)
++    ? rows.map((item) => item.budgetReliability.completedWithoutExhaustionRate as number)
++    : undefined;
++  const budgetEnvelopeKey = (item: RoutingEvidence): string => {
++    const env = item.budgetReliability.envelope;
++    return `${env?.runtimeBudgetUsd ?? "_"}\0${env?.observedTokenCeiling ?? "_"}`;
++  };
++  const sameBudgetEnvelope = budgetValues !== undefined
++    && new Set(rows.map(budgetEnvelopeKey)).size === 1;
++
++  const plans: FactorPlan[] = [
++    {
++      weight: weights.acceptedDelivery,
++      available: weights.acceptedDelivery > 0 && acceptedValues !== undefined,
++      values: acceptedValues ?? [],
++      lowerIsBetter: false,
++    },
++    {
++      weight: weights.verifiedBehavior,
++      available: weights.verifiedBehavior > 0 && behaviorValues !== undefined,
++      values: behaviorValues ?? [],
++      lowerIsBetter: false,
++    },
++    {
++      weight: weights.modelQualityFailure,
++      available: weights.modelQualityFailure > 0,
++      values: rows.map((item) => item.modelQualityFailureRate),
++      lowerIsBetter: true,
++    },
++    {
++      weight: weights.correctionChurn,
++      available: weights.correctionChurn > 0,
++      values: rows.map((item) => item.correctionChurnRate),
++      lowerIsBetter: true,
++    },
++    {
++      weight: weights.firstPassSuccess,
++      available: weights.firstPassSuccess > 0 && firstPassValues !== undefined,
++      values: firstPassValues ?? [],
++      lowerIsBetter: false,
++    },
++    {
++      weight: weights.officialCost,
++      available: weights.officialCost > 0 && costValues !== undefined && sameCostCurrency,
++      values: costValues ?? [],
++      lowerIsBetter: true,
++    },
++    {
++      weight: weights.duration,
++      available: weights.duration > 0 && durationValues !== undefined,
++      values: durationValues ?? [],
++      lowerIsBetter: true,
++    },
++    {
++      weight: weights.budgetReliability,
++      available: weights.budgetReliability > 0 && budgetValues !== undefined && sameBudgetEnvelope,
++      values: budgetValues ?? [],
++      lowerIsBetter: false,
++    },
++  ];
++
++  const activeWeight = plans.reduce((sum, plan) => sum + (plan.available ? plan.weight : 0), 0);
++  const scores = rows.map((_, index) => plans.reduce((sum, plan) => {
++    if (!plan.available) return sum;
++    return sum + normalized(plan.values[index]!, plan.values, plan.lowerIsBetter) * plan.weight;
++  }, 0));
++  return { scores, activeWeight };
++}
++
++function readyEntries(
++  evidence: ReadonlyMap<string, RoutingEvidence>,
++  minSamples: number,
++): RoutingEvidence[] {
++  return [...evidence.values()].filter((item) => item.relevantSampleCount >= minSamples);
++}
++
++function determineStrategy(
++  input: ProjectStrategyPolicyInput,
++): ExecutionStrategyAdvice {
++  const exactReady = readyEntries(input.exactEvidence, input.policy.minRelevantSamples);
++  const familyMap = input.familyEvidence;
++  const familyReady = familyMap === undefined
++    ? []
++    : readyEntries(familyMap, input.policy.familyMinRelevantSamples);
++  const familyIncomplete = familyMap !== undefined
++    && familyMap.size > 0
++    && familyReady.length < familyMap.size;
++
++  let evidenceScope: EvidenceScope = "none";
++  let compared: RoutingEvidence[] = [];
++  let minSamples = input.policy.minRelevantSamples;
++  const reasons: StrategyCannotDetermineReason[] = [];
++
++  if (exactReady.length >= 2) {
++    evidenceScope = "exact-class";
++    compared = exactReady;
++  } else if (familyMap !== undefined) {
++    if (familyReady.length >= 2 && !familyIncomplete) {
++      evidenceScope = "task-family";
++      compared = familyReady;
++      minSamples = input.policy.familyMinRelevantSamples;
++    } else if (familyMap.size > 0 && (familyIncomplete || familyReady.length < 2)) {
++      reasons.push("incomplete-family-coverage");
++    }
++  }
++
++  if (evidenceScope === "none") {
++    if (exactReady.length === 1 || (exactReady.length < 2 && familyReady.length === 1)) {
++      reasons.push("single-comparable-strategy");
++    } else if (!reasons.includes("incomplete-family-coverage")) {
++      reasons.push("insufficient-relevant-samples");
++    }
++  }
++
++  const displayMap = evidenceScope === "task-family" && familyMap !== undefined
++    ? familyMap
++    : input.exactEvidence.size > 0 || familyMap === undefined
++      ? input.exactEvidence
++      : familyMap;
++
++  if (evidenceScope === "none") {
++    return {
++      determination: "cannot-determine",
++      reasons: uniqueOrderedStrategyReasons(reasons),
++      evidenceScope,
++      rows: sortRows([...displayMap.values()].map((item) => rowFromEvidence(item, 0, false))),
++      createsWork: false,
++    };
++  }
++
++  const { scores, activeWeight } = scoreStrategies(compared, input.policy, minSamples);
++  const ranked = compared
++    .map((item, index) => ({ item, score: scores[index]! }))
++    .sort((left, right) => right.score - left.score
++      || left.item.provider.localeCompare(right.item.provider)
++      || left.item.model.localeCompare(right.item.model)
++      || (left.item.executionMode ?? "").localeCompare(right.item.executionMode ?? ""));
++  const gap = ranked[0]!.score - ranked[1]!.score;
++  const gapRatio = activeWeight > 0 ? gap / activeWeight : 0;
++  const insufficientGap = gapRatio <= input.policy.uncertaintyThreshold;
++  if (activeWeight === 0) reasons.push("no-active-factors");
++  if (insufficientGap) reasons.push("score-gap-too-small");
++
++  const scoreByKey = new Map<string, number>();
++  for (const entry of ranked) {
++    scoreByKey.set(strategyIdentityKey(
++      entry.item.provider,
++      entry.item.model,
++      entry.item.runtime ?? "",
++      entry.item.effort ?? "",
++      entry.item.executionMode ?? "legacy-unknown",
++    ), entry.score);
++  }
++
++  const rows = sortRows([...displayMap.values()].map((item) => {
++    const key = strategyIdentityKey(
++      item.provider,
++      item.model,
++      item.runtime ?? "",
++      item.effort ?? "",
++      item.executionMode ?? "legacy-unknown",
++    );
++    const comparedRow = scoreByKey.has(key);
++    return rowFromEvidence(item, scoreByKey.get(key) ?? 0, comparedRow);
++  }));
++
++  if (activeWeight === 0 || insufficientGap) {
++    return {
++      determination: "cannot-determine",
++      reasons: uniqueOrderedStrategyReasons(reasons),
++      evidenceScope,
++      rows,
++      createsWork: false,
++    };
++  }
++
++  const top = ranked[0]!;
++  return {
++    determination: "recommendation",
++    reasons: [],
++    evidenceScope,
++    rows,
++    recommendation: {
++      provider: top.item.provider,
++      model: top.item.model,
++      runtime: top.item.runtime ?? "",
++      effort: top.item.effort ?? "",
++      executionMode: top.item.executionMode ?? "legacy-unknown",
++      confidence: Math.max(0, Math.min(1, gapRatio)),
++      reasoning:
++        `clear-score-gap:${gapRatio.toFixed(4)};relevant-samples:${top.item.relevantSampleCount};execution-mode:${top.item.executionMode ?? "legacy-unknown"}`,
++    },
++    createsWork: false,
++  };
++}
++
++function emptyAdmission(): CompetitionPolicyExplanation["admission"] {
++  return { completed: 0, running: 0, pending: 0, legacyUnknownReason: 0 };
++}
++
++function emptyOutcomes(): CompetitionPolicyExplanation["outcomes"] {
++  return { accept: 0, reject: 0, revise: 0, noDecision: 0 };
++}
++
++function summarizeCompetitions(
++  matching: readonly CompetitionHistoryFact[],
++): Pick<CompetitionPolicyExplanation, "admission" | "outcomes"> {
++  const admission = emptyAdmission();
++  const outcomes = emptyOutcomes();
++  for (const item of matching) {
++    if (item.status === "completed") admission.completed += 1;
++    else if (item.status === "running") admission.running += 1;
++    else admission.pending += 1;
++    if (!item.hasReason) admission.legacyUnknownReason += 1;
++    if (item.mainDecision === "accept") outcomes.accept += 1;
++    else if (item.mainDecision === "reject") outcomes.reject += 1;
++    else if (item.mainDecision === "revise") outcomes.revise += 1;
++    else outcomes.noDecision += 1;
++  }
++  return { admission, outcomes };
++}
++
++function determineCompetition(
++  input: ProjectStrategyPolicyInput,
++): CompetitionPolicyExplanation {
++  const validTriggers = input.competitionTriggers.filter(
++    (trigger): trigger is CompetitionTrigger => VALID_TRIGGERS.has(trigger as CompetitionTrigger),
++  );
++  const matching = (input.competitions ?? []).filter((item) =>
++    inRequestedScope(item, input.taskClass, input.taskFamily));
++  const summary = summarizeCompetitions(matching);
++  const base = {
++    intent: input.competitionIntent,
++    shouldRunCompetition: input.shouldRunCompetition,
++    validTriggers,
++    matchingCompetitionCount: matching.length,
++    ...summary,
++    createsWork: false as const,
++    historyCanOverrideIntentNone: false as const,
++  };
++
++  if (input.competitionIntent === "none") {
++    return {
++      ...base,
++      shouldRunCompetition: false,
++      determination: "not-advised",
++      reasons: ["intent-none"],
++    };
++  }
++
++  if (validTriggers.length === 0) {
++    return {
++      ...base,
++      determination: "cannot-determine",
++      reasons: ["missing-valid-triggers"],
++    };
++  }
++
++  if (matching.length === 0) {
++    return {
++      ...base,
++      determination: "cannot-determine",
++      reasons: ["no-matching-competition-history"],
++    };
++  }
++
++  return {
++    ...base,
++    determination: "explained",
++    reasons: ["historical-explanation-only"],
++  };
++}
++
++function determineJudge(input: ProjectStrategyPolicyInput): JudgePolicyExplanation {
++  const ordinary = (input.ordinaryTasks ?? []).filter((item) =>
++    inRequestedScope(item, input.taskClass, input.taskFamily));
++  const depths = [...new Set(
++    ordinary
++      .map((item) => item.requiredJudges)
++      .filter((depth): depth is 0 | 1 | 2 => depth === 0 || depth === 1 || depth === 2),
++  )].sort((left, right) => left - right);
++  const declared = {
++    present: depths.length > 0,
++    depths,
++    mixed: depths.length > 1,
++  };
++
++  const identities = new Set<string>();
++  let usableOutcomeCount = 0;
++  let unusableOutcomeCount = 0;
++  for (const graph of input.reviewGraphs ?? []) {
++    if (!inRequestedScope(graph, input.taskClass, input.taskFamily)) continue;
++    for (const assignment of graph.assignments) {
++      identities.add(
++        `${assignment.provider}\0${assignment.model}\0${assignment.runtime}\0${assignment.effort}`,
++      );
++      if (assignment.usable) usableOutcomeCount += 1;
++      else if (assignment.terminal) unusableOutcomeCount += 1;
++    }
++  }
++
++  const reasons: JudgePolicyReason[] = [];
++  if (!declared.present) reasons.push("requirement-absent");
++  if (usableOutcomeCount === 0) reasons.push("no-usable-history");
++
++  return {
++    determination: reasons.length === 0 ? "explained" : "cannot-determine",
++    reasons: reasons.length === 0 ? ["historical-explanation-only"] : reasons,
++    declaredRequiredJudges: declared,
++    usableOutcomeCount,
++    unusableOutcomeCount,
++    distinctUnderlyingIdentityCount: identities.size,
++    votes: false,
++    infersRequirement: false,
++    assignsOrReplacesJudge: false,
++    changesIntegrationAuthority: false,
++  };
++}
++
++function determineMainDirect(input: ProjectStrategyPolicyInput): MainDirectHistorySection {
++  const matching = (input.mainDirect ?? []).filter((item) =>
++    inRequestedScope(item, input.taskClass, input.taskFamily));
++  const reasonDistribution: Partial<Record<MainDirectDecisionReason, number>> = {};
++  let openCount = 0;
++  let completedCount = 0;
++  let abandonedCount = 0;
++  for (const item of matching) {
++    reasonDistribution[item.reason] = (reasonDistribution[item.reason] ?? 0) + 1;
++    if (item.status === "open") openCount += 1;
++    else if (item.status === "completed") completedCount += 1;
++    else abandonedCount += 1;
++  }
++  return {
++    present: matching.length > 0,
++    recordCount: matching.length,
++    openCount,
++    completedCount,
++    abandonedCount,
++    reasonDistribution,
++    comparedAsWorkerEvidence: false,
++  };
++}
++
++/** Pure strategy/policy projection. Callers supply already-read fixtures. */
++export function projectStrategyPolicyAdvice(
++  input: ProjectStrategyPolicyInput,
++): StrategyPolicyProjection {
++  return {
++    strategy: determineStrategy(input),
++    competitionPolicy: determineCompetition(input),
++    judgePolicy: determineJudge(input),
++    mainDirectHistory: determineMainDirect(input),
++  };
++}
++
++function assignmentFact(assignment: ReviewAssignmentRecord): ReviewAssignmentHistoryFact {
++  const repair = assignment.resultRepair;
++  const usable = (
++    repair !== undefined
++    && repair.status === "succeeded"
++    && repair.result !== undefined
++    && repair.failureCode === undefined
++  ) || (assignment.result !== undefined && assignment.failureCode === undefined);
++  return {
++    provider: assignment.frozenIdentity.provider,
++    model: assignment.frozenIdentity.model,
++    runtime: assignment.frozenIdentity.runtime,
++    effort: assignment.frozenIdentity.effort,
++    terminal: assignment.status === "completed" || assignment.status === "failed",
++    usable,
++  };
++}
++
++export function collectStrategyPolicyFacts(store: StrategyPolicyStore): {
++  competitions: CompetitionHistoryFact[];
++  ordinaryTasks: OrdinaryTaskPolicyFact[];
++  reviewGraphs: ReviewGraphHistoryFact[];
++  mainDirect: MainDirectHistoryFact[];
++} {
++  const tasks = store.listTasks();
++  const tasksById = new Map(tasks.map((task) => [task.id, task]));
++  const ordinaryTasks: OrdinaryTaskPolicyFact[] = [];
++  for (const task of tasks) {
++    if (!isTerminalTaskStatus(task.status)) continue;
++    if (isReviewGraphReviewerTaskFile(task.taskFile)) continue;
++    const required = task.spec.reviewRequirement?.requiredJudges;
++    ordinaryTasks.push({
++      ...(task.spec.taskClass === undefined ? {} : { taskClass: task.spec.taskClass }),
++      ...(task.spec.taskFamily === undefined ? {} : { taskFamily: task.spec.taskFamily }),
++      ...(required === 0 || required === 1 || required === 2 ? { requiredJudges: required } : {}),
++    });
++  }
++
++  const competitions: CompetitionHistoryFact[] = store.listCompetitions().map((record) => {
++    const contract = tasksById.get(record.contractTaskId);
++    return {
++      status: record.status,
++      hasReason: record.reason !== undefined,
++      ...(record.reason === undefined ? {} : { intent: record.reason.intent }),
++      triggers: record.reason?.triggers ?? [],
++      ...(record.mainDecision === undefined ? {} : { mainDecision: record.mainDecision.decision }),
++      ...(contract?.spec.taskClass === undefined ? {} : { taskClass: contract.spec.taskClass }),
++      ...(contract?.spec.taskFamily === undefined ? {} : { taskFamily: contract.spec.taskFamily }),
++    };
++  });
++
++  const reviewGraphs: ReviewGraphHistoryFact[] = store.listReviewGraphs().map((graph) => {
++    const candidate = tasksById.get(graph.candidateTaskId);
++    return {
++      ...(candidate?.spec.taskClass === undefined ? {} : { taskClass: candidate.spec.taskClass }),
++      ...(candidate?.spec.taskFamily === undefined ? {} : { taskFamily: candidate.spec.taskFamily }),
++      assignments: store.listReviewAssignments(graph.id).map(assignmentFact),
++    };
++  });
++
++  const mainDirect: MainDirectHistoryFact[] = store.listMainDirectDecisions().map((record) => ({
++    taskClass: record.taskClass,
++    ...(record.taskFamily === undefined ? {} : { taskFamily: record.taskFamily }),
++    status: record.status,
++    reason: record.reason,
++  }));
++
++  return { competitions, ordinaryTasks, reviewGraphs, mainDirect };
++}
++
++/** Store-backed projection. Reads only; never writes. */
++export function projectStrategyPolicyFromStore(
++  store: StrategyPolicyStore,
++  input: Omit<
++    ProjectStrategyPolicyInput,
++    "competitions" | "ordinaryTasks" | "reviewGraphs" | "mainDirect"
++  >,
++): StrategyPolicyProjection {
++  const facts = collectStrategyPolicyFacts(store);
++  return projectStrategyPolicyAdvice({
++    ...input,
++    competitions: facts.competitions,
++    ordinaryTasks: facts.ordinaryTasks,
++    reviewGraphs: facts.reviewGraphs,
++    mainDirect: facts.mainDirect,
++  });
++}
+diff --git a/baseline/src/daemon/coordinator.ts b/workspace/src/daemon/coordinator.ts
+index 6e34aa3..a040e1f 100644
+--- a/baseline/src/daemon/coordinator.ts
++++ b/workspace/src/daemon/coordinator.ts
+@@ -198,6 +198,7 @@ import {
+   type RoutingReadinessProjection,
+ } from "../core/model-routing.js";
+ import { resolveProfileRoutingCandidates } from "../core/profile-routing.js";
++import { projectStrategyPolicyFromStore } from "../core/strategy-advice.js";
+ import {
+   SettingsService,
+   type ForkLightSettings,
+@@ -2332,11 +2333,27 @@ export class DaemonCoordinator {
+       adviceInput.competitionTriggers = normalizedTriggers;
+     }
+     const historical = provideRoutingAdvice(adviceInput);
++    const familyTrimmed = taskFamily !== undefined && taskFamily.trim().length > 0
++      ? taskFamily.trim()
++      : undefined;
++    const strategyPolicy = projectStrategyPolicyFromStore(this.store, {
++      taskClass: taskClass.trim(),
++      ...(familyTrimmed === undefined ? {} : { taskFamily: familyTrimmed }),
++      policy,
++      competitionIntent: normalizedIntent ?? "none",
++      competitionTriggers: normalizedTriggers ?? [],
++      shouldRunCompetition: historical.shouldRunCompetition,
++      exactEvidence: stats.modeAwareRoutingEvidence(taskClass.trim()),
++      ...(familyTrimmed === undefined
++        ? {}
++        : { familyEvidence: stats.modeAwareRoutingEvidenceByFamily(familyTrimmed) }),
++    });
++    const withStrategy = { ...historical, strategyPolicy };
+     if (!profilePath) {
+-      return historical;
++      return withStrategy;
+     }
+     return attachExecutableRoutingAdvice(
+-      historical,
++      withStrategy,
+       this.resolveRoutingProfileReadiness(),
+     );
+   }
+diff --git a/baseline/src/cli/routing-output.ts b/workspace/src/cli/routing-output.ts
+index ff2c1de..e90be1d 100644
+--- a/baseline/src/cli/routing-output.ts
++++ b/workspace/src/cli/routing-output.ts
+@@ -3,6 +3,14 @@ import type {
+   RoutingCannotDetermineReason,
+   RoutingOverallResult,
+ } from "../core/model-routing.js";
++import type {
++  CompetitionPolicyExplanation,
++  ExecutionStrategyAdvice,
++  JudgePolicyExplanation,
++  MainDirectHistorySection,
++  StrategyCannotDetermineReason,
++  StrategyPolicyProjection,
++} from "../core/strategy-advice.js";
+ 
+ function candidateLabel(candidate: RoutingAdvisoryResponse["candidates"][number]): string {
+   return candidate.workerLabel
+@@ -38,6 +46,91 @@ function cannotDetermineReasonLabel(reason: RoutingCannotDetermineReason): strin
+   }
+ }
+ 
++function strategyReasonLabel(reason: StrategyCannotDetermineReason): string {
++  switch (reason) {
++    case "insufficient-relevant-samples":
++      return "not enough comparable Tasks";
++    case "single-comparable-strategy":
++      return "only one comparable execution strategy";
++    case "incomplete-family-coverage":
++      return "family coverage is incomplete";
++    case "score-gap-too-small":
++      return "strategy scores are too close";
++    case "no-active-factors":
++      return "no active comparison factors";
++  }
++}
++
++function formatStrategySection(strategy: ExecutionStrategyAdvice): string[] {
++  const lines: string[] = [];
++  if (strategy.determination === "recommendation" && strategy.recommendation) {
++    const rec = strategy.recommendation;
++    lines.push(
++      `Execution strategy: ${rec.executionMode} for ${rec.provider}/${rec.model} (${rec.runtime}, ${rec.effort}); explanation only — nothing starts automatically.`,
++    );
++  } else {
++    const why = strategy.reasons.length > 0
++      ? ` (${strategy.reasons.map(strategyReasonLabel).join("; ")})`
++      : "";
++    lines.push(`Execution strategy: cannot determine${why}. Nothing starts automatically.`);
++  }
++  if (strategy.rows.length > 0) {
++    for (const row of strategy.rows) {
++      lines.push(
++        `  Strategy ${row.provider}/${row.model} ${row.runtime}/${row.effort} ${row.executionMode}: samples=${row.relevantSampleCount} accepted=${row.acceptedDeliveryCount} ${row.compared ? "[compared]" : "[not compared]"}`,
++      );
++    }
++  }
++  return lines;
++}
++
++function formatCompetitionPolicySection(policy: CompetitionPolicyExplanation): string[] {
++  if (policy.determination === "not-advised") {
++    return [
++      "Competition policy: not advised (Main intent is none). History does not start a Competition.",
++    ];
++  }
++  if (policy.determination === "cannot-determine") {
++    return [
++      `Competition policy: cannot determine (${policy.reasons.join(", ")}). Explanation only; nothing starts automatically.`,
++    ];
++  }
++  return [
++    `Competition policy: historical explanation only (${policy.matchingCompetitionCount} matching). Main still decides; nothing starts automatically.`,
++  ];
++}
++
++function formatJudgePolicySection(policy: JudgePolicyExplanation): string[] {
++  const declared = policy.declaredRequiredJudges.present
++    ? `declared requiredJudges=${policy.declaredRequiredJudges.depths.join(",")}`
++    : "declared requiredJudges absent";
++  if (policy.determination === "cannot-determine") {
++    return [
++      `Judge policy: cannot determine (${policy.reasons.join(", ")}); ${declared}. No vote and no inferred requirement.`,
++    ];
++  }
++  return [
++    `Judge policy: historical explanation only; ${declared}; usable=${policy.usableOutcomeCount} unusable=${policy.unusableOutcomeCount} distinct identities=${policy.distinctUnderlyingIdentityCount}. No vote.`,
++  ];
++}
++
++function formatMainDirectSection(section: MainDirectHistorySection): string[] {
++  if (!section.present) {
++    return ["Main-direct history: none in this scope (never compared as Worker evidence)."];
++  }
++  return [
++    `Main-direct history: ${section.recordCount} record(s) in this scope (not compared as Worker evidence).`,
++  ];
++}
++
++function appendStrategyPolicy(lines: string[], projection: StrategyPolicyProjection | undefined): void {
++  if (projection === undefined) return;
++  lines.push(...formatStrategySection(projection.strategy));
++  lines.push(...formatCompetitionPolicySection(projection.competitionPolicy));
++  lines.push(...formatJudgePolicySection(projection.judgePolicy));
++  lines.push(...formatMainDirectSection(projection.mainDirectHistory));
++}
++
+ function appendExecutionLines(
+   lines: string[],
+   subject: {
+@@ -161,5 +254,7 @@ export function formatRoutingAdviceHuman(advisory: RoutingAdvisoryResponse): str
+     }
+   }
+ 
++  appendStrategyPolicy(lines, advisory.strategyPolicy);
++
+   return `${lines.join("\n")}\n`;
+ }
+diff --git a/baseline/src/mcp/server.ts b/workspace/src/mcp/server.ts
+index 7b12b8b..ac83ded 100644
+--- a/baseline/src/mcp/server.ts
++++ b/workspace/src/mcp/server.ts
+@@ -1376,6 +1376,46 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
+       } else {
+         suggestions.push(`Competition not advised (intent=${advisory.competition.intent}).`);
+       }
++      const strategyPolicy = advisory.strategyPolicy;
++      if (strategyPolicy !== undefined) {
++        const strategy = strategyPolicy.strategy;
++        if (strategy.determination === "recommendation" && strategy.recommendation) {
++          suggestions.push(
++            `Execution strategy ${strategy.recommendation.executionMode} is historically stronger; explanation only, nothing starts automatically.`,
++          );
++        } else {
++          suggestions.push(
++            `Execution strategy cannot determine (${strategy.reasons.join(", ") || "insufficient evidence"}); nothing starts automatically.`,
++          );
++        }
++        const competitionPolicy = strategyPolicy.competitionPolicy;
++        if (competitionPolicy.determination === "not-advised") {
++          suggestions.push("Competition policy remains not advised; history cannot override intent none.");
++        } else if (competitionPolicy.determination === "explained") {
++          suggestions.push(
++            `Competition history is explanation only (${competitionPolicy.matchingCompetitionCount} matching); Main still decides.`,
++          );
++        } else {
++          suggestions.push(
++            `Competition policy cannot determine (${competitionPolicy.reasons.join(", ")}).`,
++          );
++        }
++        const judge = strategyPolicy.judgePolicy;
++        if (judge.determination === "explained") {
++          suggestions.push(
++            `Judge policy history: declared ${judge.declaredRequiredJudges.depths.join(",")} usable=${judge.usableOutcomeCount} unusable=${judge.unusableOutcomeCount} identities=${judge.distinctUnderlyingIdentityCount}; no vote.`,
++          );
++        } else {
++          suggestions.push(
++            `Judge policy cannot determine (${judge.reasons.join(", ")}); no inferred requirement.`,
++          );
++        }
++        if (strategyPolicy.mainDirectHistory.present) {
++          suggestions.push(
++            `Main-direct history: ${strategyPolicy.mainDirectHistory.recordCount} record(s), not compared as Worker evidence.`,
++          );
++        }
++      }
+       return textAndData(advisory, suggestions.join(" "));
+     },
+   );
+diff --git a/baseline/tests/statistics.test.ts b/workspace/tests/statistics.test.ts
+index 51c0a58..1f51263 100644
+--- a/baseline/tests/statistics.test.ts
++++ b/workspace/tests/statistics.test.ts
+@@ -11,11 +11,13 @@ import {
+   computeStatistics,
+   deriveRoutingEvidence,
+   failureImpactForCategory,
++  frozenStrategyExecutionMode,
+   normalizeBudgetEnvelope,
+   projectCompactProviderModelSummaries,
+   projectCompactProviderModelSummary,
+   resolveCurrentMainDecision,
+   StatisticsService,
++  strategyIdentityKey,
+   verificationFrom,
+   type ClassifiedDecision,
+   type DecisionReadinessBucket,
+@@ -2939,3 +2941,131 @@ test("classifyDecisionReadiness: four outcomes are exhaustive for well-formed in
+   }
+   assert.equal(seen.size, 4, "exactly four mutually exclusive readiness buckets exist");
+ });
++
++function modeTask(
++  id: string,
++  status: TaskRecord["status"],
++  taskClass: string,
++  executionMode: "single-run" | "persistent-session" | "native-goal" | undefined,
++  extras: {
++    taskFamily?: string;
++    error?: string;
++    reviewer?: boolean;
++    effort?: string;
++  } = {},
++): TaskRecord {
++  const record = task(id, status, "deepseek", "v4", extras.error);
++  const spec = record.spec as unknown as Record<string, unknown>;
++  spec.taskClass = taskClass;
++  if (extras.taskFamily !== undefined) spec.taskFamily = extras.taskFamily;
++  spec.runtime = { name: "claude-code", effort: extras.effort ?? "high" };
++  if (executionMode !== undefined) spec.executionMode = executionMode;
++  if (extras.reviewer === true) {
++    record.taskFile = `${REVIEW_GRAPH_TASK_FILE_PREFIX}g1/${id}`;
++  }
++  return record;
++}
++
++test("mode-aware evidence keeps the same Worker under different frozen modes separate", () => {
++  const single = modeTask("mode-single", "succeeded", "coding:mode", "single-run");
++  const native = modeTask("mode-native", "succeeded", "coding:mode", "native-goal");
++  const extraNative = modeTask("mode-native-2", "succeeded", "coding:mode", "native-goal");
++  const history = [single, native, extraNative].map((record) => ({
++    task: record,
++    attempts: [attempt(record.id, 1, "succeeded")],
++    events: [],
++    verification: passedVerification,
++  }));
++  const map = deriveRoutingEvidence({
++    taskClass: "coding:mode",
++    identityMode: "full-worker-mode",
++    history,
++  });
++  const singleKey = strategyIdentityKey("deepseek", "v4", "claude-code", "high", "single-run");
++  const nativeKey = strategyIdentityKey("deepseek", "v4", "claude-code", "high", "native-goal");
++  assert.equal(map.size, 2);
++  assert.equal(map.get(singleKey)?.terminalTaskCount, 1);
++  assert.equal(map.get(singleKey)?.relevantSampleCount, 1);
++  assert.equal(map.get(singleKey)?.executionMode, "single-run");
++  assert.equal(map.get(nativeKey)?.terminalTaskCount, 2);
++  assert.equal(map.get(nativeKey)?.relevantSampleCount, 2);
++  assert.equal(map.get(nativeKey)?.executionMode, "native-goal");
++  assert.equal(
++    map.get(strategyIdentityKey("deepseek", "v4", "claude-code", "high", "persistent-session")),
++    undefined,
++  );
++
++  const home = mkdtempSync(path.join(tmpdir(), "forklight-mode-lookup-"));
++  const store = new StateStore(home);
++  try {
++    for (const item of history) {
++      store.createTask(item.task);
++      store.createAttempt(item.attempts[0]!);
++    }
++    const fromService = new StatisticsService(store).modeAwareRoutingEvidence("coding:mode");
++    assert.equal(fromService.get(singleKey)?.terminalTaskCount, 1);
++    assert.equal(fromService.get(nativeKey)?.terminalTaskCount, 2);
++    assert.equal(store.listTasks().length, 3);
++  } finally {
++    store.close();
++    rmSync(home, { recursive: true, force: true });
++  }
++});
++
++test("missing frozen execution mode is legacy-unknown and is never inferred as single-run", () => {
++  assert.equal(frozenStrategyExecutionMode({}), "legacy-unknown");
++  assert.equal(frozenStrategyExecutionMode({ executionMode: "auto" }), "legacy-unknown");
++  const unknown = modeTask("mode-legacy", "succeeded", "coding:unknown-mode", undefined);
++  const single = modeTask("mode-known", "succeeded", "coding:unknown-mode", "single-run");
++  const map = deriveRoutingEvidence({
++    taskClass: "coding:unknown-mode",
++    identityMode: "full-worker-mode",
++    history: [
++      { task: unknown, attempts: [attempt(unknown.id, 1, "succeeded")], events: [], verification: passedVerification },
++      { task: single, attempts: [attempt(single.id, 1, "succeeded")], events: [], verification: passedVerification },
++    ],
++  });
++  const unknownKey = strategyIdentityKey("deepseek", "v4", "claude-code", "high", "legacy-unknown");
++  const singleKey = strategyIdentityKey("deepseek", "v4", "claude-code", "high", "single-run");
++  assert.equal(map.get(unknownKey)?.terminalTaskCount, 1);
++  assert.equal(map.get(unknownKey)?.executionMode, "legacy-unknown");
++  assert.equal(map.get(singleKey)?.terminalTaskCount, 1);
++  assert.equal(map.get(singleKey)?.executionMode, "single-run");
++});
++
++test("mode-aware grouping excludes non-model failures and keeps ambiguous visible", () => {
++  const ok = modeTask("mode-ok", "succeeded", "coding:mode-fail", "single-run");
++  const credential = modeTask(
++    "mode-cred", "failed", "coding:mode-fail", "single-run", { error: "HTTP 401: Invalid API key" },
++  );
++  const ambiguous = modeTask(
++    "mode-amb", "failed", "coding:mode-fail", "native-goal", { error: "no progress" },
++  );
++  const reviewer = modeTask("mode-reviewer", "succeeded", "coding:mode-fail", "persistent-session", {
++    reviewer: true,
++  });
++  const map = deriveRoutingEvidence({
++    taskClass: "coding:mode-fail",
++    identityMode: "full-worker-mode",
++    history: [
++      { task: ok, attempts: [attempt(ok.id, 1, "succeeded")], events: [], verification: passedVerification },
++      { task: credential, attempts: [attempt(credential.id, 1, "failed")], events: [] },
++      { task: ambiguous, attempts: [attempt(ambiguous.id, 1, "failed")], events: [] },
++      { task: reviewer, attempts: [attempt(reviewer.id, 1, "succeeded")], events: [], verification: passedVerification },
++    ],
++  });
++  const single = map.get(strategyIdentityKey("deepseek", "v4", "claude-code", "high", "single-run"))!;
++  const native = map.get(strategyIdentityKey("deepseek", "v4", "claude-code", "high", "native-goal"))!;
++  assert.equal(single.terminalTaskCount, 2);
++  assert.equal(single.relevantSampleCount, 1);
++  assert.equal(single.modelQualityFailureCount, 0);
++  assert.equal(single.ignoredNonModelTaskCount, 1);
++  assert.equal(native.ambiguousFailureCount, 1);
++  assert.equal(native.modelQualityFailureCount, 0);
++  assert.equal(native.relevantSampleCount, 0);
++  assert.equal(
++    map.get(strategyIdentityKey("deepseek", "v4", "claude-code", "high", "persistent-session")),
++    undefined,
++    "reviewer Tasks are not ordinary strategy samples",
++  );
++});
+diff --git a/baseline/tests/model-routing.test.ts b/workspace/tests/model-routing.test.ts
+index bb8cf71..d5ce4e9 100644
+--- a/baseline/tests/model-routing.test.ts
++++ b/workspace/tests/model-routing.test.ts
+@@ -13,9 +13,11 @@ import {
+ import {
+   classifyFailure,
+   deriveRoutingEvidence,
++  strategyIdentityKey,
+   type RoutingEvidence,
+ } from "../src/core/statistics.js";
+ import type { AttemptRecord, EventRecord, TaskRecord, VerificationResult } from "../src/core/types.js";
++import { projectStrategyPolicyAdvice } from "../src/core/strategy-advice.js";
+ 
+ const passedVerification: VerificationResult = {
+   passed: true,
+@@ -2555,3 +2557,228 @@ test("executable advisory serialization stays privacy-safe", () => {
+   assert.match(serialized, /"canLaunch":true/);
+   assert.match(serialized, /"resolvedExecutionMode":"single-run"/);
+ });
++
++function modeRow(
++  executionMode: "single-run" | "persistent-session" | "native-goal" | "legacy-unknown",
++  overrides: Partial<RoutingEvidence> = {},
++): RoutingEvidence {
++  return {
++    ...evidence("deepseek", "v4", {
++      runtime: "claude-code",
++      effort: "high",
++      executionMode,
++      ...overrides,
++    }),
++    runtime: "claude-code",
++    effort: "high",
++    executionMode,
++  };
++}
++
++function strategyMap(rows: RoutingEvidence[]): Map<string, RoutingEvidence> {
++  return new Map(rows.map((row) => [
++    strategyIdentityKey(
++      row.provider,
++      row.model,
++      row.runtime ?? "claude-code",
++      row.effort ?? "high",
++      row.executionMode ?? "legacy-unknown",
++    ),
++    row,
++  ]));
++}
++
++test("strategy advice recommends only when two mode-aware rows clear sample and score-gap gates", () => {
++  const strong = modeRow("single-run", {
++    relevantSampleCount: 5,
++    modelQualityFailureCount: 0,
++    modelQualityFailureRate: 0,
++    verifiedBehaviorSampleCount: 5,
++    verifiedBehaviorCount: 5,
++    verifiedBehaviorRate: 1,
++    firstPassVerifiedSampleCount: 5,
++    firstPassVerifiedSuccessCount: 5,
++    firstPassVerifiedSuccessRate: 1,
++    acceptedDeliverySampleCount: 5,
++    acceptedDeliveryCount: 5,
++    acceptedDeliveryRate: 1,
++  });
++  const weak = modeRow("native-goal", {
++    relevantSampleCount: 5,
++    modelQualityFailureCount: 4,
++    modelQualityFailureRate: 0.8,
++    verifiedBehaviorSampleCount: 5,
++    verifiedBehaviorCount: 1,
++    verifiedBehaviorRate: 0.2,
++    firstPassVerifiedSampleCount: 5,
++    firstPassVerifiedSuccessCount: 1,
++    firstPassVerifiedSuccessRate: 0.2,
++    acceptedDeliverySampleCount: 5,
++    acceptedDeliveryCount: 1,
++    acceptedDeliveryRate: 0.2,
++    correctionChurn: 4,
++    correctionChurnRate: 0.8,
++  });
++  const advised = projectStrategyPolicyAdvice({
++    taskClass: "coding:strategy",
++    policy: DEFAULT_ROUTING_POLICY,
++    competitionIntent: "none",
++    competitionTriggers: [],
++    shouldRunCompetition: false,
++    exactEvidence: strategyMap([strong, weak]),
++  });
++  assert.equal(advised.strategy.determination, "recommendation");
++  assert.equal(advised.strategy.evidenceScope, "exact-class");
++  assert.equal(advised.strategy.recommendation?.executionMode, "single-run");
++  assert.equal(advised.strategy.createsWork, false);
++  assert.equal(advised.strategy.rows.length, 2);
++  const single = advised.strategy.rows.find((row) => row.executionMode === "single-run")!;
++  const native = advised.strategy.rows.find((row) => row.executionMode === "native-goal")!;
++  assert.equal(single.relevantSampleCount, 5);
++  assert.equal(native.relevantSampleCount, 5);
++  assert.notEqual(single.relevantSampleCount, native.modelQualityFailureCount);
++
++  const oneReady = projectStrategyPolicyAdvice({
++    taskClass: "coding:strategy",
++    policy: DEFAULT_ROUTING_POLICY,
++    competitionIntent: "none",
++    competitionTriggers: [],
++    shouldRunCompetition: false,
++    exactEvidence: strategyMap([strong]),
++  });
++  assert.equal(oneReady.strategy.determination, "cannot-determine");
++  assert.ok(oneReady.strategy.reasons.includes("single-comparable-strategy"));
++  assert.equal(oneReady.strategy.createsWork, false);
++
++  const tooFew = projectStrategyPolicyAdvice({
++    taskClass: "coding:strategy",
++    policy: DEFAULT_ROUTING_POLICY,
++    competitionIntent: "none",
++    competitionTriggers: [],
++    shouldRunCompetition: false,
++    exactEvidence: strategyMap([
++      modeRow("single-run", { relevantSampleCount: 2, terminalTaskCount: 2 }),
++      modeRow("native-goal", { relevantSampleCount: 2, terminalTaskCount: 2 }),
++    ]),
++  });
++  assert.equal(tooFew.strategy.determination, "cannot-determine");
++  assert.ok(tooFew.strategy.reasons.includes("insufficient-relevant-samples"));
++
++  const tied = projectStrategyPolicyAdvice({
++    taskClass: "coding:strategy",
++    policy: DEFAULT_ROUTING_POLICY,
++    competitionIntent: "none",
++    competitionTriggers: [],
++    shouldRunCompetition: false,
++    exactEvidence: strategyMap([strong, modeRow("persistent-session", { ...strong, executionMode: "persistent-session" })]),
++  });
++  assert.equal(tied.strategy.determination, "cannot-determine");
++  assert.ok(tied.strategy.reasons.includes("score-gap-too-small"));
++});
++
++test("strategy advice uses exact-class when it can compare and family only as a complete set", () => {
++  const exactStrong = modeRow("single-run", {
++    relevantSampleCount: 5,
++    verifiedBehaviorSampleCount: 5,
++    verifiedBehaviorRate: 1,
++    firstPassVerifiedSampleCount: 5,
++    firstPassVerifiedSuccessRate: 1,
++    acceptedDeliverySampleCount: 5,
++    acceptedDeliveryRate: 1,
++    modelQualityFailureRate: 0,
++  });
++  const exactWeak = modeRow("native-goal", {
++    relevantSampleCount: 5,
++    verifiedBehaviorSampleCount: 5,
++    verifiedBehaviorRate: 0.2,
++    firstPassVerifiedSampleCount: 5,
++    firstPassVerifiedSuccessRate: 0.2,
++    acceptedDeliverySampleCount: 5,
++    acceptedDeliveryRate: 0.2,
++    modelQualityFailureRate: 0.8,
++    correctionChurnRate: 0.8,
++  });
++  const familyInverted = strategyMap([
++    modeRow("single-run", {
++      relevantSampleCount: 5,
++      verifiedBehaviorSampleCount: 5,
++      verifiedBehaviorRate: 0.1,
++      firstPassVerifiedSampleCount: 5,
++      firstPassVerifiedSuccessRate: 0.1,
++      acceptedDeliverySampleCount: 5,
++      acceptedDeliveryRate: 0.1,
++      modelQualityFailureRate: 0.9,
++    }),
++    modeRow("native-goal", {
++      relevantSampleCount: 5,
++      verifiedBehaviorSampleCount: 5,
++      verifiedBehaviorRate: 1,
++      firstPassVerifiedSampleCount: 5,
++      firstPassVerifiedSuccessRate: 1,
++      acceptedDeliverySampleCount: 5,
++      acceptedDeliveryRate: 1,
++      modelQualityFailureRate: 0,
++    }),
++  ]);
++  const exactWins = projectStrategyPolicyAdvice({
++    taskClass: "coding:family",
++    taskFamily: "family-a",
++    policy: DEFAULT_ROUTING_POLICY,
++    competitionIntent: "none",
++    competitionTriggers: [],
++    shouldRunCompetition: false,
++    exactEvidence: strategyMap([exactStrong, exactWeak]),
++    familyEvidence: familyInverted,
++  });
++  assert.equal(exactWins.strategy.evidenceScope, "exact-class");
++  assert.equal(exactWins.strategy.recommendation?.executionMode, "single-run");
++
++  const familyFallback = projectStrategyPolicyAdvice({
++    taskClass: "coding:family",
++    taskFamily: "family-a",
++    policy: DEFAULT_ROUTING_POLICY,
++    competitionIntent: "none",
++    competitionTriggers: [],
++    shouldRunCompetition: false,
++    exactEvidence: strategyMap([modeRow("single-run", { relevantSampleCount: 1 })]),
++    familyEvidence: familyInverted,
++  });
++  assert.equal(familyFallback.strategy.evidenceScope, "task-family");
++  assert.equal(familyFallback.strategy.recommendation?.executionMode, "native-goal");
++
++  const incompleteFamily = projectStrategyPolicyAdvice({
++    taskClass: "coding:family",
++    taskFamily: "family-a",
++    policy: DEFAULT_ROUTING_POLICY,
++    competitionIntent: "none",
++    competitionTriggers: [],
++    shouldRunCompetition: false,
++    exactEvidence: strategyMap([modeRow("single-run", { relevantSampleCount: 1 })]),
++    familyEvidence: strategyMap([
++      modeRow("single-run", { relevantSampleCount: 5 }),
++      modeRow("native-goal", { relevantSampleCount: 1, terminalTaskCount: 1 }),
++    ]),
++  });
++  assert.equal(incompleteFamily.strategy.determination, "cannot-determine");
++  assert.equal(incompleteFamily.strategy.evidenceScope, "none");
++  assert.ok(incompleteFamily.strategy.reasons.includes("incomplete-family-coverage"));
++});
++
++test("legacy provideRoutingAdvice stays compatible without a strategyPolicy field", () => {
++  const result = advice(evidence("deepseek", "v4"), evidence("qwen", "plus", {
++    modelQualityFailureCount: 5,
++    modelQualityFailureRate: 0.5,
++    acceptedDeliveryCount: 5,
++    acceptedDeliveryRate: 0.5,
++    verifiedBehaviorCount: 5,
++    verifiedBehaviorRate: 0.5,
++    correctionChurn: 5,
++    correctionChurnRate: 0.5,
++  }));
++  assert.equal(result.overallResult, "cannot-determine");
++  assert.ok(Array.isArray(result.cannotDetermineReasons));
++  assert.ok(Array.isArray(result.candidates));
++  assert.equal(typeof result.shouldRunCompetition, "boolean");
++  assert.ok(result.competition);
++  assert.equal(result.strategyPolicy, undefined);
++});
+diff --git a/baseline/tests/competition.test.ts b/workspace/tests/competition.test.ts
+index 36af0b9..ccf34b6 100644
+--- a/baseline/tests/competition.test.ts
++++ b/workspace/tests/competition.test.ts
+@@ -42,6 +42,8 @@ import type {
+   VerificationResult,
+ } from "../src/core/types.js";
+ import { StateStore } from "../src/state/store.js";
++import { DEFAULT_ROUTING_POLICY } from "../src/core/model-routing.js";
++import { projectStrategyPolicyAdvice } from "../src/core/strategy-advice.js";
+ 
+ const base = Date.parse("2026-07-20T00:00:00Z");
+ const at = (minutes: number): string => new Date(base + minutes * 60_000).toISOString();
+@@ -3399,3 +3401,70 @@ test("authentic pre-origin Competition handoff projects without fabricating Goal
+     rmSync(home, { recursive: true, force: true });
+   }
+ });
++
++test("competition policy history cannot escalate intent none and stays explanation-only", () => {
++  const historical = [{
++    status: "completed" as const,
++    hasReason: true,
++    intent: "consider" as const,
++    triggers: ["critical" as const],
++    mainDecision: "accept" as const,
++    taskClass: "coding:comp-policy",
++  }];
++  const none = projectStrategyPolicyAdvice({
++    taskClass: "coding:comp-policy",
++    policy: DEFAULT_ROUTING_POLICY,
++    competitionIntent: "none",
++    competitionTriggers: [],
++    shouldRunCompetition: false,
++    exactEvidence: new Map(),
++    competitions: historical,
++  });
++  assert.equal(none.competitionPolicy.determination, "not-advised");
++  assert.equal(none.competitionPolicy.shouldRunCompetition, false);
++  assert.equal(none.competitionPolicy.historyCanOverrideIntentNone, false);
++  assert.equal(none.competitionPolicy.createsWork, false);
++  assert.equal(none.competitionPolicy.matchingCompetitionCount, 1);
++  assert.ok(none.competitionPolicy.reasons.includes("intent-none"));
++
++  const explained = projectStrategyPolicyAdvice({
++    taskClass: "coding:comp-policy",
++    policy: DEFAULT_ROUTING_POLICY,
++    competitionIntent: "consider",
++    competitionTriggers: ["critical"],
++    shouldRunCompetition: true,
++    exactEvidence: new Map(),
++    competitions: historical,
++  });
++  assert.equal(explained.competitionPolicy.determination, "explained");
++  assert.equal(explained.competitionPolicy.createsWork, false);
++  assert.equal(explained.competitionPolicy.admission.completed, 1);
++  assert.equal(explained.competitionPolicy.outcomes.accept, 1);
++  assert.ok(explained.competitionPolicy.reasons.includes("historical-explanation-only"));
++
++  const requiredNoTriggers = projectStrategyPolicyAdvice({
++    taskClass: "coding:comp-policy",
++    policy: DEFAULT_ROUTING_POLICY,
++    competitionIntent: "required",
++    competitionTriggers: [],
++    shouldRunCompetition: true,
++    exactEvidence: new Map(),
++    competitions: historical,
++  });
++  assert.equal(requiredNoTriggers.competitionPolicy.determination, "cannot-determine");
++  assert.ok(requiredNoTriggers.competitionPolicy.reasons.includes("missing-valid-triggers"));
++  assert.equal(requiredNoTriggers.competitionPolicy.createsWork, false);
++
++  const noHistory = projectStrategyPolicyAdvice({
++    taskClass: "coding:comp-policy",
++    policy: DEFAULT_ROUTING_POLICY,
++    competitionIntent: "required",
++    competitionTriggers: ["user-requested"],
++    shouldRunCompetition: true,
++    exactEvidence: new Map(),
++    competitions: [],
++  });
++  assert.equal(noHistory.competitionPolicy.determination, "cannot-determine");
++  assert.ok(noHistory.competitionPolicy.reasons.includes("no-matching-competition-history"));
++  assert.equal(noHistory.competitionPolicy.createsWork, false);
++});
+diff --git a/baseline/tests/review-graph.test.ts b/workspace/tests/review-graph.test.ts
+index 7084c94..d68fcbb 100644
+--- a/baseline/tests/review-graph.test.ts
++++ b/workspace/tests/review-graph.test.ts
+@@ -64,6 +64,8 @@ import type {
+   VerificationResult,
+ } from "../src/core/types.js";
+ import { StateStore } from "../src/state/store.js";
++import { DEFAULT_ROUTING_POLICY } from "../src/core/model-routing.js";
++import { projectStrategyPolicyAdvice } from "../src/core/strategy-advice.js";
+ import { prepareWorkspace } from "../src/workspace/copy.js";
+ import { createPathPolicy } from "../src/workspace/path-policy.js";
+ import { writeWorkspacePatchReport } from "../src/workspace/patch.js";
+@@ -2347,3 +2349,69 @@ test("admitted repair copies the original private packet bytes unchanged", async
+     fx.store.close();
+   }
+ });
++
++test("judge policy history counts shared identities once and never votes", () => {
++  const shared = {
++    provider: "xai",
++    model: "grok-4.6",
++    runtime: "grok-build",
++    effort: "xhigh",
++  };
++  const projection = projectStrategyPolicyAdvice({
++    taskClass: "coding:judge-policy",
++    policy: DEFAULT_ROUTING_POLICY,
++    competitionIntent: "none",
++    competitionTriggers: [],
++    shouldRunCompetition: false,
++    exactEvidence: new Map(),
++    ordinaryTasks: [{ taskClass: "coding:judge-policy", requiredJudges: 2 }],
++    reviewGraphs: [{
++      taskClass: "coding:judge-policy",
++      assignments: [
++        { ...shared, terminal: true, usable: true },
++        { ...shared, terminal: true, usable: false },
++        {
++          provider: "deepseek",
++          model: "v4",
++          runtime: "claude-code",
++          effort: "high",
++          terminal: true,
++          usable: true,
++        },
++      ],
++    }],
++  });
++  assert.equal(projection.judgePolicy.determination, "explained");
++  assert.equal(projection.judgePolicy.votes, false);
++  assert.equal(projection.judgePolicy.infersRequirement, false);
++  assert.equal(projection.judgePolicy.assignsOrReplacesJudge, false);
++  assert.equal(projection.judgePolicy.changesIntegrationAuthority, false);
++  assert.deepEqual(projection.judgePolicy.declaredRequiredJudges, {
++    present: true,
++    depths: [2],
++    mixed: false,
++  });
++  assert.equal(projection.judgePolicy.usableOutcomeCount, 2);
++  assert.equal(projection.judgePolicy.unusableOutcomeCount, 1);
++  assert.equal(projection.judgePolicy.distinctUnderlyingIdentityCount, 2);
++
++  const missing = projectStrategyPolicyAdvice({
++    taskClass: "coding:judge-policy",
++    policy: DEFAULT_ROUTING_POLICY,
++    competitionIntent: "none",
++    competitionTriggers: [],
++    shouldRunCompetition: false,
++    exactEvidence: new Map(),
++    ordinaryTasks: [{ taskClass: "coding:judge-policy" }],
++    reviewGraphs: [{
++      taskClass: "coding:judge-policy",
++      assignments: [{ ...shared, terminal: true, usable: false }],
++    }],
++  });
++  assert.equal(missing.judgePolicy.determination, "cannot-determine");
++  assert.ok(missing.judgePolicy.reasons.includes("requirement-absent"));
++  assert.ok(missing.judgePolicy.reasons.includes("no-usable-history"));
++  assert.equal(missing.judgePolicy.declaredRequiredJudges.present, false);
++  assert.equal(missing.judgePolicy.usableOutcomeCount, 0);
++  assert.equal(missing.judgePolicy.unusableOutcomeCount, 1);
++});
+diff --git a/baseline/tests/main-failure-attribution.test.ts b/workspace/tests/main-failure-attribution.test.ts
+index 374e402..3d0bb20 100644
+--- a/baseline/tests/main-failure-attribution.test.ts
++++ b/workspace/tests/main-failure-attribution.test.ts
+@@ -17,7 +17,10 @@ import {
+   computeStatistics,
+   deriveRoutingEvidence,
+   projectCompactProviderModelSummaries,
++  strategyIdentityKey,
+ } from "../src/core/statistics.js";
++import { DEFAULT_ROUTING_POLICY } from "../src/core/model-routing.js";
++import { projectStrategyPolicyAdvice } from "../src/core/strategy-advice.js";
+ import type { AttemptRecord, TaskRecord, VerificationResult } from "../src/core/types.js";
+ import { ForkLightDaemon } from "../src/daemon/server.js";
+ import { StateStore } from "../src/state/store.js";
+@@ -386,3 +389,96 @@ test("CLI records through the Daemon and keeps the private note out of its recei
+     f.store.close();
+   }
+ });
++
++test("mode-aware quality excludes non-model failures and keeps Main-direct out of win/loss", () => {
++  const now = "2026-08-17T00:00:00.000Z";
++  const base = (id: string, status: TaskRecord["status"], mode: "single-run" | "native-goal" | undefined, error?: string): TaskRecord => ({
++    id,
++    name: id,
++    status,
++    sourcePath: "/source",
++    taskFile: `/${id}.yaml`,
++    spec: {
++      provider: { name: "deepseek", model: "v4" },
++      runtime: { name: "claude-code", effort: "high" },
++      taskClass: "coding:attr-mode",
++      ...(mode === undefined ? {} : { executionMode: mode }),
++    } as TaskRecord["spec"],
++    paths: {} as TaskRecord["paths"],
++    sessionId: `s-${id}`,
++    createdAt: now,
++    updatedAt: now,
++    startedAt: now,
++    finishedAt: now,
++    ...(error === undefined ? {} : { error }),
++  });
++  const ok = base("ok", "succeeded", "single-run");
++  const cred = base("cred", "failed", "single-run", "HTTP 401: Invalid API key");
++  const amb = base("amb", "failed", "native-goal", "no progress");
++  const map = deriveRoutingEvidence({
++    taskClass: "coding:attr-mode",
++    identityMode: "full-worker-mode",
++    history: [
++      {
++        task: ok,
++        attempts: [{
++          id: "ok-1", taskId: "ok", ordinal: 1, status: "succeeded",
++          sessionId: "s-ok", rawLogPath: "/log", startedAt: now, finishedAt: now,
++        }],
++        events: [],
++        verification: {
++          passed: true, behaviorPassed: true, policyPassed: true, sourceCompatible: true,
++          commands: [{ command: "npm test", exitCode: 0, stdout: "", stderr: "", durationMs: 1, timedOut: false }],
++          diffPath: "/diff", sourceUnchanged: true,
++        },
++      },
++      {
++        task: cred,
++        attempts: [{
++          id: "cred-1", taskId: "cred", ordinal: 1, status: "failed",
++          sessionId: "s-cred", rawLogPath: "/log", startedAt: now, finishedAt: now,
++        }],
++        events: [],
++      },
++      {
++        task: amb,
++        attempts: [{
++          id: "amb-1", taskId: "amb", ordinal: 1, status: "failed",
++          sessionId: "s-amb", rawLogPath: "/log", startedAt: now, finishedAt: now,
++        }],
++        events: [],
++      },
++    ],
++  });
++  const single = map.get(strategyIdentityKey("deepseek", "v4", "claude-code", "high", "single-run"))!;
++  const native = map.get(strategyIdentityKey("deepseek", "v4", "claude-code", "high", "native-goal"))!;
++  assert.equal(single.modelQualityFailureCount, 0);
++  assert.equal(single.ignoredNonModelTaskCount, 1);
++  assert.equal(native.ambiguousFailureCount, 1);
++  assert.equal(native.modelQualityFailureCount, 0);
++
++  const projection = projectStrategyPolicyAdvice({
++    taskClass: "coding:attr-mode",
++    policy: DEFAULT_ROUTING_POLICY,
++    competitionIntent: "none",
++    competitionTriggers: [],
++    shouldRunCompetition: false,
++    exactEvidence: map,
++    mainDirect: [{
++      taskClass: "coding:attr-mode",
++      status: "completed",
++      reason: "small-clear-change",
++    }],
++  });
++  assert.equal(projection.mainDirectHistory.present, true);
++  assert.equal(projection.mainDirectHistory.recordCount, 1);
++  assert.equal(projection.mainDirectHistory.comparedAsWorkerEvidence, false);
++  assert.equal(
++    projection.strategy.rows.reduce((sum, row) => sum + row.relevantSampleCount, 0),
++    single.relevantSampleCount + native.relevantSampleCount,
++  );
++  assert.equal(
++    projection.strategy.rows.reduce((sum, row) => sum + row.modelQualityFailureCount, 0),
++    0,
++  );
++});
+diff --git a/baseline/tests/daemon.test.ts b/workspace/tests/daemon.test.ts
+index 3374523..a29e6a0 100644
+--- a/baseline/tests/daemon.test.ts
++++ b/workspace/tests/daemon.test.ts
+@@ -7358,6 +7358,177 @@ test("model_routing coordinator binds profile identity to the recommendation aft
+   }
+ });
+ 
++test("model_routing exposes additive strategy policy without mutating Store or escalating intent none", () => {
++  const store = new StateStore(path.join(tmpdir(), `fl-mr-strategy-${Date.now()}-${Math.random()}`));
++  const settings = new SettingsService(store);
++  const coordinator = new DaemonCoordinator(store, settings);
++  const now = "2026-08-17T00:00:00.000Z";
++  const seedTask = (
++    id: string,
++    executionMode: "single-run" | "native-goal" | undefined,
++    status: TaskRecord["status"] = "succeeded",
++  ): TaskRecord => {
++    const record = {
++      id,
++      name: id,
++      status,
++      sourcePath: "/source",
++      taskFile: `/${id}.yaml`,
++      spec: {
++        version: 1,
++        name: id,
++        project: "/source",
++        goal: "mode history",
++        constraints: [],
++        provider: { name: "deepseek", model: "v4", keychainService: "test" },
++        runtime: { name: "claude-code", executable: "claude", effort: "high", maxBudgetUsd: null },
++        workspace: { exclude: [] },
++        worker: { allowEdits: true, allowedCommands: [], focusPaths: [] },
++        acceptance: { commands: ["true"] },
++        taskClass: "coding:m3c2-strategy",
++        ...(executionMode === undefined ? {} : { executionMode }),
++      },
++      paths: {} as TaskRecord["paths"],
++      sessionId: `s-${id}`,
++      createdAt: now,
++      updatedAt: now,
++      startedAt: now,
++      finishedAt: now,
++    } as TaskRecord;
++    store.createTask(record);
++    store.createAttempt({
++      id: `${id}-1`, taskId: id, ordinal: 1, status,
++      sessionId: record.sessionId, rawLogPath: "/log", startedAt: now, finishedAt: now,
++    });
++    store.addEvent(id, `${id}-1`, "verification.completed", "Independent verification passed", {
++      passed: status === "succeeded",
++      behaviorPassed: status === "succeeded",
++      policyPassed: true,
++      sourceCompatible: true,
++      commands: [{ command: "true", exitCode: status === "succeeded" ? 0 : 1, stdout: "", stderr: "", durationMs: 1, timedOut: false }],
++      diffPath: "/diff",
++      sourceUnchanged: true,
++    });
++    return record;
++  };
++  try {
++    seedTask("m3c2-single", "single-run");
++    seedTask("m3c2-native", "native-goal");
++    seedTask("m3c2-legacy", undefined);
++    const contract = seedTask("m3c2-contract", "single-run");
++    store.createCompetition(
++      {
++        id: "m3c2-comp",
++        name: "historical",
++        contractTaskId: contract.id,
++        status: "completed",
++        rankingPolicy: {
++          weights: { verification: 1, diffFocus: 0, retries: 0, cost: 0, duration: 0, delivery: 0 },
++          tieThreshold: 1e-9,
++        },
++        createdAt: now,
++        updatedAt: now,
++        reason: { intent: "consider", triggers: ["critical"], note: "historical only" },
++        mainDecision: {
++          decision: "accept",
++          candidateId: "c1",
++          taskId: contract.id,
++          attemptId: `${contract.id}-1`,
++          verificationEventSequence: 1,
++        },
++      },
++      [
++        {
++          id: "m3c2-cc1", competitionId: "m3c2-comp", taskId: contract.id, ordinal: 0,
++          providerName: "deepseek", modelName: "v4",
++        },
++        {
++          id: "m3c2-cc2", competitionId: "m3c2-comp", taskId: "m3c2-single", ordinal: 1,
++          providerName: "deepseek", modelName: "v4",
++        },
++      ],
++    );
++    store.saveMainDirectDecision({
++      id: "m3c2-md",
++      taskClass: "coding:m3c2-strategy",
++      reason: "small-clear-change",
++      note: "Main handled a tiny change",
++      consideredWorkerProfileIds: [],
++      consideredWorkers: [],
++      evidenceSnapshot: [],
++      status: "completed",
++      startedAt: now,
++      closedState: {
++        outcome: "completed",
++        verification: "passed",
++        note: "done",
++        closedAt: now,
++      },
++    });
++    const before = {
++      tasks: store.listTasks().length,
++      competitions: store.listCompetitions().length,
++      graphs: store.listReviewGraphs().length,
++      mainDirect: store.listMainDirectDecisions().length,
++    };
++    const result = coordinator.modelRouting(
++      "coding:m3c2-strategy",
++      [{ provider: "deepseek", model: "v4" }, { provider: "qwen", model: "plus" }],
++      undefined,
++      "none",
++    );
++    assert.equal(result.taskClass, "coding:m3c2-strategy");
++    assert.equal(result.overallResult, "cannot-determine");
++    assert.ok(Array.isArray(result.cannotDetermineReasons));
++    assert.ok(Array.isArray(result.candidates));
++    assert.equal(result.candidates.length, 2);
++    assert.equal(result.shouldRunCompetition, false);
++    assert.equal(result.competition.intent, "none");
++    assert.ok(result.strategyPolicy);
++    assert.equal(result.strategyPolicy.strategy.createsWork, false);
++    const modes = result.strategyPolicy.strategy.rows.map((row) => row.executionMode).sort();
++    assert.deepEqual(modes, ["legacy-unknown", "native-goal", "single-run"]);
++    const single = result.strategyPolicy.strategy.rows.find((row) => row.executionMode === "single-run")!;
++    const native = result.strategyPolicy.strategy.rows.find((row) => row.executionMode === "native-goal")!;
++    const unknown = result.strategyPolicy.strategy.rows.find((row) => row.executionMode === "legacy-unknown")!;
++    assert.equal(single.terminalTaskCount, 2);
++    assert.equal(native.terminalTaskCount, 1);
++    assert.equal(unknown.terminalTaskCount, 1);
++    assert.equal(result.strategyPolicy.competitionPolicy.determination, "not-advised");
++    assert.equal(result.strategyPolicy.competitionPolicy.shouldRunCompetition, false);
++    assert.equal(result.strategyPolicy.competitionPolicy.matchingCompetitionCount, 1);
++    assert.equal(result.strategyPolicy.competitionPolicy.historyCanOverrideIntentNone, false);
++    assert.equal(result.strategyPolicy.judgePolicy.votes, false);
++    assert.equal(result.strategyPolicy.judgePolicy.infersRequirement, false);
++    assert.equal(result.strategyPolicy.mainDirectHistory.present, true);
++    assert.equal(result.strategyPolicy.mainDirectHistory.comparedAsWorkerEvidence, false);
++    const consider = coordinator.modelRouting(
++      "coding:m3c2-strategy",
++      [{ provider: "deepseek", model: "v4" }, { provider: "qwen", model: "plus" }],
++      undefined,
++      "consider",
++      ["critical"],
++    );
++    assert.equal(consider.strategyPolicy?.competitionPolicy.determination, "explained");
++    assert.equal(consider.strategyPolicy?.competitionPolicy.createsWork, false);
++    assert.equal(consider.strategyPolicy?.competitionPolicy.outcomes.accept, 1);
++    const after = {
++      tasks: store.listTasks().length,
++      competitions: store.listCompetitions().length,
++      graphs: store.listReviewGraphs().length,
++      mainDirect: store.listMainDirectDecisions().length,
++    };
++    assert.deepEqual(after, before);
++    const json = JSON.stringify(result);
++    assert.doesNotMatch(json, /api[_-]?key/i);
++    assert.doesNotMatch(json, /endpoint/i);
++    assert.doesNotMatch(json, /keychain/i);
++    assert.doesNotMatch(json, /\/Users\//);
++  } finally {
++    store.close();
++  }
++});
++
+ test("adaptation disabled: zero rounds blocks apply and preview returns stopped", async () => {
+   const home = await mkdtemp(path.join(tmpdir(), "forklight-adaptation-disabled-"));
+   const store = new StateStore(home);
+diff --git a/baseline/tests/daemon-cli.test.ts b/workspace/tests/daemon-cli.test.ts
+index 75a5dc1..ae860de 100644
+--- a/baseline/tests/daemon-cli.test.ts
++++ b/workspace/tests/daemon-cli.test.ts
+@@ -2572,6 +2572,98 @@ test("routing CLI human output renders cannot determine with stable reasons", ()
+   assert.doesNotMatch(output, /endpoint|api[_-]?key|keychain|\/Users\//i);
+ });
+ 
++test("routing CLI human output states strategy and policy without implying auto-start", () => {
++  const advisory = {
++    taskClass: "coding:strategy",
++    evidenceScope: "none",
++    knowledge: "unknown",
++    overallResult: "cannot-determine",
++    cannotDetermineReasons: ["insufficient-relevant-samples"],
++    candidates: [],
++    competition: {
++      shouldRunCompetition: false,
++      intent: "none",
++      evaluatedTriggers: [],
++      matchingTriggers: [],
++      suggestedCandidates: 0,
++    },
++    shouldRunCompetition: false,
++    resolvedPolicy: {},
++    omittedFactors: [],
++    allCandidatesCompared: false,
++    cohortCandidateCount: 0,
++    distinctIdentityCount: 0,
++    totalCandidateCount: 0,
++    excludedCandidateCount: 0,
++    recommendationCoverage: null,
++    strategyPolicy: {
++      strategy: {
++        determination: "cannot-determine",
++        reasons: ["insufficient-relevant-samples"],
++        evidenceScope: "none",
++        rows: [{
++          provider: "deepseek",
++          model: "v4",
++          runtime: "claude-code",
++          effort: "high",
++          executionMode: "single-run",
++          terminalTaskCount: 1,
++          relevantSampleCount: 1,
++          acceptedDeliveryCount: 0,
++          modelQualityFailureCount: 0,
++          ignoredNonModelTaskCount: 0,
++          ambiguousFailureCount: 0,
++          score: 0,
++          compared: false,
++        }],
++        createsWork: false,
++      },
++      competitionPolicy: {
++        determination: "not-advised",
++        reasons: ["intent-none"],
++        intent: "none",
++        shouldRunCompetition: false,
++        validTriggers: [],
++        matchingCompetitionCount: 1,
++        admission: { completed: 1, running: 0, pending: 0, legacyUnknownReason: 0 },
++        outcomes: { accept: 0, reject: 0, revise: 0, noDecision: 1 },
++        createsWork: false,
++        historyCanOverrideIntentNone: false,
++      },
++      judgePolicy: {
++        determination: "cannot-determine",
++        reasons: ["requirement-absent"],
++        declaredRequiredJudges: { present: false, depths: [], mixed: false },
++        usableOutcomeCount: 0,
++        unusableOutcomeCount: 0,
++        distinctUnderlyingIdentityCount: 0,
++        votes: false,
++        infersRequirement: false,
++        assignsOrReplacesJudge: false,
++        changesIntegrationAuthority: false,
++      },
++      mainDirectHistory: {
++        present: true,
++        recordCount: 1,
++        openCount: 0,
++        completedCount: 1,
++        abandonedCount: 0,
++        reasonDistribution: { "small-clear-change": 1 },
++        comparedAsWorkerEvidence: false,
++      },
++    },
++  } as unknown as RoutingAdvisoryResponse;
++  const output = formatRoutingAdviceHuman(advisory);
++  assert.match(output, /Execution strategy: cannot determine/);
++  assert.match(output, /Strategy deepseek\/v4 claude-code\/high single-run: samples=1/);
++  assert.match(output, /Competition policy: not advised \(Main intent is none\)/);
++  assert.match(output, /History does not start a Competition/);
++  assert.match(output, /Judge policy: cannot determine/);
++  assert.match(output, /No vote and no inferred requirement/);
++  assert.match(output, /Main-direct history: 1 record\(s\) in this scope/);
++  assert.doesNotMatch(output, /automatically start|majority vote|replace a Judge/i);
++});
++
+ test("coordinator modelRouting keeps historical scores independent of current readiness", () => {
+   const store = new StateStore(path.join(tmpdir(), `fl-mr-exec-${Date.now()}-${Math.random()}`));
+   const settings = new SettingsService(store);
+@@ -2644,6 +2736,13 @@ test("coordinator legacy modelRouting omits Profile execution and readiness", ()
+       assert.equal(candidate.resolvedExecutionMode, undefined);
+       assert.equal(candidate.canLaunch, undefined);
+     }
++    assert.ok(result.strategyPolicy);
++    const human = formatRoutingAdviceHuman(result);
++    assert.match(human, /Execution strategy: cannot determine/);
++    assert.match(human, /Competition policy: not advised/);
++    assert.match(human, /Judge policy: cannot determine/);
++    assert.match(human, /Main-direct history:/);
++    assert.doesNotMatch(human, /starts a Competition|automatic vote|inferred requirement/i);
+   } finally {
+     store.close();
+   }
+diff --git a/baseline/tests/mcp.test.ts b/workspace/tests/mcp.test.ts
+index 41ebfab..b41c82a 100644
+--- a/baseline/tests/mcp.test.ts
++++ b/workspace/tests/mcp.test.ts
+@@ -878,6 +878,10 @@ test("MCP model_routing returns privacy-safe advisory for empty history", async
+     assert.equal(advisory.shouldRunCompetition, false);
+     const comp = advisory.competition as Record<string, unknown>;
+     assert.equal(comp.intent, "none");
++    const strategyPolicy = advisory.strategyPolicy as Record<string, unknown> | undefined;
++    assert.ok(strategyPolicy);
++    assert.equal((strategyPolicy.strategy as Record<string, unknown>).createsWork, false);
++    assert.equal((strategyPolicy.competitionPolicy as Record<string, unknown>).determination, "not-advised");
+     // Privacy-safe: no Task ids, logs, or credentials
+     const json = JSON.stringify(advisory);
+     assert.doesNotMatch(json, /error/);
+@@ -1025,6 +1029,11 @@ test("MCP model_routing projects overall result, readiness, and no automatic Com
+     assert.equal(emptyAdvisory.shouldRunCompetition, false);
+     const emptyComp = emptyAdvisory.competition as Record<string, unknown>;
+     assert.equal(emptyComp.intent, "none");
++    const emptyStrategy = emptyAdvisory.strategyPolicy as Record<string, unknown>;
++    assert.ok(emptyStrategy);
++    assert.equal((emptyStrategy.strategy as Record<string, unknown>).createsWork, false);
++    assert.equal((emptyStrategy.competitionPolicy as Record<string, unknown>).determination, "not-advised");
++    assert.equal((emptyStrategy.judgePolicy as Record<string, unknown>).votes, false);
+     assert.match(toolErrorText(empty), /cannot determine/i);
+     const emptyCands = emptyAdvisory.candidates as Array<Record<string, unknown>>;
+     for (const candidate of emptyCands) {

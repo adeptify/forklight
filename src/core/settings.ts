@@ -350,6 +350,14 @@ const DEFAULTS: ForkLightSettings = {
         model: "grok-4.5",
         endpoint: "https://api.x.ai/v1",
       },
+      {
+        id: "xai-grok-4-6",
+        label: "xAI Grok 4.6",
+        provider: "xai",
+        model: "grok-4.6",
+        endpoint: "https://api.x.ai/v1",
+        supportedEfforts: ["low", "medium", "high", "xhigh", "max"],
+      },
     ],
   },
   workerProfiles: {
@@ -365,6 +373,17 @@ const DEFAULTS: ForkLightSettings = {
         endpoint: "https://api.deepseek.com/anthropic",
         effort: "high",
         // maxBudgetUsd omitted → inherit execution.defaultMaxBudgetUsd (FL-D92)
+      },
+      {
+        id: "grok-4-6-xhigh",
+        label: "Grok 4.6 Xhigh",
+        runtime: "grok-build",
+        modelConfigId: "xai-grok-4-6",
+        provider: "xai",
+        model: "grok-4.6",
+        endpoint: "https://api.x.ai/v1",
+        effort: "xhigh",
+        executionPreference: "auto",
       },
       {
         id: "volcengine-glm52-1m",

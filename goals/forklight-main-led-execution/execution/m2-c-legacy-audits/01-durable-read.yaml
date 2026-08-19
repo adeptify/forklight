@@ -1,0 +1,66 @@
+version: 2
+name: M2-C independently audit integrated handoff read authority
+project: /Users/yijunwang/code/forklight
+taskClass: m2-storage-legacy-integrated-read-audit
+taskFamily: forklight-storage-lifecycle
+workerProfileId: default
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 0
+  reason: Read-only deterministic post-Integration audit changes no product files.
+contract:
+  outcome: Verify the integrated shared Store boundary reads current and authentic legacy Competition handoffs, preserves unknown-legacy collection and Work Hierarchy visibility without Goal ownership, and never rewrites durable JSON.
+  presentation: { summary: 使用健康的独立 Runtime 只读核对已合入的 handoff 读取权威。, language: zh-CN }
+  context:
+    - Read specs/m2-c-task-storage-lifecycle/work-items/real-store-legacy-handoff-compat/spec.md completely.
+    - Exact Revision f587fd8d-deab-4b60-bccc-012011e18355 is already safely integrated and activated.
+    - The prior Grok audit graph stopped after xAI authentication became missing; its failed Task had zero Attempts and no code evidence.
+    - Use the saved DeepSeek Pro Worker only for this read-only audit; do not redo implementation or inspect real-home data.
+  inScope:
+    - Inspect StateStore normalization, authentic/current/unknown origin behavior, Goal and Work Hierarchy ownership, durable byte preservation, and focused tests.
+  outOfScope:
+    - No edits, real-home access, migration, semantic redesign, Integration, Judge, Hub, commit, push, or authentication work.
+  executionSteps:
+    - Trace all shared handoff readers from integrated source.
+    - Confirm authentic old Competition fields lift in memory; current origins stay exact; unknown origins stay collectable and claim no Goal.
+    - Confirm semantic projection is the stable fail-closed boundary and durable JSON/events remain unchanged.
+    - Run approved commands and return pass or one exact mismatch.
+  deliverables: [A bounded integrated durable-read verdict.]
+  modules:
+    - name: Integrated durable read authority
+      responsibility: Audit current, authentic legacy, and unknown legacy handoff reads without mutation.
+      consumes: [StateStore, handoff projection, Goal/Work Hierarchy readers, and temporary-Home tests.]
+      produces: [Pass or one exact mismatch.]
+      boundaries: [No real data, write migration, coordination mechanism, or product edits.]
+  callChain:
+    - Goal starts from the already integrated source.
+    - This independent read-only Worker inspects durable-read truth and ForkLight runs focused verification.
+    - Machine success releases the lifecycle-chain audit once.
+  scenarios:
+    - name: Durable read contract holds
+      given: Current, authentic old Competition, and unknown-origin fixtures exist in temporary Stores.
+      when: Shared readers and ownership views consume them.
+      then: Proven identity is readable, unproven identity is not claimed, and no durable row changes.
+    - name: Read authority mismatch stops
+      given: A reader rewrites legacy JSON, claims unknown Goal ownership, or lets a semantic consumer dereference an absent origin.
+      when: Integrated code or focused tests are inspected.
+      then: The audit fails with the exact mismatch and no later audit starts.
+  risks: [Do not mistake collectability for permission to infer handoff semantics.]
+  changeBudget: { maxFiles: 1, maxDiffLines: 20 }
+advancedPolicy: { maxDurationMs: null, observedTokenCeiling: null, noProgressTimeoutMs: null, fileLimit: null, fileLimitMode: warn, changedLineLimit: null, changedLineLimitMode: warn, baseMaxAttempts: 1, maxExtraAttempts: 0, maxMainCorrections: 0, maxMainReverifications: 0, maxConcurrency: 1, completionMode: warn, changeBudgetMode: warn, maxAdaptationRounds: 0 }
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: false
+  allowedCommands: []
+  focusPaths: [src/state/store.ts, src/core/candidate-handoff.ts, src/core/goal.ts, src/core/work-hierarchy.ts, tests/store.test.ts, tests/competition.test.ts, tests/work-hierarchy.test.ts, tests/goal.test.ts]
+acceptance:
+  criteria:
+    - Integrated durable-read behavior matches the corrected spec, preserves unknown-origin hierarchy visibility, and writes nothing.
+    - No source file changes.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/store.test.ts tests/competition.test.ts tests/work-hierarchy.test.ts tests/goal.test.ts
+    - git diff --check

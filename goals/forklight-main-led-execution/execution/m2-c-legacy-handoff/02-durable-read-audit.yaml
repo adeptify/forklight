@@ -1,0 +1,82 @@
+version: 2
+name: M2-C audit legacy handoff durable read normalization
+project: /Users/yijunwang/code/forklight
+taskClass: m2-storage-legacy-handoff-read-audit
+taskFamily: forklight-storage-lifecycle
+workerProfileId: grok-4-6-xhigh
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 0
+  reason: Read-only post-Integration audit changes no product files and has deterministic Store-reader checks.
+contract:
+  outcome: Verify from integrated source that one shared StateStore boundary reads current and authentic legacy Competition handoffs consistently, preserves unknown-legacy collection and Work Hierarchy visibility without Goal ownership, fails closed only when concrete semantics are required, and does not rewrite durable JSON.
+  presentation: { summary: 合入后只读核对旧版 handoff 的统一读取、失败闭合与零改写。, language: zh-CN }
+  context:
+    - Starts only after the exact compatibility Candidate is safely integrated.
+    - Read specs/m2-c-task-storage-lifecycle/work-items/real-store-legacy-handoff-compat/spec.md completely.
+    - The measured legacy shape has old top-level Competition identity and no typed origin; do not inspect the real Store.
+  inScope:
+    - Inspect the shared normalization point, all StateStore handoff readers, current origin preservation, authentic legacy fallback, malformed-row failure, and zero durable rewrite tests.
+  outOfScope:
+    - No edits, real-home access, migration, lifecycle classification change, Integration, Judge, Hub, commit, or push.
+  executionSteps:
+    - Read the integrated Store/handoff normalization and focused tests.
+    - Confirm current origins bypass fallback, authentic old fields reconstruct only Competition origin, and other missing origins stop with a bounded error.
+    - Confirm temporary durable JSON is unchanged across compatibility reads and return a bounded pass or exact mismatch.
+  deliverables: [A read-only durable-read compatibility verdict.]
+  modules:
+    - name: Integrated handoff read authority
+      responsibility: Confirm one shared boundary owns current, authentic legacy, and malformed read behavior.
+      consumes: [Integrated StateStore handoff readers and focused tests.]
+      produces: [Pass or one exact semantic/mutation mismatch.]
+      boundaries: [No write migration, broad legacy framework, real data, or new coordination mechanism.]
+  callChain:
+    - Goal waits for safe compatibility Integration.
+    - This read-only Task inspects integrated StateStore and handoff evidence.
+    - ForkLight runs deterministic focused commands; machine success releases lifecycle-chain audit once.
+  scenarios:
+    - name: Read authority agrees
+      given: Current, authentic legacy, and malformed records are covered in temporary Stores.
+      when: Every shared reader is inspected and tested.
+      then: Current truth stays exact, authentic legacy reads in memory, malformed rows stop, and durable JSON is unchanged.
+  risks: [A compatibility fallback must not guess Goal ownership or mutate historical data.]
+  changeBudget: { maxFiles: 1, maxDiffLines: 20 }
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: false
+  allowedCommands: []
+  focusPaths:
+    - src/state/store.ts
+    - src/core/candidate-handoff.ts
+    - src/core/types.ts
+    - tests/store.test.ts
+    - tests/competition.test.ts
+    - tests/work-hierarchy.test.ts
+    - tests/goal.test.ts
+acceptance:
+  criteria:
+    - Integrated StateStore readers share one current/legacy/fail-closed normalization and read compatibility does not rewrite durable rows.
+    - No source file changes.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/store.test.ts tests/competition.test.ts tests/work-hierarchy.test.ts tests/goal.test.ts
+    - git diff --check

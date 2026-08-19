@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "name": "M2-C exact Candidate recovery and audit",
+  "objective": "Materialize the exact verified 17-path M2-C Candidate in a clean current-source Workspace, close only five frozen gaps, safely integrate it, and rerun the accepted serial post-Integration audits.",
+  "items": [
+    { "id": "recover-implement", "task": "./01-recover.yaml", "dependsOn": [] },
+    { "id": "protection-audit", "task": "../m2-c/02-protection-audit.yaml", "dependsOn": ["recover-implement"] },
+    { "id": "surface-audit", "task": "../m2-c/03-surface-audit.yaml", "dependsOn": ["protection-audit"] },
+    { "id": "boundary-audit", "task": "../m2-c/04-boundary-audit.yaml", "dependsOn": ["surface-audit"] }
+  ]
+}

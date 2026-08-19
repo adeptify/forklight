@@ -1,7 +1,15 @@
+import type {
+  RoutingCannotDetermineReason,
+  RoutingOverallResult,
+} from "./model-routing.js";
 import type { PricingUnavailableReason } from "./pricing.js";
 import type { QuotedCost, UnavailableCost } from "./pricing-calculator.js";
 import type { RuntimeName } from "./runtime-names.js";
 import type { WorkerNetworkPolicy } from "./network-policy.js";
+import type {
+  WorkerReadinessNextAction,
+  WorkerReadinessState,
+} from "./worker-readiness.js";
 
 export type TaskStatus =
   | "queued"
@@ -18,14 +26,14 @@ export type AttemptStatus = "running" | "succeeded" | "failed" | "interrupted";
 export type RuntimeBudgetEnforcement = "supported" | "partial" | "unsupported";
 
 /** Saved per-Worker execution preference.
- *  `auto` prefers a Runtime-native Goal when the Runtime proves one; otherwise
- *  it resolves to a single run. `native-goal` never silently falls back.
- *  Legacy profiles with no field remain single-run. */
-export type ExecutionPreference = "auto" | "single-run" | "native-goal";
+ *  `auto` prefers a proven native Goal, then a proven persistent Session, then
+ *  one ordinary single run. Forced `persistent-session` and `native-goal` never
+ *  silently fall back. Legacy profiles with no field remain single-run. */
+export type ExecutionPreference = "auto" | "single-run" | "persistent-session" | "native-goal";
 
 /** Immutable per-Task execution mode frozen before admission.
  *  `auto` has already been resolved against the selected Runtime's capability. */
-export type ResolvedExecutionMode = "single-run" | "native-goal";
+export type ResolvedExecutionMode = "single-run" | "persistent-session" | "native-goal";
 
 export type EventType =
   | "task.created"
@@ -88,8 +96,12 @@ export type EventType =
   | "review.assignment.created"
   | "review.assignment.completed"
   | "review.assignment.failed"
+  | "review.result-repair.created"
+  | "review.result-repair.completed"
+  | "review.result-repair.failed"
   | "task.resolution.completed"
-  | "task.resolution.reopened";
+  | "task.resolution.reopened"
+  | "storage.disposition.recorded";
 
 export interface ProviderSpec {
   name: "deepseek" | "qwen" | "minimax" | "glm" | "volcengine" | "xai" | "openai";
@@ -226,6 +238,39 @@ export interface FrozenWorkerIdentity {
   workerProfileId?: string;
 }
 
+/** Closed Main relationship to the frozen M3-A advisory. Not an advisory result. */
+export type RoutingSelectionRelationship =
+  | "followed-recommendation"
+  | "manual-override"
+  | "selected-after-cannot-determine";
+
+/** Bounded selected execution/readiness frozen at decision time.
+ *  Reuses the M3-A closed readiness vocabulary; never stores diagnostics. */
+export interface FrozenSelectedExecutionSnapshot {
+  resolvedExecutionMode: ResolvedExecutionMode;
+  readinessState: WorkerReadinessState;
+  canLaunch: boolean;
+  nextAction: WorkerReadinessNextAction;
+}
+
+/** Optional nested snapshot of the M3-A advisory and Main's final relationship.
+ *  Omitted on legacy Task files; never invented during read or preview.
+ *  Recommended/selected relationship binds optional workerProfileId. */
+export interface FrozenRoutingAdvisorySnapshot {
+  /** M3-A executable-facing result. Not a fourth selection mode. */
+  overallResult: RoutingOverallResult;
+  /** How Main's selected Worker relates to that advisory. */
+  selection: RoutingSelectionRelationship;
+  /** Recommended identity when the advisory named one. Absent for cannot-determine. */
+  recommendedWorker?: FrozenWorkerIdentity;
+  /** Frozen advisory confidence in [0, 1]. Present only with recommendedWorker. */
+  confidence?: number;
+  /** Present only when overallResult is cannot-determine. */
+  cannotDetermineReasons?: RoutingCannotDetermineReason[];
+  /** Selected Worker's bounded execution/readiness at decision time. */
+  selectedExecution: FrozenSelectedExecutionSnapshot;
+}
+
 /** Immutable Main-written routing decision stored before any Worker starts.
  *  The frozen identity is used for comparison; workerProfileId is provenance only. */
 export interface RoutingDecisionSnapshot {
@@ -262,6 +307,8 @@ export interface RoutingDecisionSnapshot {
     /** Settings version fingerprint for traceability. Never contains settings values. */
     settingsDigest?: string;
   };
+  /** Frozen M3-A advisory and Main relationship. Absent on legacy decisions. */
+  advisory?: FrozenRoutingAdvisorySnapshot;
 }
 
 /** Trigger reasons for considering or requiring a Competition. */
@@ -325,10 +372,23 @@ interface SharedTaskSpec {
   /** Frozen effective execution mode for this Task (auto already resolved).
    *  Absent only on legacy stored Tasks; runtime code falls back to single-run. */
   executionMode?: ResolvedExecutionMode;
+  /** Immutable Main-declared independent review depth frozen at admission.
+   *  Absent only on legacy stored Tasks; never inferred from risk, family, or
+   *  diff size. requiredJudges 0 is an explicit skip, not an invented default. */
+  reviewRequirement?: TaskReviewRequirement;
   /** Creation-time snapshot of the resolved per-Worker network policy.
    *  Absent only on legacy stored Tasks predating network-policy support;
    *  runtime code must treat absence as inherit. */
   networkPolicy?: WorkerNetworkPolicy;
+}
+
+/** Main-declared independent Judge depth for one Task.
+ *  0 is an explicit mechanical skip; 1 and 2 require that many independent
+ *  usable terminal Review Graph assignments on the current exact revision. */
+export interface TaskReviewRequirement {
+  requiredJudges: 0 | 1 | 2;
+  /** Bounded Main reason for this declared depth. */
+  reason: string;
 }
 
 export interface LegacyTaskSpec extends SharedTaskSpec {
@@ -2053,6 +2113,19 @@ export type ReviewResultFailureCode =
   | "extra-fields"
   | "reviewer-task-failed";
 
+/** Repair-only failure when the repaired JSON is otherwise valid but changed
+ *  disposition, findings, or schemaVersion. */
+export type ReviewResultRepairFailureCode =
+  | ReviewResultFailureCode
+  | "semantic-drift";
+
+/** Lifecycle of the one-shot same-Judge schema-only summary repair. */
+export type ReviewResultRepairStatus =
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "failed";
+
 /** Aggregate evidence state across independent judges. Never a vote or verdict. */
 export type ReviewAggregationState =
   | "pending"
@@ -2124,6 +2197,20 @@ export interface ReviewAssignmentRecord {
   failureCode?: ReviewResultFailureCode;
   /** Private packet path — never projected. */
   privatePacketPath?: string;
+  /** Append-only one-shot schema-only summary repair. Presence consumes the allowance. */
+  resultRepair?: ReviewResultRepairRecord;
+}
+
+/** Durable one-shot same-Judge schema-only summary repair attached to one assignment. */
+export interface ReviewResultRepairRecord {
+  taskId: string;
+  status: ReviewResultRepairStatus;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+  /** Present only when the repair produced a usable same-opinion result. */
+  result?: ReviewResult;
+  failureCode?: ReviewResultRepairFailureCode;
 }
 
 /** Privacy-safe finding for Hub/MCP/CLI. */
@@ -2159,6 +2246,20 @@ export interface ReviewAssignmentView {
   resultUsable: boolean;
   result?: ReviewResultView;
   failureCode?: ReviewResultFailureCode;
+  resultRepair?: ReviewResultRepairView;
+}
+
+/** Privacy-safe one-shot result-repair projection. Never includes packet path,
+ *  raw result text, prompts, credentials, or absolute paths. */
+export interface ReviewResultRepairView {
+  taskId: string;
+  status: ReviewResultRepairStatus;
+  resultUsable: boolean;
+  failureCode?: ReviewResultRepairFailureCode;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+  result?: ReviewResultView;
 }
 
 /** Privacy-safe multi-judge aggregation. Describes evidence only — never a vote. */
@@ -2203,12 +2304,270 @@ export interface ReviewGraphView {
   /** Stable localization key for control surfaces. */
   nextActionCode:
     | "wait-for-judge"
+    | "wait-for-result-repair"
     | "fresh-main-review-usable"
     | "fresh-main-review-unusable"
     | "fresh-main-review-disagreement"
     | "integrated"
     | "ready-for-integration"
     | "main-decision";
+}
+
+/** Closed Integration-gate status for a frozen Task review requirement. */
+export type ReviewRequirementGateStatus =
+  | "not-declared"
+  | "explicit-skip"
+  | "satisfied"
+  | "missing"
+  | "undersized"
+  | "pending"
+  | "stale"
+  | "stale-main-accept";
+
+/** Canonical exact-revision review-requirement comparison.
+ *  Composes Review Graph authority; it never creates Judges or votes. */
+export interface ReviewRequirementGate {
+  declared: boolean;
+  status: ReviewRequirementGateStatus;
+  requiredJudges?: 0 | 1 | 2;
+  /** Main-authored bounded reason when a requirement is declared. */
+  reason?: string;
+  assigned: number;
+  terminal: number;
+  usableTerminal: number;
+  missingOpinions: number;
+  currentRevisionId?: string;
+  graphRevisionId?: string;
+  blocksIntegration: boolean;
+  rejectionReasons: string[];
+}
+
+/** Exactly one next Main action. Presentation never executes it. */
+export type MainDecisionNextActionCode =
+  | "wait-for-worker"
+  | "wait-for-verification"
+  | "inspect-verification-failure"
+  | "continue-same-worker"
+  | "await-required-review"
+  | "wait-for-judges"
+  | "record-main-review"
+  | "record-fresh-main-review"
+  | "ready-for-integration"
+  | "wait-for-integration"
+  | "inspect-integration-failure"
+  | "handoff-or-stop"
+  | "stop-or-decide"
+  | "none";
+
+export type MainDecisionWorkspaceDisposition =
+  | "protect-running"
+  | "protect-review"
+  | "protect-reusable-partial"
+  | "protect-candidate"
+  | "delivered"
+  | "unspecified";
+
+export type MainDecisionStopCode =
+  | "none"
+  | "no-progress"
+  | "repair-exhausted"
+  | "repeated-evidence"
+  | "verification-failed"
+  | "main-rejected"
+  | "boundary";
+
+/** Privacy-safe Main decision packet. Closed resolver facts plus one next action.
+ *  Never contains raw prompt, patch, log, credential, or absolute artifact path. */
+export interface MainDecisionPacket {
+  schemaVersion: 1;
+  kind: "main-decision-packet";
+  taskId: string;
+  execution: {
+    preference: ExecutionPreference;
+    mode: ResolvedExecutionMode;
+  };
+  workerClaim: {
+    present: boolean;
+    label?: "unverified-claim";
+  };
+  verification: {
+    present: boolean;
+    passed?: boolean;
+    behaviorPassed?: boolean;
+    policyPassed?: boolean;
+    sourceCompatible?: boolean;
+    commandCount?: number;
+    failedCommandCount?: number;
+  };
+  validationRepair?: {
+    enabled: boolean;
+    remaining: number;
+    consumed: number;
+    inProgress: boolean;
+    stopReason?: string;
+  };
+  correction?: {
+    eligible: boolean;
+    category: CorrectionEligibilityCategory;
+    remaining: number;
+  };
+  review: ReviewRequirementGate & {
+    aggregationState?: ReviewAggregationState;
+    dispositionCounts?: ReviewAggregationView["dispositionCounts"];
+  };
+  candidate?: {
+    revisionId: string;
+    digestPrefix: string;
+    filesChanged: number;
+    changedLines: number;
+    affectedPathCount: number;
+    verificationPassed: boolean;
+  };
+  reuse?: {
+    reusablePathCount: number;
+    remainingGapCount: number;
+    reusablePaths: string[];
+    remainingGaps: Array<{ description: string; acceptanceExpectation: string }>;
+    handoffStatus?: CandidateHandoffStatus;
+    handoffNextAction?: CandidateHandoffNextAction;
+  };
+  mainReview?: {
+    decision: MainReviewDecisionKind;
+    boundToCurrentVerification: boolean;
+  };
+  integration?: {
+    present: boolean;
+    status?: IntegrationOperationView["status"];
+    resultStatus?: IntegrationResultRecord["status"];
+  };
+  blockers: string[];
+  stop: {
+    code: MainDecisionStopCode;
+    detail?: string;
+  };
+  workspaceDisposition: MainDecisionWorkspaceDisposition;
+  nextAction: string;
+  nextActionCode: MainDecisionNextActionCode;
+  attempts: {
+    count: number;
+    correctionCount: number;
+  };
+}
+
+// --- Main delivery checkpoints (compose existing records; not a new entity) ---
+
+export type MainDeliveryCall = "prepare" | "decide";
+
+export type MainDeliveryObservationOutcome = "ready" | "timeout" | "blocked" | "failed";
+
+export type MainDeliveryNextActionCode =
+  | MainDecisionNextActionCode
+  | "resume-prepare"
+  | "resume-decide";
+
+/** Closed blocker codes for the delivery checkpoint. Detail may quote an
+ *  existing review/preflight reason; it never carries logs or prompts. */
+export type MainDeliveryBlockerCode =
+  | "verification-failed"
+  | "unusable-judge"
+  | "reviewer-set-mismatch"
+  | "stale-identity"
+  | "review-schema"
+  | "source-incompatible"
+  | "integration-failed"
+  | "missing-candidate"
+  | "confirmation-required"
+  | "invalid-input"
+  | "judge-count-mismatch"
+  | "decision-mismatch"
+  | "reason-mismatch"
+  | "not-fully-reviewed"
+  | "required-review-missing"
+  | "required-review-undersized"
+  | "required-review-stale"
+  | "required-review-pending"
+  | "stale-main-accept";
+
+export interface MainDeliveryJudgeView {
+  ordinal: number;
+  reviewerWorkerProfileId: string;
+  reviewerTaskId: string;
+  status: ReviewAssignmentStatus;
+  resultUsable: boolean;
+  proposedDisposition?: ReviewDisposition;
+  summary?: string;
+  findings?: ReviewFindingView[];
+  failureCode?: ReviewResultFailureCode;
+}
+
+export interface MainDeliveryBlocker {
+  code: MainDeliveryBlockerCode;
+  detail?: string;
+}
+
+/** Privacy-safe Main delivery checkpoint. One bounded projection for prepare
+ *  and decide. Never embeds TaskDecisionView, Integration objects, raw logs,
+ *  prompts, success stdout, or a full event stream. */
+export interface MainDeliveryCheckpoint {
+  schemaVersion: 1;
+  kind: "main-delivery-checkpoint";
+  call: MainDeliveryCall;
+  observation: {
+    outcome: MainDeliveryObservationOutcome;
+    timeoutMs: number;
+    elapsedMs: number;
+  };
+  task: {
+    id: string;
+    status: TaskStatus;
+    stage: DecisionStage;
+  };
+  candidate?: {
+    revisionId: string;
+    digest: string;
+    digestPrefix: string;
+    filesChanged: number;
+    changedLines: number;
+    affectedPathCount: number;
+    verificationPassed: boolean;
+  };
+  diff?: {
+    included: boolean;
+    utf8Bytes: number;
+    truncated: boolean;
+    text?: string;
+  };
+  verification: MainDecisionPacket["verification"];
+  review: {
+    requiredJudges?: 0 | 1 | 2;
+    graphId?: string;
+    status?: ReviewGraphStatus;
+    aggregationState?: ReviewAggregationState;
+    judges: MainDeliveryJudgeView[];
+  };
+  mainDecision?: {
+    decision: MainReviewDecisionKind;
+    boundRevisionId?: string;
+    boundDigest?: string;
+  };
+  preflight?: {
+    receiptId: string;
+    passed: boolean;
+    rejectionCount: number;
+  };
+  integration?: {
+    operationId: string;
+    status: IntegrationOperationView["status"];
+    resultStatus?: IntegrationResultRecord["status"];
+  };
+  blockers: MainDeliveryBlocker[];
+  stop: {
+    code: MainDecisionStopCode;
+    detail?: string;
+  };
+  workspaceDisposition: MainDecisionWorkspaceDisposition;
+  nextAction: string;
+  nextActionCode: MainDeliveryNextActionCode;
 }
 
 // --- Main-direct execution decision ---
@@ -2328,4 +2687,272 @@ export interface MainDirectDecisionRecentEntry {
   startedAt: string;
   closedAt?: string;
   consideredWorkerCount: number;
+}
+
+// --- Task storage lifecycle (M2-C) ---
+
+/** Closed classification for one Task root or unmapped observation. */
+export type StorageLifecycleClassification =
+  | "protected"
+  | "reclaimable"
+  | "reclaimed"
+  | "retained"
+  | "unknown-orphan";
+
+/** Closed reason for a storage-lifecycle classification or refusal. */
+export type StorageLifecycleReason =
+  | "task-active"
+  | "task-resumable"
+  | "operation-active"
+  | "operation-outcome-unknown"
+  | "awaiting-required-review"
+  | "awaiting-main-decision"
+  | "awaiting-integration"
+  | "unresolved-partial"
+  | "handoff-unprepared"
+  | "ambiguous-mapping"
+  | "unresolved-terminal"
+  | "integration-delivered"
+  | "remediation-verified-repaired-delivered"
+  | "main-resolved-terminal"
+  | "handoff-successor-materialized"
+  | "reviewer-graph-terminal"
+  | "known-regenerable-removed"
+  | "explicit-retain"
+  | "unmapped-root"
+  | "unmapped-process"
+  | "store-integrity-failed";
+
+/** Exactly one next action for a storage-lifecycle view. */
+export type StorageLifecycleNextAction =
+  | "none"
+  | "preview-eligible"
+  | "confirm-reclaim"
+  | "protect-and-wait"
+  | "inspect-unknown-orphan"
+  | "already-reclaimed";
+
+/** Canonical known regenerable path categories under one Task root. */
+export type StorageKnownRegenerableCategory =
+  | "workspace"
+  | "baseline"
+  | "claude-config"
+  | "grok-home"
+  | "codex-home"
+  | "codex-tmp"
+  | "verifier-git"
+  | "verifier-git-index";
+
+/** Durable evidence categories that ordinary reclaim must keep. */
+export type StorageDurableCategory =
+  | "logs"
+  | "result-diff"
+  | "raw-patch"
+  | "generated-patch"
+  | "revisions"
+  | "reviews"
+  | "handoff"
+  | "source-manifest"
+  | "integration";
+
+/** SQLite durability check retained because it detects corruption or unreadability. */
+export interface StoreIntegrityCheck {
+  quickCheck: string;
+  foreignKeyViolationCount: number;
+}
+
+/** One observed top-level or named target under a Task root. Relative name only. */
+export interface StorageTargetObservation {
+  category: StorageKnownRegenerableCategory | StorageDurableCategory | "unknown";
+  name: string;
+  bytes: number;
+  kind: "known-regenerable" | "durable" | "unknown";
+}
+
+/** Privacy-safe process observation. Never includes command text or cwd. */
+export interface StorageProcessObservation {
+  pid: number;
+  ownership: "task" | "unknown-orphan" | "ambiguous";
+  taskId?: string;
+  match: "command" | "cwd" | "worker-pid";
+  /** Present when one process maps to more than one Task root. */
+  implicatedTaskIds?: string[];
+}
+
+/** One classified Task root, unmapped root, or unmapped process group. */
+export interface StorageLifecycleEntry {
+  classification: StorageLifecycleClassification;
+  reason: StorageLifecycleReason;
+  nextAction: StorageLifecycleNextAction;
+  taskId?: string;
+  rootName?: string;
+  bytes: {
+    total: number;
+    regenerable: number;
+    durable: number;
+    unknown: number;
+  };
+  knownTargets: StorageTargetObservation[];
+  preservedEntries: StorageTargetObservation[];
+  processes: StorageProcessObservation[];
+}
+
+/** Read-only audit of every visible Task root and unmapped observation. */
+export interface StorageAuditView {
+  kind: "storage-audit";
+  entries: StorageLifecycleEntry[];
+  totals: {
+    protectedBytes: number;
+    reclaimableBytes: number;
+    reclaimedBytes: number;
+    retainedBytes: number;
+    unknownOrphanBytes: number;
+    entryCount: number;
+    unknownOrphanCount: number;
+    reclaimableCount: number;
+  };
+  integrity: StoreIntegrityCheck;
+  nextAction: StorageLifecycleNextAction;
+}
+
+/** Read-only preview of known regenerable targets for one Task or the eligible set. */
+export interface StoragePreviewView {
+  kind: "storage-preview";
+  scope: "task" | "all-eligible";
+  entries: StorageLifecycleEntry[];
+  targets: StorageTargetObservation[];
+  preservedEntries: StorageTargetObservation[];
+  processes: StorageProcessObservation[];
+  estimatedBytes: number;
+  integrity: StoreIntegrityCheck;
+  nextAction: StorageLifecycleNextAction;
+}
+
+export interface StorageProcessResult {
+  pid: number;
+  outcome: "stopped" | "refused" | "already-exited" | "escalated";
+  signals: Array<"SIGTERM" | "SIGKILL">;
+}
+
+export interface StorageReclaimTargetResult {
+  name: string;
+  category: StorageKnownRegenerableCategory;
+  outcome: "removed" | "refused" | "missing";
+  bytes: number;
+}
+
+export interface StorageReclaimTaskResult {
+  taskId: string;
+  applied: boolean;
+  reason: StorageLifecycleReason;
+  classification: StorageLifecycleClassification;
+  targets: StorageReclaimTargetResult[];
+  removedBytes: number;
+  retainedDurableCategories: StorageDurableCategory[];
+  processes: StorageProcessResult[];
+  dispositionRecorded: boolean;
+}
+
+/** Confirmed reclaim result after re-evaluating current Store truth. */
+export interface StorageReclaimView {
+  kind: "storage-reclaim";
+  scope: "task" | "all-eligible";
+  results: StorageReclaimTaskResult[];
+  integrity: StoreIntegrityCheck;
+  nextAction: StorageLifecycleNextAction;
+}
+
+/** Explicit keep-full-space result for an otherwise reclaimable terminal Task. */
+export interface StorageRetainView {
+  kind: "storage-retain";
+  taskId: string;
+  applied: boolean;
+  reason: StorageLifecycleReason;
+  classification: StorageLifecycleClassification;
+  integrity: StoreIntegrityCheck;
+  nextAction: StorageLifecycleNextAction;
+  bytes: {
+    total: number;
+    regenerable: number;
+    durable: number;
+    unknown: number;
+  };
+  priorReason: StorageLifecycleReason;
+}
+
+/** Readable marker for a self-contained local ForkLight Home backup. */
+export const BACKUP_SCHEMA = "forklight.backup.v1";
+
+export type BackupAction = "preview" | "create" | "inspect" | "restore";
+export type BackupStatus = "ready" | "completed" | "refused" | "failed";
+export type BackupNextAction =
+  | "create-with-confirm"
+  | "inspect"
+  | "restore-with-confirm"
+  | "stop-daemon"
+  | "stop-hub"
+  | "investigate"
+  | "none";
+export type BackupExclusionReason = "transient" | "external-link";
+export type BackupRefusalReason =
+  | "existing-destination"
+  | "destination-inside-home"
+  | "store-unreadable"
+  | "store-integrity"
+  | "malformed-manifest"
+  | "escaping-path"
+  | "live-owner"
+  | "unverified-owner"
+  | "activation-failed"
+  | "home-missing";
+
+/** Minimum readable backup directory facts. No per-file hashes or versions. */
+export interface BackupManifest {
+  schema: typeof BACKUP_SCHEMA;
+  createdAt: string;
+  included: string[];
+  excluded: string[];
+  externalLinkExclusionCount: number;
+  integrity: StoreIntegrityCheck;
+}
+
+export interface BackupExclusion {
+  name: string;
+  reason: BackupExclusionReason;
+}
+
+/** Keychain and external Main/runtime auth live outside Home and are never copied. */
+export interface BackupCredentialAbsence {
+  keychain: "not-included";
+  localRuntimeSignIn: "not-included";
+  externalMainAuth: "not-included";
+}
+
+export interface BackupOwnerObservation {
+  owner: "daemon" | "hub";
+  state: "stopped" | "live" | "unverified";
+  nextAction: "stop-daemon" | "stop-hub" | "investigate" | "none";
+  reason: string;
+}
+
+/** Shared preview/create/inspect/restore projection for CLI, MCP, and local tools. */
+export interface BackupResult {
+  kind: "backup-preview" | "backup-create" | "backup-inspect" | "backup-restore";
+  action: BackupAction;
+  status: BackupStatus;
+  included: string[];
+  excluded: string[];
+  excludedReasons: BackupExclusion[];
+  externalLinkExclusionCount: number;
+  integrity: StoreIntegrityCheck;
+  impact: string;
+  nextAction: BackupNextAction;
+  reason: string;
+  privacy: "keep-private";
+  credentials: BackupCredentialAbsence;
+  destination?: string;
+  backupPath?: string;
+  recoveryCopy?: string;
+  stagingPath?: string;
+  owners?: BackupOwnerObservation[];
 }

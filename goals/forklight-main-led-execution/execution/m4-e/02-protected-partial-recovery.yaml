@@ -1,0 +1,165 @@
+version: 2
+name: M4-E exact protected-partial delivery recovery
+project: /Users/yijunwang/code/forklight
+taskClass: m4-main-efficient-delivery-recovery
+taskFamily: worker-runtime
+workerProfileId: grok-4-6-xhigh
+executionPreference: auto
+routingDecision:
+  taskFamily: worker-runtime
+  shortlist:
+    - provider: xai
+      model: grok-4.6
+      runtime: grok-build
+      effort: xhigh
+      workerProfileId: grok-4-6-xhigh
+  selectedWorker:
+    provider: xai
+    model: grok-4.6
+    runtime: grok-build
+    effort: xhigh
+    workerProfileId: grok-4-6-xhigh
+  selectedBecause:
+    code: user-specified
+    note: 一骏 granted standing authorization to continue later Tasks and prefers Grok CLI 4.6 Xhigh native Goal; this recovery reuses the protected result instead of switching models or repeating implementation.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+reviewRequirement:
+  requiredJudges: 2
+  reason: This preserves a Core/Daemon/CLI/MCP delivery change that controls Main authority and safe Integration, so two different-view Judges remain required.
+runtime:
+  name: grok-build
+  executable: /Users/yijunwang/code/forklight/goals/forklight-main-led-execution/execution/m4-e/m4-e-workspace-local-seed-bootstrap.mjs
+  effort: xhigh
+  maxBudgetUsd: null
+contract:
+  outcome: Materialize the accepted 19-path M4-E result from the Task-local retained patch and deliver that exact result through ForkLight verification, dual Judge review and Main serial Integration without recreating the implementation.
+  presentation:
+    summary: 复用首个Task已经完成的成果，只交付精确修正后的19路径版本。
+    language: zh-CN
+  context:
+    - Read AGENTS.md, specs/m4-e-main-efficient-delivery/spec.md, goals/forklight-main-led-execution/evidence/m4-e-attempt-1-recovery-decision.md and the Task-local retained-candidate.diff completely. They are the unique accepted boundary.
+    - Failed Task 6928dd28-bf5a-413c-9545-59ce96648b99 and its Workspace remain immutable and protected. Do not resume, mutate, relabel or read that sibling Task.
+    - Main captured the accepted-path baseline-to-Workspace output, removed only the two proven README trailing spaces and packaged the result as retained-candidate.diff in this normal source snapshot.
+    - The operational wrapper parses the exact 19-path set, proves the patch matches this Task source base and applies it only inside this Workspace before Grok starts. It adds no product behavior, integrity system or persistence.
+    - The retained result already passes a diagnostic build and 456 focused tests. Those are reuse evidence only; ForkLight must independently run every original acceptance command after Candidate capture.
+    - Do not spawn any subagent, redesign, re-research, use Bash, rewrite the retained files or add a correction. Inspect the materialized result, confirm the exact handoff and explicitly complete this fresh native Goal.
+    - This is one fresh Grok 4.6 Xhigh native Goal, not continuity with the failed Goal. One Attempt, zero validation repair, correction, reverify, adaptation, retry, fallback or further replacement; failure stops.
+    - ForkLight serves one local developer. Add no checksum, hash, lock, lease, version handshake, migration or distributed coordination.
+    - M5 stays closed. Do not inspect or modify Hub/UI.
+  inScope:
+    - Exact Task-local materialization of retained-candidate.diff on the matching source base.
+    - Inspection and handoff of the already-implemented MainDeliveryCheckpoint, prepare and decide behavior.
+    - ForkLight independent build, focused tests, exact reverse-Candidate check and diff validation.
+  outOfScope:
+    - Any product hunk beyond retained-candidate.diff, fresh design or research, failed Task resume, subagent, Bash enablement, model switch, retry, correction, reverify, adaptation, fallback or replacement.
+    - Hub/UI, calibration, routing, storage reclaim, Provider credentials, Git remote, commit, push, reset or any path outside the exact 19 product/test/docs paths.
+    - New product entity, lock, lease, checksum/content-addressing system, version handshake or distributed workflow.
+  executionSteps:
+    - Read the accepted Spec, recovery evidence and Task-local retained patch.
+    - Inspect the already-materialized exact 19-path result without editing or delegating.
+    - Explicitly finish the native Goal with a concise handoff naming schema, public calls, durable reuse, timeout behavior and independent commands ForkLight must run.
+  deliverables:
+    - One exact 19-path Candidate equal to retained-candidate.diff.
+    - ForkLight independent acceptance including exact reverse applicability.
+    - Concise handoff ready for two fresh different-view Judges and Main serial Integration.
+  modules:
+    - name: Workspace-local retained result
+      responsibility: Reuse the exact accepted-path output without another implementation cycle.
+      consumes: [Task-local retained patch, matching current source base, accepted M4-E Spec.]
+      produces: [Exact 19-path Workspace delta.]
+      boundaries: [No sibling Task access, extra hunk, path, redesign or coordination protocol.]
+    - name: Main-efficient reviewed delivery
+      responsibility: Preserve the canonical two-checkpoint Core/Daemon/CLI/MCP behavior already present in the retained result.
+      consumes: [Existing Task, verification, Review Graph, Main review and Integration records.]
+      produces: [Bounded prepare and decide checkpoints with exact durable reuse.]
+      boundaries: [No automatic Main decision, retry, correction, Judge replacement or Integration without explicit accept.]
+  callChain:
+    - ForkLight snapshots the matching source plus retained patch into the fresh Workspace.
+    - Main-owned operational wrapper validates and applies the exact patch locally before Grok starts.
+    - Grok inspects only the materialized result and terminates the fresh native Goal without subagents.
+    - ForkLight independently verifies exact Candidate identity and all original commands.
+    - Two different-view Judges inspect one Revision; Main alone reviews and integrates serially.
+  scenarios:
+    - name: Exact retained result is delivered
+      given: Current source matches the retained patch base.
+      when: The wrapper starts this fresh native Goal.
+      then: Exactly 19 authorized paths are materialized and the Worker returns them unchanged for independent acceptance.
+    - name: Wrong source or Candidate fails closed
+      given: The source base drifts or the materialized Candidate differs from the retained patch.
+      when: Bootstrap or acceptance checks run.
+      then: The Task stops without Integration, retry, replacement or source mutation.
+    - name: Native Goal termination stays bounded
+      given: The retained implementation needs no further coding.
+      when: Grok inspects it.
+      then: Grok uses no subagent and explicitly completes the one native Goal.
+  risks:
+    - Source drift could produce a wrong Candidate; exact path parsing plus forward and reverse git-apply checks fail closed.
+    - Grok could repeat the prior subagent/Goal-status failure; the contract forbids subagents and the one-shot boundary stops rather than retrying.
+  changeBudget:
+    maxFiles: 20
+    maxDiffLines: 3600
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 60000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxWorkerValidationRepairs: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test, .forklight-boundary-capture, .forklight-receipt-retry, plans]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/main-delivery.ts
+    - src/core/types.ts
+    - src/daemon/coordinator.ts
+    - src/daemon/protocol.ts
+    - src/daemon/server.ts
+    - src/daemon/client.ts
+    - src/cli.ts
+    - src/cli/supervision.ts
+    - src/cli/exchange-receipts.ts
+    - src/mcp/server.ts
+    - src/mcp/exchange-receipts.ts
+    - tests/main-delivery.test.ts
+    - tests/cli-supervision.test.ts
+    - tests/cli-exchange-receipts.test.ts
+    - tests/daemon.test.ts
+    - tests/daemon-cli.test.ts
+    - tests/mcp.test.ts
+    - README.md
+    - docs/operations.md
+acceptance:
+  criteria:
+    - The Task-local wrapper proves the exact 19-path patch matches the current source base and materializes it only inside the isolated Workspace.
+    - Candidate reverse-applies retained-candidate.diff exactly, changes no other business path and passes diff validation.
+    - Prepare and decide preserve explicit Main authority, exact Candidate/review/Integration reuse, observation-safe timeouts, compact privacy-safe CLI/MCP schema and granular backward compatibility.
+    - ForkLight independently passes build and every focused M4-E test; two different-view Judges and Main serial safe Integration complete the unchanged quality chain.
+    - No Hub/UI, calibration, routing, storage, coordination mechanism, retry, correction, replacement, commit, push or reset occurs.
+  commands:
+    - node goals/forklight-main-led-execution/execution/m4-e/m4-e-workspace-local-seed-bootstrap.test.mjs
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/main-delivery.test.ts tests/cli-supervision.test.ts tests/cli-exchange-receipts.test.ts tests/review-graph.test.ts tests/integration.test.ts tests/daemon.test.ts tests/daemon-cli.test.ts tests/mcp.test.ts
+    - node goals/forklight-main-led-execution/execution/m4-e/retained-candidate.test.mjs --candidate
+    - git diff --check

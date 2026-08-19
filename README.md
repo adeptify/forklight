@@ -19,8 +19,8 @@ ForkLight 是 **local-first、运行时与模型无关的执行中枢**：由一
 | **Worker** | 仅在隔离工作区内完成被分配的实现；无原仓写权限，无 commit/push 权 |
 
 项目目标、里程碑与当前进度以
-[`goals/forklight-main-token-leverage/`](./goals/forklight-main-token-leverage/)
-为唯一管理入口；`PROJECT.md` 是待收敛的历史快照。
+[`goals/forklight-main-led-execution/`](./goals/forklight-main-led-execution/)
+为唯一管理入口；`PROJECT.md` 只提供短入口。
 
 ### 主要功能点
 
@@ -44,6 +44,7 @@ ForkLight 是 **local-first、运行时与模型无关的执行中枢**：由一
 5. **CLI / Daemon / MCP**  
    - 同一真相的多入口：本地 daemon、交换收据、MCP 工具面  
    - 健康与 readiness 检查
+   - `delivery prepare` / `delivery decide`：一次准备到已审查 Candidate，一次明确决定并安全集成
 
 6. **路由、竞争与失败归因**  
    - 模型路由建议（证据不充分时不永久拉黑）  
@@ -75,19 +76,31 @@ npm run smoke
 
 ```bash
 # CLI（构建后）
-node dist/cli.js --help
+node dist/src/cli.js --help
+
+# 首次设置（不必打开旧 Hub）
+forklight setup status
+forklight setup provider select --provider xai
+printf '%s' "$KEY" | forklight setup provider select --provider deepseek --variant default --confirm
+forklight setup worker list
+forklight setup worker select --profile grok-4-6-xhigh
+forklight setup main install --client grok-build --component mcp --confirm
+
+# 本地 Home 备份（不含 Keychain / 外部 Main 登录；备份须保持私有）
+forklight backup preview --destination /safe/outside/forklight-backup
+forklight backup create --destination /safe/outside/forklight-backup --confirm
+forklight backup inspect /safe/outside/forklight-backup
+forklight backup restore /safe/outside/forklight-backup --confirm
 
 # MCP server
-node dist/mcp/server.js
-
-# Hub
-# 见 docs/operations.md 与 docs/configuration.md
+node dist/src/mcp/main.js
 ```
 
 配置、Main 客户端接入：
 
 - `docs/configuration.md`  
 - `docs/operations.md`  
+- `docs/main-led-delivery.md` — Main 主导的本地交付主路径
 - `docs/main-clients/`  
 - `docs/m1-clean-user-runbook.md`  
 
@@ -102,7 +115,8 @@ node dist/mcp/server.js
 | `src/mcp/` | MCP |
 | `src/workspace/` | 隔离与 patch |
 | `examples/dogfood/` | 验收任务 YAML |
-| `PROJECT.md` | 里程碑与决策 SSOT |
+| `goals/forklight-main-led-execution/` | Goal、里程碑、进度、决策与证据 SSOT |
+| `PROJECT.md` | SSOT 短入口 |
 
 ### 原则（摘要）
 
@@ -125,7 +139,7 @@ ForkLight is a **local-first execution hub**: a capable **Main** decomposes work
 2. Multi-runtime workers (Claude Code, Codex CLI, Grok Build, …) with profiles and readiness.  
 3. Isolated workspaces, patches, fail-closed integration.  
 4. Bilingual Hub: outcome → state → I/O → reason → retained work → next action.  
-5. Daemon + MCP + exchange receipts.  
+5. Daemon + MCP + exchange receipts. Two-call `delivery prepare` / `delivery decide` for reviewed delivery.
 6. Routing advice, exceptional competition, failure attribution before model blame.  
 7. Dogfood YAML examples and milestone contracts under `docs/`.
 
@@ -137,4 +151,20 @@ npm run build && npm run test && npm run check
 npm run dev
 ```
 
-Project status and milestones: [`PROJECT.md`](./PROJECT.md). Ops: `docs/operations.md`, `docs/configuration.md`.
+First setup (no Hub required):
+
+```bash
+forklight setup status
+forklight setup provider select --provider xai
+printf '%s' "$KEY" | forklight setup provider select --provider deepseek --variant default --confirm
+forklight setup worker select --profile grok-4-6-xhigh
+forklight setup main install --client grok-build --component mcp --confirm
+
+# Local Home backup (no Keychain / external Main auth; keep the directory private)
+forklight backup preview --destination /safe/outside/forklight-backup
+forklight backup create --destination /safe/outside/forklight-backup --confirm
+forklight backup inspect /safe/outside/forklight-backup
+forklight backup restore /safe/outside/forklight-backup --confirm
+```
+
+API keys are accepted only on stdin after `--confirm`. Project status and milestones: [`PROJECT.md`](./PROJECT.md). Ops: `docs/operations.md`, `docs/configuration.md`.

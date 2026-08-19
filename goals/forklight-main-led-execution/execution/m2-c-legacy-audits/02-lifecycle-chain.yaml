@@ -1,0 +1,63 @@
+version: 2
+name: M2-C independently audit integrated lifecycle read chain
+project: /Users/yijunwang/code/forklight
+taskClass: m2-storage-legacy-integrated-lifecycle-audit
+taskFamily: forklight-storage-lifecycle
+workerProfileId: default
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 0
+  reason: Read-only deterministic call-chain audit changes no product files.
+contract:
+  outcome: Verify authentic legacy handoff truth flows through projection, Main decision, storage audit and all-eligible preview without TypeError, semantic drift, unsafe eligibility, or mutation.
+  presentation: { summary: 独立只读核对已合入的 handoff 到 Main 决策和 Storage 预览链。, language: zh-CN }
+  context:
+    - Starts only after the independent durable-read audit passes.
+    - Read the corrected accepted Work Item completely; source Revision is already integrated.
+  inScope:
+    - Inspect projectCandidateHandoff, resolveHandoffViewForTask, Main decision packet, auditStorage, previewStorage, and focused tests.
+  outOfScope:
+    - No edits, real-home access, reclaim, migration, Integration, Judge, Hub, commit, or push.
+  executionSteps:
+    - Follow the exact real failure chain from normalized Store read to storage preview.
+    - Confirm authentic Competition origin stays Competition-specific and unknown origin stops only semantic consumers with the stable error.
+    - Confirm readability never widens protected/reclaimable authority and run approved commands.
+  deliverables: [A bounded integrated lifecycle-chain verdict.]
+  modules:
+    - name: Integrated semantic read chain
+      responsibility: Audit handoff projection, Main decision, and storage classification consumers.
+      consumes: [Normalized handoff truth, decision packet, lifecycle authority, and temporary tests.]
+      produces: [Pass or one exact mismatch.]
+      boundaries: [No mutation, real Store, eligibility redesign, or inferred delivery.]
+  callChain:
+    - Durable-read audit establishes Store truth.
+    - This Task checks every semantics-requiring consumer and focused behavior.
+    - Machine success releases the mutation-boundary audit once.
+  scenarios:
+    - name: Prior real failure chain is closed
+      given: An authentic old Competition handoff is read from a temporary Store.
+      when: Projection, decision, audit and preview consume it.
+      then: Each completes truthfully; an unknown origin returns the stable error and nothing is written.
+    - name: Semantic or eligibility drift stops
+      given: Any consumer fabricates Goal ownership, echoes stored content, or makes unknown or unresolved work reclaimable.
+      when: The call chain or tests are inspected.
+      then: The audit fails and the mutation-boundary audit remains blocked.
+  risks: [Compatibility must not turn unresolved or unknown work into reclaimable state.]
+  changeBudget: { maxFiles: 1, maxDiffLines: 20 }
+advancedPolicy: { maxDurationMs: null, observedTokenCeiling: null, noProgressTimeoutMs: null, fileLimit: null, fileLimitMode: warn, changedLineLimit: null, changedLineLimitMode: warn, baseMaxAttempts: 1, maxExtraAttempts: 0, maxMainCorrections: 0, maxMainReverifications: 0, maxConcurrency: 1, completionMode: warn, changeBudgetMode: warn, maxAdaptationRounds: 0 }
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: false
+  allowedCommands: []
+  focusPaths: [src/state/store.ts, src/core/candidate-handoff.ts, src/core/main-decision-packet.ts, src/core/storage-lifecycle.ts, tests/task-decision-view.test.ts, tests/storage-lifecycle.test.ts]
+acceptance:
+  criteria:
+    - The exact projection/decision/audit/preview chain matches the corrected spec without widening eligibility or writing state.
+    - No source file changes.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/task-decision-view.test.ts tests/storage-lifecycle.test.ts
+    - git diff --check

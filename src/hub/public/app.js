@@ -446,6 +446,10 @@ var S = {
   /* FL-112B: one semantic portfolio selection. This is presentation state
    * only; Core remains the sole owner of lifecycle and ancestry truth. */
   workSelection: null,
+  workTreeQuery: "",
+  workTreeWidth: 280,
+  workTreeScope: "now",
+  workMobilePane: "tree",
   /* FL-112E3: the viewed phase is browser-only navigation. It is kept beside
    * the selected Goal so a poll can rebuild the board without changing which
    * phase the user is reading. No phase click calls a mutation or refresh. */
@@ -504,6 +508,10 @@ var S = {
    * across renders; on validation/network/Daemon failure nothing is cleared.
    * outcomeSubmitting is single-flight; the page never auto-retries. */
   outcomeDraft: { outcome: "", project: "", context: "", requestedShape: "auto" },
+  /* The add action's visual location supplies the intended Goal / Plan / Task
+   * shape and exact canonical parent. It is presentation state only; durable
+   * creation still goes through the existing intake proposal + confirmation. */
+  workCreateTarget: null,
   outcomeSubmitting: false,
   outcomeCreateError: null,
   outcomeFormActive: false,
@@ -541,8 +549,17 @@ var WORK_READING_CONTEXT_MAX_COLLAPSE = 48;
 var WORK_READING_CONTEXT_DISCLOSURES = [
   "finishedOpen", "advancedOpen", "expertDetailsOpen", "goalSummaryOpen",
   "filtersOpen", "oneOffCurrentOpen", "oneOffAttentionOpen", "oneOffHistoryOpen",
-  "shapeGuideOpen", "pageStoryOpen", "outcomeAdvancedOpen"
+  "shapeGuideOpen", "pageStoryOpen", "outcomeAdvancedOpen", "goalFileEvidenceOpen"
 ];
+var SYSTEM_TABS = ["model", "worker", "mains", "delivery", "competitions", "stats", "limits"];
+var GOAL_TREE_WIDTH_MIN = 200;
+var GOAL_TREE_WIDTH_MAX = 420;
+var GOAL_TREE_WIDTH_DEFAULT = 280;
+var GOAL_FILE_CURRENT_CODES = [
+  "waiting-user-decision", "running", "waiting-verification", "ready", "not-started"
+];
+var GOAL_FILE_BLOCKED_CODES = ["stopped-failed"];
+var GOAL_FILE_HISTORY_CODES = ["completed"];
 var WORK_READING_CONTEXT_TABS = [
   "overview", "instruction", "process", "result", "checks", "actions", "more"
 ];
@@ -899,6 +916,7 @@ function metric(label, value, hint){
 var PAGE_DEPS = {
   overview:      { tasks: true, boards: true, competitions: true, goals: true, sample: true, selfUpgradeEvidence: true },
   work:          { workHierarchy: true, intakes: true },
+  decisions:     { workHierarchy: true },
   tasks:         { tasks: true },
   plans:         { boards: true },
   goals:         { goals: true },
@@ -1222,6 +1240,7 @@ function setPageChrome(){
   if(titleEl) titleEl.textContent = p.title;
   if(subEl) subEl.textContent = p.sub;
   applyChromeI18n();
+  updateProductNav();
 }
 function showDisconnected(){
   viewEl.replaceChildren(stateMsg("disconnected", t("reconnecting")));
@@ -3707,11 +3726,28 @@ function outcomeHasControlCharacters(value){
   }
   return false;
 }
+function workCreateTargetContext(target){
+  if(!target || target.shape === "goal") return "";
+  var parts = ["ForkLight placement context (requested, not yet created):"];
+  if(target.goalId){
+    parts.push("Goal " + String(target.goalId) + (target.goalName ? " (" + String(target.goalName) + ")" : ""));
+  }
+  if(target.planId){
+    parts.push("Plan " + String(target.planId) + (target.planName ? " (" + String(target.planName) + ")" : ""));
+  }
+  return parts.join("\n");
+}
+function workOutcomeContextValue(){
+  var entered = String((S.outcomeDraft && S.outcomeDraft.context) || "").trim();
+  var placement = workCreateTargetContext(S.workCreateTarget);
+  return [entered, placement].filter(Boolean).join("\n\n");
+}
 function outcomeValidateDraft(){
   var outcome = String(S.outcomeDraft.outcome || "").trim();
   if(!outcome) return "outcomeErrorRequired";
   if(outcome.length > 2000) return "outcomeErrorTooLong";
   if(outcomeHasControlCharacters(outcome)) return "outcomeErrorControl";
+  if(workOutcomeContextValue().length > 2000) return "outcomeErrorContextTooLong";
   return null;
 }
 /* Polite live announcement: screen readers hear state changes without focus
@@ -3733,10 +3769,11 @@ function outcomeSubmit(){
   var draft = S.outcomeDraft;
   var body = {
     outcome: String(draft.outcome || "").trim(),
-    requestedShape: draft.requestedShape || "auto"
+    requestedShape: (S.workCreateTarget && S.workCreateTarget.shape) || draft.requestedShape || "auto"
   };
   if(typeof draft.project === "string" && draft.project.trim()) body.project = draft.project.trim();
-  if(typeof draft.context === "string" && draft.context.trim()) body.context = draft.context.trim();
+  var outcomeContext = workOutcomeContextValue();
+  if(outcomeContext) body.context = outcomeContext;
   S.outcomeSubmitting = true;
   S.outcomeCreateError = null;
   render();
@@ -3752,6 +3789,7 @@ function outcomeSubmit(){
       S.intakes = list.slice(0, 20);
       S.selectedIntakeId = intake.id;
       S.outcomeDraft = { outcome: "", project: "", context: "", requestedShape: "auto" };
+      S.workCreateTarget = null;
     }
     render();
     outcomeAnnounce(t("outcomeAnnounceRecorded"));
@@ -3763,26 +3801,46 @@ function outcomeSubmit(){
     outcomeAnnounce(t("outcomeCreateError"));
   });
 }
-function renderOutcomeSection(){
+function renderOutcomeSection(options){
+  options = options || {};
   var wrap = h("div", "outcome-section");
   wrap.setAttribute("data-fl-role", "outcome-section");
-  wrap.appendChild(renderOutcomeComposer());
+  wrap.appendChild(renderOutcomeComposer(options));
   /* FL-112E9: the recorded result's journey stays adjacent to the composer.
    * It never falls below the whole board; the selected intake is the primary
    * journey and older intakes stay a bounded collapsed list. */
-  wrap.appendChild(renderIntakeStory());
+  if(options.includeStory !== false) wrap.appendChild(renderIntakeStory());
   return wrap;
 }
-function renderOutcomeComposer(){
+function workCreateTitle(target){
+  if(!target || target.shape === "goal") return t("workCreateGoalTitle");
+  if(target.shape === "plan") return t("workCreatePlanTitle", {
+    name: target.goalName || t("workUntitledGoal")
+  });
+  return t("workCreateTaskTitle", {
+    name: target.planName || t("workUntitledPlan")
+  });
+}
+function renderOutcomeComposer(options){
+  options = options || {};
+  var target = options.target || S.workCreateTarget;
+  var contextual = !!(target && ["goal", "plan", "task"].indexOf(target.shape) >= 0);
+  var title = contextual ? workCreateTitle(target) : t("outcomeTitle");
   var card = h("div", "outcome-composer");
   card.setAttribute("data-fl-role", "outcome-composer");
-  card.appendChild(h("div", "outcome-composer-title", t("outcomeTitle")));
-  card.appendChild(h("div", "outcome-composer-hint", t("outcomeHint")));
+  if(contextual){
+    card.classList.add("is-contextual");
+    card.setAttribute("data-create-shape", target.shape);
+    if(target.goalId) card.setAttribute("data-goal-id", String(target.goalId));
+    if(target.planId) card.setAttribute("data-plan-id", String(target.planId));
+  }
+  card.appendChild(h("div", "outcome-composer-title", title));
+  card.appendChild(h("div", "outcome-composer-hint", contextual ? t("workCreateHint") : t("outcomeHint")));
 
   var form = document.createElement("form");
   form.className = "outcome-form";
   form.setAttribute("data-fl-role", "outcome-form");
-  form.setAttribute("aria-label", t("outcomeTitle"));
+  form.setAttribute("aria-label", title);
 
   var field = h("label", "outcome-field", "");
   field.appendChild(h("span", "outcome-label", t("outcomeLabel")));
@@ -3807,7 +3865,8 @@ function renderOutcomeComposer(){
   summary.textContent = t("outcomeAdvanced");
   details.appendChild(summary);
   var advBody = h("div", "outcome-advanced-body");
-  advBody.appendChild(h("div", "outcome-more-options-hint", t("outcomeAdvancedHint")));
+  advBody.appendChild(h("div", "outcome-more-options-hint",
+    contextual ? t("workCreateOptionsHint") : t("outcomeAdvancedHint")));
 
   var projWrap = h("label", "outcome-field", "");
   projWrap.appendChild(h("span", "outcome-label", t("outcomeProjectLabel")));
@@ -3841,32 +3900,48 @@ function renderOutcomeComposer(){
   ctxWrap.appendChild(ctxText);
   advBody.appendChild(ctxWrap);
 
-  var shapeWrap = h("label", "outcome-field", "");
-  shapeWrap.appendChild(h("span", "outcome-label", t("outcomeShapeLabel")));
-  var shapeSel = document.createElement("select");
-  shapeSel.className = "outcome-select";
-  shapeSel.setAttribute("data-fl-role", "outcome-shape");
-  outcomeShapeOptions().forEach(function(shape){
-    var opt = document.createElement("option");
-    opt.value = shape;
-    opt.textContent = outcomeShapeLabel(shape);
-    shapeSel.appendChild(opt);
-  });
-  shapeSel.value = S.outcomeDraft.requestedShape || "auto";
-  shapeSel.addEventListener("change", function(){
-    S.outcomeDraft.requestedShape = shapeSel.value;
-    S.outcomeFormActive = true;
-    workScheduleReadingContextSave();
-  });
-  shapeWrap.appendChild(shapeSel);
-  advBody.appendChild(shapeWrap);
-  advBody.appendChild(h("div", "outcome-field-hint", t("outcomeShapeHint")));
+  if(!contextual){
+    var shapeWrap = h("label", "outcome-field", "");
+    shapeWrap.appendChild(h("span", "outcome-label", t("outcomeShapeLabel")));
+    var shapeSel = document.createElement("select");
+    shapeSel.className = "outcome-select";
+    shapeSel.setAttribute("data-fl-role", "outcome-shape");
+    outcomeShapeOptions().forEach(function(shape){
+      var opt = document.createElement("option");
+      opt.value = shape;
+      opt.textContent = outcomeShapeLabel(shape);
+      shapeSel.appendChild(opt);
+    });
+    shapeSel.value = S.outcomeDraft.requestedShape || "auto";
+    shapeSel.addEventListener("change", function(){
+      S.outcomeDraft.requestedShape = shapeSel.value;
+      S.outcomeFormActive = true;
+      workScheduleReadingContextSave();
+    });
+    shapeWrap.appendChild(shapeSel);
+    advBody.appendChild(shapeWrap);
+    advBody.appendChild(h("div", "outcome-field-hint", t("outcomeShapeHint")));
+  }
   details.appendChild(advBody);
   form.appendChild(details);
 
   var actions = h("div", "outcome-actions");
-  var submitBtn = h("button", "btn primary outcome-submit",
-    S.outcomeSubmitting ? t("outcomeSubmitPending") : t("outcomeSubmit"));
+  if(contextual){
+    var cancelBtn = h("button", "btn outcome-cancel", t("workCreateCancel"));
+    cancelBtn.type = "button";
+    cancelBtn.setAttribute("data-fl-role", "work-create-cancel");
+    if(S.outcomeSubmitting) cancelBtn.disabled = true;
+    cancelBtn.addEventListener("click", function(){
+      if(S.outcomeSubmitting) return;
+      S.workCreateTarget = null;
+      S.outcomeCreateError = null;
+      render();
+    });
+    actions.appendChild(cancelBtn);
+  }
+  var submitBtn = h("button", "btn primary outcome-submit", S.outcomeSubmitting
+    ? t("outcomeSubmitPending")
+    : (contextual ? t("workCreateContinue") : t("outcomeSubmit")));
   submitBtn.type = "submit";
   submitBtn.setAttribute("data-fl-role", "outcome-submit");
   if(S.outcomeSubmitting) submitBtn.disabled = true;
@@ -4802,6 +4877,413 @@ function workResolveSelection(view, current){
   var requested = current && workMakeSelection(current.kind, current.id);
   return workSelectionExists(view, requested) ? requested : workDefaultSelection(view);
 }
+function workNormalizeTreeWidth(px){
+  var n = typeof px === "number" ? px : parseInt(px, 10);
+  if(!isFinite(n)) return 280;
+  if(n < 200) return 200;
+  if(n > 420) return 420;
+  return Math.round(n);
+}
+function workIsNarrowViewport(){
+  try {
+    return !!(window.matchMedia && window.matchMedia("(max-width: 760px)").matches);
+  } catch(_){
+    return false;
+  }
+}
+function workNextMobilePane(current, action){
+  if(action === "open-file") return "file";
+  if(action === "open-detail") return "detail";
+  if(action === "open-tree") return "tree";
+  if(action === "back"){
+    if(current === "detail") return "file";
+    if(current === "file") return "tree";
+    return "tree";
+  }
+  return current === "file" || current === "detail" ? current : "tree";
+}
+function workTreeItemMatches(item, query){
+  if(!query) return true;
+  var q = String(query).toLocaleLowerCase();
+  var parts = [item && item.name, item && item.objective, item && item.cue, item && item.status];
+  if(parts.filter(Boolean).join(" ").toLocaleLowerCase().indexOf(q) >= 0) return true;
+  var plans = (item && item.plans) || [];
+  var tasks = (item && item.tasks) || [];
+  return plans.some(function(plan){ return workTreeItemMatches(plan, query); })
+    || tasks.some(function(task){ return workTreeItemMatches(task, query); });
+}
+function composeGoalTreeModel(view, query, scope){
+  query = String(query || "").trim();
+  scope = scope === "history" ? "history" : "now";
+  var now = [];
+  var history = [];
+  function planItem(plan, goal){
+    var tasks = [];
+    WORK_COLUMN_CODES.forEach(function(code){
+      ((plan && plan.columns && plan.columns[code]) || []).forEach(function(card){
+        tasks.push({
+          kind: "task",
+          id: String(card.taskId || card.id || ""),
+          name: card.name || "",
+          objective: "",
+          status: code,
+          cue: card.nextAction || card.nextActionMessage || "",
+          breadcrumb: card.breadcrumb || null
+        });
+      });
+    });
+    return {
+      kind: goal ? "goal-plan" : "plan",
+      id: String((plan && plan.planId) || ""),
+      name: (plan && plan.name) || "",
+      objective: (plan && plan.objective) || "",
+      status: "",
+      terminal: workLaneIsTerminalHistory(plan && plan.columns),
+      decisionCount: (((plan && plan.columns) || {})["waiting-user-decision"] || []).length,
+      taskCount: tasks.length,
+      cue: workPortfolioCue((plan && plan.summary) || {}),
+      goalId: goal ? String(goal.goalId || "") : "",
+      goalName: goal ? String(goal.name || "") : "",
+      current: !!(goal && String(goal.currentPlanId || "") === String((plan && plan.planId) || "")),
+      tasks: tasks
+    };
+  }
+  (view && view.goals || []).forEach(function(goal){
+    var item = {
+      kind: "goal",
+      id: String(goal.goalId || ""),
+      name: goal.name || "",
+      objective: goal.objective || "",
+      status: goal.status || "",
+      terminal: workGoalIsTerminalStatusForSelection(goal),
+      decisionCount: workGoalDecisionCount(goal),
+      taskCount: workGoalTaskCount(goal),
+      cue: workPortfolioCue(goal.summary || {}, {
+        completedNoDecision: goal.status === "completed" && workGoalDecisionCount(goal) === 0
+      }),
+      plans: (goal.plans || []).map(function(plan){ return planItem(plan, goal); })
+    };
+    if(!item.id) return;
+    if(item.terminal) history.push(item);
+    else now.push(item);
+  });
+  (view && view.independentPlans || []).forEach(function(plan){
+    var live = !workLaneIsTerminalHistory(plan.columns);
+    var item = planItem(plan, null);
+    if(!item.id) return;
+    if(live) now.push(item);
+    else history.push(item);
+  });
+  if(view && view.oneOffTasks){
+    var oneOffLive = !workLaneIsTerminalHistory(view.oneOffTasks.columns);
+    var item = {
+      kind: "one-off",
+      id: "inbox",
+      name: "",
+      objective: "",
+      status: "",
+      terminal: !oneOffLive,
+      decisionCount: ((view.oneOffTasks.columns && view.oneOffTasks.columns["waiting-user-decision"]) || []).length,
+      taskCount: workOneOffCardCount(view),
+      cue: workPortfolioCue(view.oneOffTasks.summary || {})
+    };
+    if(oneOffLive) now.push(item);
+    else history.push(item);
+  }
+  var source = scope === "history" ? history : now;
+  return {
+    now: now,
+    history: history,
+    scope: scope,
+    query: query,
+    visible: source.filter(function(entry){ return workTreeItemMatches(entry, query); })
+  };
+}
+function composeGoalFileModel(goal, viewedPlan){
+  var decisionCount = workGoalDecisionCount(goal);
+  var viewed = viewedPlan || workGoalCurrentPlan(goal);
+  var currentIndex = viewed && goal ? (goal.plans || []).indexOf(viewed) : -1;
+  if(currentIndex < 0 && viewed && goal){
+    currentIndex = (goal.plans || []).findIndex(function(plan){
+      return String(plan.planId || "") === String(viewed.planId || "");
+    });
+  }
+  var phaseState = currentIndex >= 0 ? workGoalPhaseState(goal, currentIndex) : "unknown";
+  var currentCards = [];
+  var blockedCards = [];
+  var historyCards = [];
+  if(viewed && viewed.columns){
+    GOAL_FILE_CURRENT_CODES.forEach(function(code){
+      ((viewed.columns[code]) || []).forEach(function(card){ currentCards.push(card); });
+    });
+    GOAL_FILE_BLOCKED_CODES.forEach(function(code){
+      ((viewed.columns[code]) || []).forEach(function(card){ blockedCards.push(card); });
+    });
+    GOAL_FILE_HISTORY_CODES.forEach(function(code){
+      ((viewed.columns[code]) || []).forEach(function(card){ historyCards.push(card); });
+    });
+  }
+  var currentTask = currentCards[0] || blockedCards[0] || null;
+  var blockers = [];
+  if(workLaneHasRealBlocker(goal && goal.summary && goal.summary.blocker, goal && goal.summary && goal.summary.blockerMessage)){
+    blockers.push({
+      source: "goal",
+      text: workNarrativeText(goal.summary.blockerMessage, goal.summary.blocker)
+    });
+  }
+  function pushCardBlocker(card){
+    var fact = workNarrativeText(card.whatCompletedMessage, card.whatCompleted || "");
+    var next = workLaneNextActionText(card, {});
+    var label = "";
+    (card.blockers || []).forEach(function(blocker){
+      if(!label) label = workSafeCardBlockerLabel(card, blocker);
+    });
+    if(!fact && !next && !label) return;
+    blockers.push({
+      source: "task",
+      taskId: card.taskId,
+      text: label || next || fact,
+      fact: fact,
+      reason: label || next,
+      retained: fact,
+      next: next
+    });
+  }
+  blockedCards.forEach(pushCardBlocker);
+  currentCards.concat(historyCards).forEach(function(card){
+    (card.blockers || []).forEach(function(blocker){
+      var label = workSafeCardBlockerLabel(card, blocker);
+      if(label) blockers.push({ source: "task", taskId: card.taskId, text: label });
+    });
+  });
+  return {
+    desiredResult: (goal && goal.objective) || "",
+    currentTruth: workSummaryWhat(goal && goal.summary),
+    decisionNeeded: decisionCount > 0,
+    decisionCount: decisionCount,
+    phase: viewed || null,
+    phaseState: phaseState,
+    currentTask: currentTask,
+    currentCards: currentCards,
+    blockedCards: blockedCards,
+    historyCards: historyCards,
+    blockers: blockers,
+    terminal: workGoalIsTerminalStatusForSelection(goal),
+    status: (goal && goal.status) || "",
+    nextAction: workSummaryNext(goal && goal.summary, {
+      completedNoDecision: !!(goal && goal.status === "completed" && decisionCount === 0)
+    }),
+    sectionOrder: [
+      "desired-result", "current-truth", "decision", "phase",
+      "current-task", "blockers", "delivery", "evidence"
+    ]
+  };
+}
+function collectDecisionGroups(view){
+  var byGoal = {};
+  var order = [];
+  var parentless = [];
+  function add(card, goalId, goalName){
+    if(!card || card.column !== "waiting-user-decision") return;
+    var item = {
+      taskId: card.taskId,
+      name: card.name || "",
+      fact: workNarrativeText(card.whatCompletedMessage, card.whatCompleted || ""),
+      reason: workNarrativeText(card.nextActionMessage, card.nextAction || ""),
+      retained: workNarrativeText(card.whatCompletedMessage, card.whatCompleted || ""),
+      impact: workPlacementLabel(card.placementReason),
+      card: card,
+      goalId: goalId || "",
+      goalName: goalName || ""
+    };
+    if(!goalId){
+      parentless.push(item);
+      return;
+    }
+    if(!byGoal[goalId]){
+      byGoal[goalId] = { goalId: goalId, goalName: goalName || "", items: [] };
+      order.push(goalId);
+    }
+    byGoal[goalId].items.push(item);
+  }
+  (view && view.goals || []).forEach(function(goal){
+    (goal.plans || []).forEach(function(plan){
+      ((plan.columns && plan.columns["waiting-user-decision"]) || []).forEach(function(card){
+        add(card, String(goal.goalId || ""), goal.name || "");
+      });
+    });
+  });
+  (view && view.independentPlans || []).forEach(function(plan){
+    ((plan.columns && plan.columns["waiting-user-decision"]) || []).forEach(function(card){
+      var crumb = card.breadcrumb || {};
+      add(card, crumb.goalId ? String(crumb.goalId) : "", crumb.goalName || "");
+    });
+  });
+  if(view && view.oneOffTasks){
+    ((view.oneOffTasks.columns && view.oneOffTasks.columns["waiting-user-decision"]) || []).forEach(function(card){
+      var crumb = card.breadcrumb || {};
+      add(card, crumb.goalId ? String(crumb.goalId) : "", crumb.goalName || "");
+    });
+  }
+  var groups = order.map(function(id){ return byGoal[id]; });
+  var total = parentless.length;
+  groups.forEach(function(group){ total += group.items.length; });
+  return { groups: groups, parentless: parentless, total: total };
+}
+function collectSetupBlockers(){
+  var hub = S.hub || {};
+  var daemon = hub.daemon || {};
+  var mains = hub.mains || [];
+  var models = (hub.modelCatalog && hub.modelCatalog.models) || [];
+  var workers = (hub.workerProfiles && hub.workerProfiles.profiles) || [];
+  var items = [];
+  if(!models.length){
+    items.push({ reason: t("readyModels"), next: "model", action: t("navModels") });
+  }
+  if(!workers.length){
+    items.push({ reason: t("readyWorkers"), next: "worker", action: t("navWorkers") });
+  }
+  var mainReady = mains.some(function(m){
+    return (m.plugin && m.plugin.installed) || (m.mcp && m.mcp.installed) || (m.skill && m.skill.installed);
+  });
+  if(!mainReady){
+    items.push({ reason: t("readyMain"), next: "mains", action: t("navMain") });
+  }
+  if(!(daemon.running === true || daemon.pid != null)){
+    items.push({ reason: t("readyDaemon"), next: "work", action: t("ovDaemon") });
+  }
+  return items;
+}
+function workApplyTreeWidth(px){
+  var width = workNormalizeTreeWidth(px);
+  S.workTreeWidth = width;
+  var tree = viewEl && viewEl.querySelector('[data-fl-role="goal-tree"]');
+  if(tree) tree.setAttribute("style", "--goal-tree-width:" + width + "px");
+  var layout = viewEl && viewEl.querySelector('[data-fl-role="workbench-layout"]');
+  if(layout) layout.setAttribute("style", "--goal-tree-width:" + width + "px");
+  return width;
+}
+function workApplyMobilePane(pane){
+  S.workMobilePane = pane === "file" || pane === "detail" ? pane : "tree";
+  var layout = viewEl && viewEl.querySelector('[data-fl-role="workbench-layout"]');
+  if(layout) layout.setAttribute("data-mobile-pane", S.workMobilePane);
+  if(document && document.body){
+    document.body.setAttribute("data-mobile-pane", S.workMobilePane);
+    document.body.setAttribute("data-hub-tab", S.tab || "work");
+  }
+  workUpdateMobileBack();
+}
+/* Narrow Goal-file entry must start at the Goal header and result, not at the
+ * leftover tree/page scroll. Background polls keep restore; only a deliberate
+ * open-file action calls this. */
+function workApplyGoalFileStart(){
+  if(!workIsNarrowViewport()) return;
+  if(!S || S.workMobilePane !== "file") return;
+  /* Force header-top after any earlier focus/scrollIntoView. Do not
+   * call scrollIntoView here: it reintroduces the 80px page offset. */
+  try {
+    var fileHost = viewEl && viewEl.querySelector('[data-fl-role="goal-file-host"]');
+    if(fileHost) fileHost.scrollTop = 0;
+  } catch(_){}
+  try {
+    var content = workContentScrollEl();
+    if(content){
+      content.scrollTop = 0;
+      content.scrollLeft = 0;
+    }
+  } catch(_){}
+}
+function workUpdateMobileBack(){
+  var btn = document.getElementById("fl-mobile-back");
+  if(!btn) return;
+  var narrow = workIsNarrowViewport();
+  var show = false;
+  if(narrow && S.detail) show = true;
+  else if(narrow && (S.tab || "work") === "work" && S.workMobilePane !== "tree") show = true;
+  else if(narrow && S.tab === "decisions" && S.detail) show = true;
+  btn.hidden = !show;
+}
+function workBindViewportPresentation(){
+  try {
+    if(!window.matchMedia) return;
+    var mq = window.matchMedia("(max-width: 760px)");
+    if(mq.addEventListener) mq.addEventListener("change", workUpdateMobileBack);
+    else if(mq.addListener) mq.addListener(workUpdateMobileBack);
+  } catch(_){}
+}
+function systemMenuElement(){
+  return document.getElementById("fl-system-menu");
+}
+function systemMenuSummary(system){
+  return system ? system.querySelector("summary") : null;
+}
+function closeSystemMenu(opts){
+  var system = systemMenuElement();
+  if(!system || !system.open) return false;
+  system.open = false;
+  if(opts && opts.focusSummary){
+    var summary = systemMenuSummary(system);
+    if(summary && typeof summary.focus === "function") summary.focus();
+  }
+  return true;
+}
+function closeSystemMenuOnRouteSelection(){
+  closeSystemMenu();
+}
+function systemMenuEventIsInside(event){
+  var system = systemMenuElement();
+  if(!system || !event) return false;
+  var target = event.target;
+  return !!(target && system.contains(target));
+}
+function onSystemMenuPointerDown(event){
+  if(systemMenuEventIsInside(event)) return;
+  closeSystemMenu();
+}
+function onSystemMenuTouchStart(event){
+  if(systemMenuEventIsInside(event)) return;
+  closeSystemMenu();
+}
+function onSystemMenuEscape(event){
+  if(!event || event.key !== "Escape") return false;
+  var system = systemMenuElement();
+  if(!system || !system.open) return false;
+  closeSystemMenu({ focusSummary: true });
+  return true;
+}
+function workMobileBack(){
+  if(S.detail){
+    hideDetail();
+    workApplyMobilePane(workNextMobilePane("detail", "back"));
+    return;
+  }
+  workApplyMobilePane(workNextMobilePane(S.workMobilePane, "back"));
+  /* Returning to the tree must not leave the page scrolled to the Goal file.
+   * The tree keeps its own reading position on [data-fl-role="goal-tree"]. */
+  if(S.workMobilePane === "tree" && workIsNarrowViewport()){
+    try {
+      var content = workContentScrollEl();
+      if(content){
+        content.scrollTop = 0;
+        content.scrollLeft = 0;
+      }
+    } catch(_){}
+  }
+}
+function updateProductNav(){
+  var effective = S.tab || "work";
+  $$("#fl-tabs [data-tab]").forEach(function(b){
+    var tab = b.getAttribute("data-tab");
+    var active = tab === effective
+      || (tab === "work" && effective !== "work" && LEGACY_TAB_REDIRECT[effective] === "work");
+    b.classList.toggle("active", active);
+  });
+  var system = document.getElementById("fl-system-menu");
+  if(system){
+    system.classList.toggle("is-active", SYSTEM_TABS.indexOf(effective) >= 0);
+  }
+  workUpdateMobileBack();
+}
 /* FL-112E9: apply a pending created-work navigation intent against the
  * refreshed canonical hierarchy only. Goal opens its Goal workspace; a
  * standalone Plan opens its Plan workspace; a parentless Task selects
@@ -4876,7 +5358,15 @@ function workOpenCreatedTaskDrawer(view){
 }
 function workSelectWorkspace(kind, id){
   var next = workMakeSelection(kind, id);
-  if(!next || workSelectionEqual(S.workSelection, next)) return;
+  if(!next) return;
+  if(workSelectionEqual(S.workSelection, next)){
+    if(workIsNarrowViewport() && S.workMobilePane !== "file" && S.workMobilePane !== "detail"){
+      workApplyMobilePane(workNextMobilePane(S.workMobilePane || "tree", "open-file"));
+      workApplyGoalFileStart();
+      workScheduleReadingContextSave();
+    }
+    return;
+  }
   S.workSelection = next;
   workBoardFocusRequest = { key: workSelectionKey(next) };
   if(next.kind === "goal"){
@@ -4886,18 +5376,18 @@ function workSelectWorkspace(kind, id){
   workActionChooserReset();
   workPendingHandoffReset();
   hideDetail();
+  if(workIsNarrowViewport()) workApplyMobilePane(workNextMobilePane(S.workMobilePane, "open-file"));
   render();
-  /* On a stacked narrow layout, the portfolio can contain a long Finished
-   * history. A deliberate selection should reveal the selected workspace,
-   * while background refreshes continue to preserve the reader's position. */
+  /* On a stacked narrow layout, a deliberate selection opens the Goal file
+   * pane at its header and result. Background refreshes keep the position. */
   try {
-    if(window.matchMedia && window.matchMedia("(max-width: 900px)").matches){
+    if(workIsNarrowViewport()){
       var focused = viewEl && viewEl.querySelector('[data-fl-role="work-focus"]');
       if(focused){
         focused.setAttribute("tabindex", "-1");
         try { focused.focus({ preventScroll: true }); } catch(_){ focused.focus(); }
-        focused.scrollIntoView({ block: "start" });
       }
+      workApplyGoalFileStart();
     }
   } catch(_){}
   workScheduleReadingContextSave();
@@ -6305,55 +6795,6 @@ function workGoalCurrentPlan(goal){
   }
   return current;
 }
-/* Narrow-only bridge to the one existing New work composer. Scrolls and
- * focuses the already-mounted outcome targets; never submits, rewrites,
- * refreshes, or invents a second composer. Missing targets are a safe no-op. */
-function workRevealNewEntry(){
-  var section = document.querySelector('[data-fl-role="outcome-section"]');
-  var text = document.querySelector('[data-fl-role="outcome-text"]');
-  if(!section && !text) return;
-  var scrollTarget = section || text;
-  if(scrollTarget && scrollTarget.scrollIntoView){
-    try { scrollTarget.scrollIntoView({ block: "start" }); }
-    catch(_){
-      try { scrollTarget.scrollIntoView(true); } catch(__){}
-    }
-  }
-  if(text && typeof text.focus === "function"){
-    try { text.focus({ preventScroll: true }); }
-    catch(_){
-      try { text.focus(); } catch(__){}
-    }
-  }
-}
-function renderWorkContextHeader(view, selection){
-  var header = h("section", "work-context-header");
-  header.setAttribute("data-fl-role", "work-context-header");
-  var path = t("workContextOneOffPath");
-  var hint = t("workContextOneOffHint");
-  if(selection && selection.kind === "goal"){
-    path = t("workContextGoalPath");
-    hint = t("workContextGoalHint");
-  } else if(selection && selection.kind === "plan"){
-    path = t("workContextPlanPath");
-    hint = t("workContextPlanHint");
-  }
-  var head = h("div", "work-context-head");
-  var titles = h("div", "work-context-titles");
-  titles.appendChild(h("div", "work-context-title", t("workContextTitle")));
-  titles.appendChild(h("div", "work-context-path", path));
-  head.appendChild(titles);
-  /* Narrow screens only: desktop already sees the rail composer. The action
-   * reuses the localized New work label and targets the one mounted composer. */
-  var newBtn = h("button", "btn work-context-new-entry", t("workNewEntryLabel"));
-  newBtn.type = "button";
-  newBtn.setAttribute("data-fl-role", "work-context-new-entry");
-  newBtn.addEventListener("click", function(){ workRevealNewEntry(); });
-  head.appendChild(newBtn);
-  header.appendChild(head);
-  header.appendChild(h("p", "work-context-hint", hint));
-  return header;
-}
 function renderWorkGoalSummary(goal, decisionCount){
   var details = document.createElement("details");
   details.className = "work-goal-summary";
@@ -6380,35 +6821,153 @@ function renderWorkGoalSummary(goal, decisionCount){
   });
   return details;
 }
+function renderGoalFileSection(role, title, body, extraClass){
+  var section = h("section", "goal-file-section" + (extraClass ? " " + extraClass : ""));
+  section.setAttribute("data-fl-role", role);
+  if(title) section.appendChild(h("h3", "goal-file-heading", title));
+  if(body) section.appendChild(body);
+  return section;
+}
+function renderGoalFileTaskLine(card){
+  var wrap = h("div", "goal-file-task");
+  wrap.appendChild(renderWorkCard(card));
+  var facts = h("div", "goal-file-task-facts");
+  var fact = workNarrativeText(card.whatCompletedMessage, card.whatCompleted || "");
+  if(fact) facts.appendChild(h("p", "goal-file-fact", t("goalFileFact", { text: fact })));
+  var reason = workCardPrimaryLine(card);
+  if(reason) facts.appendChild(h("p", "goal-file-reason", t("goalFileReason", { text: reason })));
+  var retained = workNarrativeText(card.whatCompletedMessage, card.whatCompleted || "");
+  if(retained) facts.appendChild(h("p", "goal-file-retained", t("goalFileRetained", { text: retained })));
+  if(facts.childNodes.length) wrap.appendChild(facts);
+  return wrap;
+}
 function renderWorkFocusedGoal(goal){
-  var focus = h("section", "work-focus");
+  var focus = h("section", "work-focus goal-file");
   focus.setAttribute("data-fl-role", "work-focus");
   focus.setAttribute("data-workspace-kind", "goal");
   focus.setAttribute("data-workspace-id", String(goal.goalId || ""));
+  var viewedPlan = workGoalViewedPlan(goal) || workGoalCurrentPlan(goal);
+  var model = composeGoalFileModel(goal, viewedPlan);
   var header = h("header", "work-focus-header");
   var titleRow = h("div", "work-focus-title-row");
   titleRow.appendChild(h("span", "work-focus-type", t("workGoalType")));
   titleRow.appendChild(h("h2", "work-focus-title", goal.name || t("workUntitledGoal")));
   if(goal.status) titleRow.appendChild(badge(goal.status));
   header.appendChild(titleRow);
-  if(goal.objective) header.appendChild(h("p", "work-focus-objective", goal.objective));
-  header.appendChild(h("p", "work-focus-ancestry", t("workGoalWorkspaceHint")));
   focus.appendChild(header);
-  var decisionCount = workGoalDecisionCount(goal);
-  focus.appendChild(renderWorkGoalSummary(goal, decisionCount));
-  var viewedPlan = workGoalViewedPlan(goal) || workGoalCurrentPlan(goal);
-  focus.appendChild(renderWorkCurrentPhase(goal, viewedPlan));
+
+  var resultBody = h("div", "goal-file-body");
+  resultBody.appendChild(h("p", "goal-file-lead", model.desiredResult || t("goalFileResultMissing")));
+  focus.appendChild(renderGoalFileSection("goal-file-result", t("goalFileResult"), resultBody));
+
+  var truthBody = h("div", "goal-file-body");
+  truthBody.appendChild(h("p", "goal-file-lead", model.currentTruth || t("workNoneYet")));
+  focus.appendChild(renderGoalFileSection("goal-file-truth", t("goalFileTruth"), truthBody));
+
+  var decisionBody = h("div", "goal-file-body");
+  if(model.decisionNeeded){
+    decisionBody.appendChild(h("p", "goal-file-lead is-attention", t("goalFileDecisionYes", {
+      count: String(model.decisionCount)
+    })));
+    var openDecisions = h("button", "btn primary sm", t("goalFileOpenDecisions"));
+    openDecisions.type = "button";
+    openDecisions.setAttribute("data-fl-role", "goal-file-open-decisions");
+    openDecisions.addEventListener("click", function(){ switchTab("decisions"); });
+    decisionBody.appendChild(openDecisions);
+  } else {
+    decisionBody.appendChild(h("p", "goal-file-lead", t("goalFileDecisionNo")));
+  }
+  focus.appendChild(renderGoalFileSection("goal-file-decision", t("goalFileDecision"), decisionBody));
+
+  var phaseWrap = h("div", "goal-file-body");
+  phaseWrap.appendChild(renderWorkCurrentPhase(goal, viewedPlan));
+  focus.appendChild(renderGoalFileSection("goal-file-phase", t("goalFilePhase"), phaseWrap));
+
+  var taskBody = h("div", "goal-file-body");
+  if(model.currentTask){
+    taskBody.appendChild(h("p", "goal-file-next", t("goalFileNext", { text: model.nextAction })));
+    taskBody.appendChild(renderGoalFileTaskLine(model.currentTask));
+    var moreCards = [];
+    model.currentCards.forEach(function(card){
+      if(card !== model.currentTask) moreCards.push(card);
+    });
+    (model.blockedCards || []).forEach(function(card){
+      if(card !== model.currentTask) moreCards.push(card);
+    });
+    if(moreCards.length){
+      var more = h("div", "goal-file-more-tasks");
+      moreCards.forEach(function(card){ more.appendChild(renderWorkCard(card)); });
+      taskBody.appendChild(more);
+    }
+  } else {
+    taskBody.appendChild(stateMsg("empty", t("workCurrentPhaseEmpty")));
+  }
+  focus.appendChild(renderGoalFileSection("goal-file-task", t("goalFileTask"), taskBody));
+
+  var blockerBody = h("div", "goal-file-body");
+  var setupBlockers = collectSetupBlockers();
+  if(!model.blockers.length && !setupBlockers.length){
+    blockerBody.appendChild(h("p", "goal-file-lead", t("goalFileNoBlockers")));
+  } else {
+    model.blockers.forEach(function(blocker){
+      var item = h("div", "goal-file-blocker-item");
+      if(blocker.fact){
+        item.appendChild(h("p", "goal-file-fact", t("goalFileFact", { text: blocker.fact })));
+      }
+      item.appendChild(h("p", "goal-file-blocker", t("goalFileReason", {
+        text: blocker.reason || blocker.text
+      })));
+      if(blocker.retained){
+        item.appendChild(h("p", "goal-file-retained", t("goalFileRetained", { text: blocker.retained })));
+      }
+      if(blocker.next){
+        item.appendChild(h("p", "goal-file-next", t("goalFileNext", { text: blocker.next })));
+      }
+      blockerBody.appendChild(item);
+    });
+    setupBlockers.forEach(function(item){
+      var row = h("div", "goal-file-setup-blocker");
+      row.appendChild(h("p", "goal-file-blocker", t("setupBlockerReason", { text: item.reason })));
+      var go = h("button", "btn sm", t("setupBlockerNext", { action: item.action }));
+      go.type = "button";
+      go.addEventListener("click", function(){ switchTab(item.next); });
+      row.appendChild(go);
+      blockerBody.appendChild(row);
+    });
+  }
+  focus.appendChild(renderGoalFileSection("goal-file-blockers", t("goalFileBlockers"), blockerBody));
+
+  var deliveryBody = h("div", "goal-file-body");
+  if(model.terminal){
+    deliveryBody.appendChild(h("p", "goal-file-lead", t("goalFileDeliveryDone", {
+      status: statusLabel(model.status)
+    })));
+  } else {
+    deliveryBody.appendChild(h("p", "goal-file-lead", t("goalFileDeliveryLive")));
+  }
+  if(model.historyCards.length){
+    model.historyCards.forEach(function(card){ deliveryBody.appendChild(renderWorkCard(card)); });
+  }
+  focus.appendChild(renderGoalFileSection("goal-file-delivery", t("goalFileDelivery"), deliveryBody));
+
+  var evidence = document.createElement("details");
+  evidence.className = "goal-file-evidence work-goal-summary";
+  evidence.setAttribute("data-fl-role", "goal-file-evidence");
+  var evSummary = document.createElement("summary");
+  evSummary.textContent = t("goalFileEvidence");
+  evidence.appendChild(evSummary);
+  var evBody = h("div", "goal-file-evidence-body");
+  evBody.appendChild(renderWorkGoalSummary(goal, model.decisionCount));
   if(viewedPlan){
-    var viewedIndex = (goal.plans || []).indexOf(viewedPlan);
-    focus.appendChild(renderWorkTaskBoard(viewedPlan.columns || {},
+    evBody.appendChild(renderWorkTaskBoard(viewedPlan.columns || {},
       "workPhaseTasksTitle", "workGoalTasksHint", {
         planId: viewedPlan.planId,
         phaseName: viewedPlan.name || t("workUntitledPlan"),
-        phaseState: workGoalPhaseState(goal, viewedIndex < 0 ? 0 : viewedIndex)
+        phaseState: model.phaseState
       }));
-  } else {
-    focus.appendChild(stateMsg("empty", t("workCurrentPhaseEmpty")));
   }
+  evidence.appendChild(evBody);
+  focus.appendChild(evidence);
   return focus;
 }
 function renderWorkFocusedPlan(plan){
@@ -6626,50 +7185,335 @@ function renderWorkPortfolioGroup(title, items, emptyText){
   else if(emptyText) group.appendChild(h("p", "work-portfolio-empty", emptyText));
   return group;
 }
-function renderWorkNewEntry(){
-  var entry = h("section", "work-new-entry");
+function workCreateTargetEqual(left, right){
+  if(!left || !right) return false;
+  return String(left.shape || "") === String(right.shape || "")
+    && String(left.goalId || "") === String(right.goalId || "")
+    && String(left.planId || "") === String(right.planId || "");
+}
+function workOpenCreateTarget(target){
+  if(!target || ["goal", "plan", "task"].indexOf(target.shape) < 0) return;
+  S.workCreateTarget = {
+    shape: target.shape,
+    goalId: String(target.goalId || ""),
+    goalName: String(target.goalName || ""),
+    planId: String(target.planId || ""),
+    planName: String(target.planName || "")
+  };
+  S.outcomeDraft.requestedShape = target.shape;
+  S.outcomeCreateError = null;
+  render();
+  setTimeout(function(){
+    var textarea = viewEl && viewEl.querySelector('[data-fl-role="outcome-text"]');
+    if(textarea && typeof textarea.focus === "function") textarea.focus();
+  }, 0);
+}
+function renderWorkCreateButton(label, target, className){
+  var button = h("button", "work-tree-add " + (className || ""), label);
+  button.type = "button";
+  button.setAttribute("data-fl-role", "work-tree-add-" + target.shape);
+  button.setAttribute("data-create-shape", target.shape);
+  if(target.goalId) button.setAttribute("data-goal-id", String(target.goalId));
+  if(target.planId) button.setAttribute("data-plan-id", String(target.planId));
+  button.addEventListener("click", function(e){
+    e.preventDefault();
+    e.stopPropagation();
+    workOpenCreateTarget(target);
+  });
+  return button;
+}
+function renderWorkContextualComposer(target){
+  if(!workCreateTargetEqual(S.workCreateTarget, target)) return null;
+  var entry = h("section", "work-new-entry work-contextual-create");
   entry.setAttribute("data-fl-role", "work-new-entry");
-  entry.setAttribute("aria-label", t("workNewEntryLabel"));
-  entry.appendChild(renderOutcomeSection());
-  entry.appendChild(renderWorkShapeGuide());
+  entry.setAttribute("aria-label", workCreateTitle(target));
+  entry.appendChild(renderOutcomeSection({ target: target, includeStory: false }));
   return entry;
 }
-function renderWorkPortfolio(view, selection){
-  var rail = h("aside", "work-portfolio");
-  rail.setAttribute("data-fl-role", "work-portfolio");
-  rail.setAttribute("aria-label", t("workPortfolioLabel"));
-  rail.appendChild(h("h2", "work-portfolio-title", t("workPortfolioTitle")));
-  rail.appendChild(h("p", "work-portfolio-hint", t("workPortfolioHint")));
-  rail.appendChild(renderWorkNewEntry());
-  var activeGoals = (view.goals || []).filter(function(goal){ return !workGoalIsTerminalStatusForSelection(goal); });
-  activeGoals.sort(function(a, b){ return Number(workGoalNeedsAttention(b)) - Number(workGoalNeedsAttention(a)); });
-  function goalOptions(goals){
-    return goals.map(function(goal){
-      return renderWorkWorkspaceOption("goal", goal.goalId, goal.name || t("workUntitledGoal"),
-        workPortfolioCue(goal.summary, { completedNoDecision: false }), workGoalTaskCount(goal),
-        workSelectionEqual(selection, workMakeSelection("goal", goal.goalId)), goal.status);
+function renderWorkNewEntry(){
+  var target = { shape: "goal", goalId: "", goalName: "", planId: "", planName: "" };
+  var entry = h("div", "work-tree-root-action");
+  entry.setAttribute("data-fl-role", "work-new-entry");
+  entry.appendChild(renderWorkCreateButton(t("workTreeNewGoal"), target, "is-root"));
+  var composer = renderWorkContextualComposer(target);
+  if(composer) entry.appendChild(composer);
+  return entry;
+}
+function workSelectGoalPlan(goalId, planId){
+  var view;
+  try { view = normalizeWorkHierarchy(S.workHierarchy); } catch(_){ return; }
+  var goal = (view.goals || []).find(function(item){
+    return String(item.goalId || "") === String(goalId || "");
+  });
+  var plan = goal && (goal.plans || []).find(function(item){
+    return String(item.planId || "") === String(planId || "");
+  });
+  if(!goal || !plan) return;
+  S.workSelection = workMakeSelection("goal", goalId);
+  S.workViewedGoalId = String(goalId);
+  S.workViewedPlanId = String(planId);
+  workBoardFocusRequest = { key: workSelectionKey(S.workSelection) };
+  workActionChooserReset();
+  workPendingHandoffReset();
+  hideDetail();
+  if(workIsNarrowViewport()) workApplyMobilePane(workNextMobilePane(S.workMobilePane, "open-file"));
+  render();
+  if(workIsNarrowViewport()) workApplyGoalFileStart();
+  workScheduleReadingContextSave();
+}
+function renderWorkTreeDisclosure(kind, id, body, expanded){
+  var toggle = h("button", "work-tree-disclosure", expanded ? "▾" : "▸");
+  toggle.type = "button";
+  toggle.setAttribute("data-fl-role", "work-tree-disclosure");
+  toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+  toggle.setAttribute("aria-controls", body.id);
+  toggle.setAttribute("aria-label", expanded ? t("workTreeCollapse") : t("workTreeExpand"));
+  toggle.addEventListener("click", function(){
+    expanded = !expanded;
+    body.hidden = !expanded;
+    toggle.textContent = expanded ? "▾" : "▸";
+    toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+    toggle.setAttribute("aria-label", expanded ? t("workTreeCollapse") : t("workTreeExpand"));
+  });
+  return toggle;
+}
+function renderWorkTreeTask(item){
+  var button = h("button", "work-tree-task");
+  button.type = "button";
+  button.setAttribute("data-fl-role", "work-tree-task");
+  button.setAttribute("data-task-id", String(item.id || ""));
+  button.addEventListener("click", function(){ showTask(item.id, item.breadcrumb); });
+  var copy = h("span", "work-tree-task-copy");
+  copy.appendChild(h("span", "work-tree-task-name", item.name || t("taskUntitled")));
+  copy.appendChild(h("span", "work-tree-task-state", workColumnLabel(item.status)));
+  button.appendChild(h("span", "work-tree-branch-dot", ""));
+  button.appendChild(copy);
+  return button;
+}
+function renderWorkTreePlan(item, selection){
+  var nested = item.kind === "goal-plan";
+  var selected = nested
+    ? !!(selection && selection.kind === "goal" && String(selection.id) === String(item.goalId)
+      && (String(S.workViewedPlanId || "") === String(item.id)
+        || (!S.workViewedPlanId && item.current)))
+    : workSelectionEqual(selection, workMakeSelection("plan", item.id));
+  var node = h("section", "work-tree-node work-tree-plan" + (selected ? " is-selected" : ""));
+  node.setAttribute("data-fl-role", nested ? "work-tree-goal-plan" : "work-tree-independent-plan");
+  node.setAttribute("data-plan-id", String(item.id || ""));
+  var body = h("div", "work-tree-children work-tree-task-list");
+  body.id = workLaneId("tree-plan", (item.goalId || "independent") + "-" + item.id);
+  var expanded = selected || !!S.workTreeQuery || item.tasks.length <= 6;
+  body.hidden = !expanded;
+  var row = h("div", "work-tree-row work-tree-plan-row");
+  row.appendChild(renderWorkTreeDisclosure("plan", item.id, body, expanded));
+  var select = h("button", "work-tree-select work-tree-plan-select");
+  select.type = "button";
+  select.setAttribute("data-fl-role", "work-tree-plan-select");
+  select.setAttribute("aria-pressed", selected ? "true" : "false");
+  select.appendChild(h("span", "work-tree-level", t("workTreePlanLevel")));
+  select.appendChild(h("span", "work-tree-name", item.name || t("workUntitledPlan")));
+  select.appendChild(h("span", "work-tree-count", String(item.taskCount || 0)));
+  select.addEventListener("click", function(){
+    if(nested) workSelectGoalPlan(item.goalId, item.id);
+    else workSelectWorkspace("plan", item.id);
+  });
+  row.appendChild(select);
+  var target = {
+    shape: "task",
+    goalId: item.goalId || "",
+    goalName: item.goalName || "",
+    planId: item.id,
+    planName: item.name || t("workUntitledPlan")
+  };
+  row.appendChild(renderWorkCreateButton(t("workTreeAddTask"), target));
+  node.appendChild(row);
+  var composer = renderWorkContextualComposer(target);
+  if(composer) body.appendChild(composer);
+  (item.tasks || []).forEach(function(task){ body.appendChild(renderWorkTreeTask(task)); });
+  if(!item.tasks.length) body.appendChild(h("p", "work-tree-empty-children", t("workTreeNoTasks")));
+  node.appendChild(body);
+  return node;
+}
+function renderWorkTreeGoal(item, selection){
+  var selected = workSelectionEqual(selection, workMakeSelection("goal", item.id));
+  var node = h("section", "work-tree-node work-tree-goal" + (selected ? " is-selected" : ""));
+  node.setAttribute("data-fl-role", "work-tree-goal");
+  node.setAttribute("data-goal-id", String(item.id || ""));
+  var body = h("div", "work-tree-children work-tree-plan-list");
+  body.id = workLaneId("tree-goal", item.id);
+  var expanded = selected || !!S.workTreeQuery || !item.terminal;
+  body.hidden = !expanded;
+  var row = h("div", "work-tree-row work-tree-goal-row");
+  row.appendChild(renderWorkTreeDisclosure("goal", item.id, body, expanded));
+  var select = h("button", "work-tree-select work-tree-goal-select");
+  select.type = "button";
+  select.setAttribute("data-fl-role", "work-tree-goal-select");
+  select.setAttribute("aria-pressed", selected ? "true" : "false");
+  select.appendChild(h("span", "work-tree-level", t("workTreeGoalLevel")));
+  select.appendChild(h("span", "work-tree-name", item.name || t("workUntitledGoal")));
+  if(item.decisionCount){
+    select.appendChild(h("span", "work-tree-attention", String(item.decisionCount)));
+  }
+  select.addEventListener("click", function(){ workSelectWorkspace("goal", item.id); });
+  row.appendChild(select);
+  var target = {
+    shape: "plan",
+    goalId: item.id,
+    goalName: item.name || t("workUntitledGoal"),
+    planId: "",
+    planName: ""
+  };
+  row.appendChild(renderWorkCreateButton(t("workTreeAddPlan"), target));
+  node.appendChild(row);
+  var composer = renderWorkContextualComposer(target);
+  if(composer) body.appendChild(composer);
+  (item.plans || []).forEach(function(plan){ body.appendChild(renderWorkTreePlan(plan, selection)); });
+  if(!item.plans.length) body.appendChild(h("p", "work-tree-empty-children", t("workTreeNoPlans")));
+  node.appendChild(body);
+  return node;
+}
+function renderWorkGoalTreeItem(item, selection){
+  if(item.kind === "goal") return renderWorkTreeGoal(item, selection);
+  if(item.kind === "plan") return renderWorkTreePlan(item, selection);
+  var selected = workSelectionEqual(selection, workMakeSelection("one-off", item.id));
+  var button = h("button", "work-tree-independent-tasks" + (selected ? " is-selected" : ""));
+  button.type = "button";
+  button.setAttribute("data-fl-role", "work-workspace-option");
+  button.setAttribute("data-workspace-kind", "one-off");
+  button.setAttribute("data-workspace-id", String(item.id || ""));
+  button.setAttribute("aria-pressed", selected ? "true" : "false");
+  button.addEventListener("click", function(){ workSelectWorkspace("one-off", item.id); });
+  button.appendChild(h("span", "work-tree-level", t("workTreeTaskLevel")));
+  button.appendChild(h("span", "work-tree-name", t("workIndependentTasks")));
+  button.appendChild(h("span", "work-tree-count", String(item.taskCount || 0)));
+  return button;
+}
+function renderWorkTreeList(items, selection){
+  var list = h("div", "goal-tree-list");
+  list.setAttribute("data-fl-role", "goal-tree-list");
+  var goals = (items || []).filter(function(item){ return item.kind === "goal"; });
+  var independent = (items || []).filter(function(item){ return item.kind !== "goal"; });
+  goals.forEach(function(item){ list.appendChild(renderWorkGoalTreeItem(item, selection)); });
+  if(independent.length){
+    var group = h("section", "work-tree-independent");
+    group.setAttribute("data-fl-role", "work-tree-independent");
+    group.appendChild(h("h3", "work-tree-independent-title", t("workTreeIndependent")));
+    independent.forEach(function(item){ group.appendChild(renderWorkGoalTreeItem(item, selection)); });
+    list.appendChild(group);
+  }
+  return list;
+}
+function renderWorkIntakeTray(){
+  if(S.intakes === null && !S.intakesError) return null;
+  if(Array.isArray(S.intakes) && !S.intakes.length && !S.intakesError) return null;
+  var tray = document.createElement("details");
+  tray.className = "work-intake-tray";
+  tray.setAttribute("data-fl-role", "work-intake-tray");
+  tray.open = !!S.selectedIntakeId;
+  var summary = document.createElement("summary");
+  summary.textContent = t("workIntakesTitle", {
+    count: String(Array.isArray(S.intakes) ? S.intakes.length : 0)
+  });
+  tray.appendChild(summary);
+  var body = h("div", "work-intake-tray-body");
+  body.appendChild(renderIntakeStory());
+  tray.appendChild(body);
+  return tray;
+}
+function workGoalTreeEmptyText(view, scope, query){
+  if(!query && scope !== "history"){
+    var applied = view && view.filter && view.filter.applied;
+    if(applied && (applied.project || applied.columns || applied.workerProfileId)){
+      return t("workFilterNoMatches");
+    }
+  }
+  return scope === "history" ? t("goalTreeEmptyHistory") : t("goalTreeEmptyNow");
+}
+function renderWorkGoalTree(view, selection){
+  var model = composeGoalTreeModel(view, S.workTreeQuery, S.workTreeScope);
+  var rail = h("aside", "work-portfolio goal-tree");
+  rail.setAttribute("data-fl-role", "goal-tree");
+  rail.setAttribute("aria-label", t("goalTreeLabel"));
+  rail.setAttribute("style", "--goal-tree-width:" + workNormalizeTreeWidth(S.workTreeWidth) + "px");
+  var header = h("div", "work-tree-header");
+  header.appendChild(h("h2", "work-portfolio-title", t("goalTreeLabel")));
+  header.appendChild(renderWorkCreateButton(t("workTreeNewGoal"), {
+    shape: "goal", goalId: "", goalName: "", planId: "", planName: ""
+  }, "is-root"));
+  rail.appendChild(header);
+  var search = document.createElement("form");
+  search.className = "goal-tree-search";
+  search.setAttribute("data-fl-role", "goal-tree-search");
+  search.setAttribute("role", "search");
+  var searchLabel = h("label", "goal-tree-search-field", "");
+  searchLabel.appendChild(h("span", "sr-only", t("goalTreeSearch")));
+  var searchInput = document.createElement("input");
+  searchInput.type = "search";
+  searchInput.maxLength = 120;
+  searchInput.className = "goal-tree-search-input";
+  searchInput.setAttribute("data-fl-role", "goal-tree-search-input");
+  searchInput.setAttribute("aria-label", t("goalTreeSearch"));
+  searchInput.placeholder = t("goalTreeSearch");
+  searchInput.value = String(S.workTreeQuery || "");
+  searchInput.addEventListener("input", function(){
+    S.workTreeQuery = String(searchInput.value || "").slice(0, 120);
+    workScheduleReadingContextSave();
+    var list = rail.querySelector('[data-fl-role="goal-tree-list"]');
+    if(!list || !list.parentNode) return;
+    var next = composeGoalTreeModel(view, S.workTreeQuery, S.workTreeScope);
+    var replacement;
+    if(!next.visible.length){
+      replacement = h("div", "goal-tree-list");
+      replacement.setAttribute("data-fl-role", "goal-tree-list");
+      replacement.appendChild(h("p", "work-portfolio-empty",
+        workGoalTreeEmptyText(view, next.scope, next.query)));
+    } else {
+      replacement = renderWorkTreeList(next.visible, selection);
+    }
+    list.parentNode.replaceChild(replacement, list);
+  });
+  searchLabel.appendChild(searchInput);
+  search.appendChild(searchLabel);
+  search.addEventListener("submit", function(e){ e.preventDefault(); });
+  rail.appendChild(search);
+
+  var scopes = h("div", "goal-tree-scopes");
+  scopes.setAttribute("role", "tablist");
+  ["now", "history"].forEach(function(scope){
+    var btn = h("button", "goal-tree-scope" + (model.scope === scope ? " is-selected" : ""));
+    btn.type = "button";
+    btn.setAttribute("data-fl-role", "goal-tree-" + scope);
+    btn.setAttribute("aria-pressed", model.scope === scope ? "true" : "false");
+    btn.textContent = scope === "history" ? t("goalTreeHistory") : t("goalTreeNow");
+    btn.addEventListener("click", function(){
+      S.workTreeScope = scope;
+      workScheduleReadingContextSave();
+      render();
     });
+    scopes.appendChild(btn);
+  });
+  rail.appendChild(scopes);
+  var rootComposer = renderWorkContextualComposer({
+    shape: "goal", goalId: "", goalName: "", planId: "", planName: ""
+  });
+  if(rootComposer) rail.appendChild(rootComposer);
+
+  var list;
+  if(!model.visible.length){
+    list = h("div", "goal-tree-list");
+    list.setAttribute("data-fl-role", "goal-tree-list");
+    list.appendChild(h("p", "work-portfolio-empty",
+      workGoalTreeEmptyText(view, model.scope, model.query)));
+  } else {
+    list = renderWorkTreeList(model.visible, selection);
   }
-  rail.appendChild(renderWorkPortfolioGroup(t("workPortfolioGoals"), goalOptions(activeGoals),
-    t("workPortfolioNoActiveGoals")));
-  var independent = view.independentPlans || [];
-  rail.appendChild(renderWorkPortfolioGroup(t("workPortfolioPlans"), independent.map(function(plan){
-    return renderWorkWorkspaceOption("plan", plan.planId, plan.name || t("workUntitledPlan"),
-      workPortfolioCue(plan.summary), workPlanTaskCount(plan),
-      workSelectionEqual(selection, workMakeSelection("plan", plan.planId)));
-  }), t("workPortfolioNoIndependentPlans")));
-  var oneOffItems = [];
-  if(view.oneOffTasks){
-    var oneOffCount = workOneOffCardCount(view);
-    oneOffItems.push(renderWorkWorkspaceOption("one-off", "inbox", t("workIndependentTasks"),
-      workPortfolioCue(view.oneOffTasks.summary), oneOffCount,
-      workSelectionEqual(selection, workMakeSelection("one-off", "inbox"))));
-  }
-  rail.appendChild(renderWorkPortfolioGroup(t("workPortfolioOneOff"), oneOffItems,
-    t("workPortfolioNoIndependentTasks")));
-  var finishedGoals = (view.goals || []).filter(function(goal){ return workGoalIsTerminalStatusForSelection(goal); });
-  rail.appendChild(renderWorkFinishedGoals(finishedGoals));
+  rail.appendChild(list);
+  var intakeTray = renderWorkIntakeTray();
+  if(intakeTray) rail.appendChild(intakeTray);
   return rail;
+}
+function renderWorkPortfolio(view, selection){
+  return renderWorkGoalTree(view, selection);
 }
 function renderWorkFocusedWorkspace(view, selection){
   if(!selection) return stateMsg("empty", t("workEmpty"));
@@ -6684,12 +7528,59 @@ function renderWorkFocusedWorkspace(view, selection){
   }
   return stateMsg("empty", t("workSelectionUnavailable"));
 }
+function renderWorkTreeResizeHandle(){
+  var handle = h("div", "goal-tree-resize");
+  handle.setAttribute("data-fl-role", "goal-tree-resize");
+  handle.setAttribute("role", "separator");
+  handle.setAttribute("aria-orientation", "vertical");
+  handle.setAttribute("aria-label", t("goalTreeResize"));
+  handle.setAttribute("tabindex", "0");
+  var dragging = false;
+  var startX = 0;
+  var startWidth = workNormalizeTreeWidth(S.workTreeWidth);
+  function applyFromClientX(clientX){
+    workApplyTreeWidth(startWidth + (clientX - startX));
+  }
+  handle.addEventListener("pointerdown", function(e){
+    dragging = true;
+    startX = e.clientX;
+    startWidth = workNormalizeTreeWidth(S.workTreeWidth);
+    handle.classList.add("is-dragging");
+    if(handle.setPointerCapture) handle.setPointerCapture(e.pointerId);
+  });
+  handle.addEventListener("pointermove", function(e){
+    if(!dragging) return;
+    applyFromClientX(e.clientX);
+  });
+  handle.addEventListener("pointerup", function(){
+    if(!dragging) return;
+    dragging = false;
+    handle.classList.remove("is-dragging");
+    workScheduleReadingContextSave();
+  });
+  handle.addEventListener("keydown", function(e){
+    var step = e.shiftKey ? 24 : 16;
+    if(e.key === "ArrowLeft"){
+      e.preventDefault();
+      workApplyTreeWidth(workNormalizeTreeWidth(S.workTreeWidth) - step);
+      workScheduleReadingContextSave();
+    } else if(e.key === "ArrowRight"){
+      e.preventDefault();
+      workApplyTreeWidth(workNormalizeTreeWidth(S.workTreeWidth) + step);
+      workScheduleReadingContextSave();
+    }
+  });
+  return handle;
+}
 function renderWorkWorkbench(view, selection){
   var layout = h("div", "workbench-layout");
   layout.setAttribute("data-fl-role", "workbench-layout");
+  layout.setAttribute("data-mobile-pane", S.workMobilePane || "tree");
+  layout.setAttribute("style", "--goal-tree-width:" + workNormalizeTreeWidth(S.workTreeWidth) + "px");
   layout.appendChild(renderWorkPortfolio(view, selection));
+  layout.appendChild(renderWorkTreeResizeHandle());
   var focused = h("div", "work-focused-column");
-  focused.appendChild(renderWorkContextHeader(view, selection));
+  focused.setAttribute("data-fl-role", "goal-file-host");
   focused.appendChild(renderWorkFocusedWorkspace(view, selection));
   focused.appendChild(renderWorkAdvanced(view, selection));
   layout.appendChild(focused);
@@ -7239,7 +8130,9 @@ function workReadingNormalizeRecord(raw){
     outcome: null,
     selectedIntakeId: "",
     confirmingIntakeId: "",
-    createdNavigate: null
+    createdNavigate: null,
+    tree: { query: "", width: 280, scope: "now" },
+    pane: "tree"
   };
   if(raw.workspace && typeof raw.workspace === "object" && !Array.isArray(raw.workspace)){
     var workspaceId = workReadingSafeString(raw.workspace.id);
@@ -7336,6 +8229,16 @@ function workReadingNormalizeRecord(raw){
       };
     }
   }
+  if(raw.tree && typeof raw.tree === "object" && !Array.isArray(raw.tree)){
+    record.tree.query = workReadingSafeString(raw.tree.query, 120);
+    var treeWidth = typeof raw.tree.width === "number" ? raw.tree.width : parseInt(raw.tree.width, 10);
+    if(!isFinite(treeWidth)) treeWidth = 280;
+    if(treeWidth < 200) treeWidth = 200;
+    if(treeWidth > 420) treeWidth = 420;
+    record.tree.width = Math.round(treeWidth);
+    record.tree.scope = raw.tree.scope === "history" ? "history" : "now";
+  }
+  if(raw.pane === "file" || raw.pane === "detail" || raw.pane === "tree") record.pane = raw.pane;
   return record;
 }
 function workReadSessionContext(){
@@ -7499,7 +8402,19 @@ function workBuildSessionContext(){
     outcome: workReadingOutcomeRecord(),
     selectedIntakeId: workReadingSafeString(S.selectedIntakeId || "", WORK_READING_CONTEXT_MAX_ID_CHARS),
     confirmingIntakeId: workReadingSafeString(S.outcomeConfirmingId || "", WORK_READING_CONTEXT_MAX_ID_CHARS),
-    createdNavigate: workReadingCreatedNavigateRecord()
+    createdNavigate: workReadingCreatedNavigateRecord(),
+    tree: {
+      query: workReadingSafeString(String(S.workTreeQuery || ""), 120),
+      width: (function(px){
+        var n = typeof px === "number" ? px : parseInt(px, 10);
+        if(!isFinite(n)) return 280;
+        if(n < 200) return 200;
+        if(n > 420) return 420;
+        return Math.round(n);
+      })(S.workTreeWidth),
+      scope: S.workTreeScope === "history" ? "history" : "now"
+    },
+    pane: S.workMobilePane === "file" || S.workMobilePane === "detail" ? S.workMobilePane : "tree"
   };
   WORK_READING_CONTEXT_DISCLOSURES.forEach(function(key){
     record.disclosures[key] = !!captured[key];
@@ -7648,7 +8563,9 @@ function workReadingContextToContinuity(view, record){
     oneOffHistoryOpen: false, shapeGuideOpen: false, pageStoryOpen: false,
     outcomeAdvancedOpen: false, focusKey: null, contentScrollTop: 0, contentScrollLeft: 0,
     boardScrollLeft: 0, boardScrollCaptured: false, detailOpen: false,
-    detailTaskId: null, detailTab: null, detailScrollTop: 0
+    detailTaskId: null, detailTab: null, detailScrollTop: 0,
+    treeWidth: 280, treeQuery: "", treeScope: "now",
+    mobilePane: "tree", goalFileEvidenceOpen: false, treeScrollTop: 0, fileScrollTop: 0
   };
   if(!record) return out;
   var disclosures = record.disclosures || {};
@@ -7669,6 +8586,18 @@ function workReadingContextToContinuity(view, record){
     out.detailTaskId = record.detail.taskId;
     out.detailTab = WORK_READING_CONTEXT_TABS.indexOf(record.detail.tab) >= 0
       ? record.detail.tab : "overview";
+  }
+  if(record.tree){
+    out.treeQuery = workReadingSafeString(record.tree.query, 120);
+    var continuityWidth = typeof record.tree.width === "number" ? record.tree.width : parseInt(record.tree.width, 10);
+    if(!isFinite(continuityWidth)) continuityWidth = 280;
+    if(continuityWidth < 200) continuityWidth = 200;
+    if(continuityWidth > 420) continuityWidth = 420;
+    out.treeWidth = Math.round(continuityWidth);
+    out.treeScope = record.tree.scope === "history" ? "history" : "now";
+  }
+  if(record.pane === "file" || record.pane === "detail" || record.pane === "tree"){
+    out.mobilePane = record.pane;
   }
   return out;
 }
@@ -7712,6 +8641,18 @@ function workApplySavedReadingContext(){
   S.workFilterDraft = savedDraft;
   S.workOneOffSearch = workReadingSafeString(record.search && record.search.oneOff, 120);
   S.workOneOffSearchDraft = workReadingSafeString(record.search && record.search.draft, 120);
+  if(record.tree){
+    S.workTreeQuery = workReadingSafeString(record.tree.query, 120);
+    var savedWidth = typeof record.tree.width === "number" ? record.tree.width : parseInt(record.tree.width, 10);
+    if(!isFinite(savedWidth)) savedWidth = 280;
+    if(savedWidth < 200) savedWidth = 200;
+    if(savedWidth > 420) savedWidth = 420;
+    S.workTreeWidth = Math.round(savedWidth);
+    S.workTreeScope = record.tree.scope === "history" ? "history" : "now";
+  }
+  if(record.pane === "file" || record.pane === "detail" || record.pane === "tree"){
+    S.workMobilePane = record.pane;
+  }
   /* FL-112E9: restore the bounded outcome draft, the selected intake, the open
    * confirmation step, and any valid created-navigation intent. Every value is
    * checked against the canonical intake list before it becomes visible. */
@@ -7872,7 +8813,13 @@ function workVisibleTruthSnapshot(){
     selectedIntakeId: S.selectedIntakeId || null,
     confirmingIntakeId: S.outcomeConfirmingId || null,
     createdNavigate: workStableTruthClone(S.outcomeCreatedNavigate, 0),
-    createdTaskDrawer: workStableTruthClone(S.outcomeCreatedTaskDrawer, 0)
+    createdTaskDrawer: workStableTruthClone(S.outcomeCreatedTaskDrawer, 0),
+    treeScope: S.workTreeScope === "history" ? "history" : "now",
+    treeQuery: String(S.workTreeQuery || ""),
+    mobilePane: S.workMobilePane || "tree",
+    /* Route is part of visible truth so Work and Decision Center cannot share
+     * one live mount when hierarchy cards are otherwise unchanged. */
+    tab: S.tab || "work"
   };
   try {
     return JSON.stringify(payload);
@@ -7880,13 +8827,20 @@ function workVisibleTruthSnapshot(){
     return "unserializable";
   }
 }
-/* True when the current #fl-view still holds a live Work mount (not another
- * page and not a loading/unavailable placeholder that wiped the board). */
+/* True when #fl-view still holds the live mount for the current route, not
+ * another page and not a loading/unavailable placeholder that wiped it. */
 function workDomIsLive(){
   if(!viewEl) return false;
   try {
+    var tab = S.tab || "work";
+    if(tab === "decisions"){
+      return !!(viewEl.querySelector('[data-fl-role="decision-center"]')
+        || viewEl.querySelector('[data-fl-role="work-hierarchy-error"]'));
+    }
+    if(tab !== "work") return false;
     return !!(viewEl.querySelector('[data-fl-role="work-board"]')
       || viewEl.querySelector('[data-fl-role="workbench-layout"]')
+      || viewEl.querySelector('[data-fl-role="goal-tree"]')
       || viewEl.querySelector('[data-fl-role="work-filters"]')
       || viewEl.querySelector('[data-fl-role="outcome-section"]')
       || viewEl.querySelector('[data-fl-role="work-hierarchy-error"]'));
@@ -7894,9 +8848,10 @@ function workDomIsLive(){
     return false;
   }
 }
-/* Keep Work DOM when presentation truth is unchanged and the mount is live. */
+/* Keep the live mount when route and presentation truth are unchanged. */
 function workShouldRetainDom(){
-  if((S.tab || "work") !== "work") return false;
+  var tab = S.tab || "work";
+  if(tab !== "work" && tab !== "decisions") return false;
   if(!workDomIsLive()) return false;
   if(S.workRenderSnapshot == null) return false;
   try {
@@ -7938,6 +8893,12 @@ function workSemanticFocusKey(el){
     return "workspace:" + String(el.getAttribute("data-workspace-kind") || "")
       + ":" + String(el.getAttribute("data-workspace-id") || "");
   }
+  if(role === "goal-tree-search-input") return "goal-tree-search";
+  if(role === "goal-tree-now") return "goal-tree-now";
+  if(role === "goal-tree-history") return "goal-tree-history";
+  if(role === "goal-tree-resize") return "goal-tree-resize";
+  if(role === "mobile-back") return "mobile-back";
+  if(role === "goal-file-open-decisions") return "goal-file-open-decisions";
   if(role === "work-filter-project") return "filter-project";
   if(role === "work-filter-column") return "filter-column";
   if(role === "work-filter-worker") return "filter-worker";
@@ -8059,7 +9020,13 @@ function workFindFocusTarget(key){
       "oneoff-current-toggle": "work-oneoff-current-toggle",
       "oneoff-attention-toggle": "work-oneoff-attention-toggle",
       "oneoff-history-toggle": "work-oneoff-history-toggle",
-      "page-story-toggle": "page-story-disclosure-toggle"
+      "page-story-toggle": "page-story-disclosure-toggle",
+      "goal-tree-search": "goal-tree-search-input",
+      "goal-tree-now": "goal-tree-now",
+      "goal-tree-history": "goal-tree-history",
+      "goal-tree-resize": "goal-tree-resize",
+      "mobile-back": "mobile-back",
+      "goal-file-open-decisions": "goal-file-open-decisions"
     };
     var role = roleMap[key];
     if(role) return viewEl.querySelector('[data-fl-role="' + role + '"]');
@@ -8105,7 +9072,20 @@ function workCaptureWorkbenchContext(){
     detailOpen: false,
     detailTaskId: null,
     detailTab: null,
-    detailScrollTop: 0
+    detailScrollTop: 0,
+    treeWidth: (function(px){
+      var n = typeof px === "number" ? px : parseInt(px, 10);
+      if(!isFinite(n)) return 280;
+      if(n < 200) return 200;
+      if(n > 420) return 420;
+      return Math.round(n);
+    })(S && S.workTreeWidth),
+    treeQuery: String((S && S.workTreeQuery) || ""),
+    treeScope: (S && S.workTreeScope) === "history" ? "history" : "now",
+    mobilePane: (S && S.workMobilePane) || "tree",
+    goalFileEvidenceOpen: false,
+    treeScrollTop: 0,
+    fileScrollTop: 0
   };
   if(!viewEl) return ctx;
   try {
@@ -8133,6 +9113,12 @@ function workCaptureWorkbenchContext(){
     if(oadv) ctx.outcomeAdvancedOpen = !!oadv.open;
     var shapeGuide = viewEl.querySelector('[data-fl-role="work-shape-guide"]');
     if(shapeGuide) ctx.shapeGuideOpen = !!shapeGuide.open;
+    var evidence = viewEl.querySelector('[data-fl-role="goal-file-evidence"]');
+    if(evidence) ctx.goalFileEvidenceOpen = !!evidence.open;
+    var tree = viewEl.querySelector('[data-fl-role="goal-tree"]');
+    if(tree) ctx.treeScrollTop = tree.scrollTop || 0;
+    var fileHost = viewEl.querySelector('[data-fl-role="goal-file-host"]');
+    if(fileHost) ctx.fileScrollTop = fileHost.scrollTop || 0;
     var board = viewEl.querySelector('[data-fl-role="work-board"]');
     if(board){
       ctx.boardScrollCaptured = true;
@@ -8219,6 +9205,42 @@ function workRestoreWorkbenchContext(ctx){
     if(shapeGuide && hasCaptured("shapeGuideOpen")){
       shapeGuide.open = !!ctx.shapeGuideOpen;
     }
+    var evidence = viewEl.querySelector('[data-fl-role="goal-file-evidence"]');
+    if(evidence && hasCaptured("goalFileEvidenceOpen")){
+      evidence.open = !!ctx.goalFileEvidenceOpen;
+    }
+    if(hasCaptured("treeWidth")){
+      var restoredWidth = typeof ctx.treeWidth === "number" ? ctx.treeWidth : parseInt(ctx.treeWidth, 10);
+      if(!isFinite(restoredWidth)) restoredWidth = 280;
+      if(restoredWidth < 200) restoredWidth = 200;
+      if(restoredWidth > 420) restoredWidth = 420;
+      restoredWidth = Math.round(restoredWidth);
+      if(S) S.workTreeWidth = restoredWidth;
+      var treeWidthNode = viewEl.querySelector('[data-fl-role="goal-tree"]');
+      if(treeWidthNode && treeWidthNode.setAttribute){
+        treeWidthNode.setAttribute("style", "--goal-tree-width:" + restoredWidth + "px");
+      }
+      var layoutWidthNode = viewEl.querySelector('[data-fl-role="workbench-layout"]');
+      if(layoutWidthNode && layoutWidthNode.setAttribute){
+        layoutWidthNode.setAttribute("style", "--goal-tree-width:" + restoredWidth + "px");
+      }
+    }
+    if(hasCaptured("treeQuery") && S) S.workTreeQuery = String(ctx.treeQuery || "");
+    if(hasCaptured("treeScope") && S && (ctx.treeScope === "now" || ctx.treeScope === "history")){
+      S.workTreeScope = ctx.treeScope;
+    }
+    if(hasCaptured("mobilePane") && S){
+      S.workMobilePane = (ctx.mobilePane === "file" || ctx.mobilePane === "detail")
+        ? ctx.mobilePane : "tree";
+    }
+    var tree = viewEl.querySelector('[data-fl-role="goal-tree"]');
+    if(tree && typeof ctx.treeScrollTop === "number") tree.scrollTop = ctx.treeScrollTop || 0;
+    var fileHost = viewEl.querySelector('[data-fl-role="goal-file-host"]');
+    if(fileHost && typeof ctx.fileScrollTop === "number") fileHost.scrollTop = ctx.fileScrollTop || 0;
+    var searchInput = viewEl.querySelector('[data-fl-role="goal-tree-search-input"]');
+    if(searchInput && hasCaptured("treeQuery") && document.activeElement !== searchInput){
+      searchInput.value = String(ctx.treeQuery || "");
+    }
     /* 3. Scroll hosts: main.content page scroll, then board horizontal. */
     var content = workContentScrollEl();
     if(content){
@@ -8262,40 +9284,6 @@ function workRememberRenderSnapshot(){
   }
 }
 
-/* Compact first-visit explanation for the Work surface. It names the three
- * durable shapes and the real Main proposal/confirmation boundary without
- * teaching a generic input-process-output story. */
-function renderWorkShapeGuide(){
-  var guide = document.createElement("details");
-  guide.className = "work-shape-guide";
-  guide.open = true;
-  guide.setAttribute("data-fl-role", "work-shape-guide");
-  var summary = document.createElement("summary");
-  summary.className = "work-shape-guide-summary";
-  summary.setAttribute("data-fl-role", "work-shape-guide-toggle");
-  var head = h("span", "work-shape-guide-head");
-  head.appendChild(h("span", "work-shape-guide-title", t("workShapeGuideTitle")));
-  head.appendChild(h("span", "work-shape-guide-hint", t("workShapeGuideHint")));
-  summary.appendChild(head);
-  guide.appendChild(summary);
-  var body = h("div", "work-shape-guide-body");
-  var rules = h("div", "work-shape-rules");
-  [
-    ["Task", "workShapeTaskRule"],
-    ["Plan", "workShapePlanRule"],
-    ["Goal", "workShapeGoalRule"]
-  ].forEach(function(item){
-    var rule = h("div", "work-shape-rule");
-    rule.appendChild(h("strong", "work-shape-rule-name", item[0]));
-    rule.appendChild(h("span", "work-shape-rule-text", t(item[1])));
-    rules.appendChild(rule);
-  });
-  body.appendChild(rules);
-  body.appendChild(h("p", "work-shape-flow", t("workShapeProposalFlow")));
-  guide.appendChild(body);
-  return guide;
-}
-
 /* The single Work surface: the rail is navigation, and only the selected
  * canonical workspace receives a Task board. Loading/failure/stale states are decided by
  * pageEvidenceState; an unsupported projection fails visibly here.
@@ -8309,16 +9297,6 @@ function rWork(){
     workRememberRenderSnapshot();
     return;
   }
-  /* FL-112B composition: the intro band holds the compact outcome intake and
-   * shape rules for empty Work. With real Work the same entry lives in the
-   * portfolio rail, beside workspace navigation, so optional filters never
-   * lead the reading surface. */
-  var intro = h("div", "work-intro");
-  intro.setAttribute("data-fl-role", "work-intro");
-  intro.setAttribute("aria-label", t("workNewEntryLabel"));
-  intro.appendChild(renderOutcomeSection());
-  intro.appendChild(renderWorkShapeGuide());
-
   var view;
   try {
     view = normalizeWorkHierarchy(S.workHierarchy);
@@ -8376,31 +9354,24 @@ function rWork(){
     workApplyCreatedNavigation(view);
   }
 
-  var applied = view.filter && view.filter.applied;
-  var activeFilter = !!(applied && (applied.project || applied.columns || applied.workerProfileId));
-
   var oneOffCount = workOneOffCardCount(view);
   var hasAny = (view.goals && view.goals.length)
     || (view.independentPlans && view.independentPlans.length)
     || oneOffCount > 0;
 
   if(!hasAny){
-    /* No real Work yet: creation stays the primary action, then shape rules,
-     * filters, an honest empty state, and the legacy Task file entry. The
-     * outcome section already holds the composer and its adjacent intake
-     * journey, so nothing falls below the reading surface. */
-    viewEl.appendChild(intro);
+    /* The empty state uses the same tree as real Work. The hierarchy and the
+     * contextual New Goal action teach the product without a separate lesson
+     * or a form occupying the first viewport before the user asks for it. */
+    viewEl.appendChild(renderWorkWorkbench(view, S.workSelection));
     viewEl.appendChild(renderWorkFilters());
-    viewEl.appendChild(stateMsg("empty", activeFilter ? t("workFilterNoMatches") : t("workEmpty")));
-    viewEl.appendChild(renderWorkAdvanced(view, S.workSelection));
     workRestoreReadingAfterRender(view, continuity);
     workRememberRenderSnapshot();
     return;
   }
-  /* Real Work first: the rail carries one compact New work entry (composer plus
-   * the active intake journey) while the selected workspace owns the canvas.
-   * Filters remain optional and old intake history stays a collapsed list
-   * inside that same entry. */
+  /* Real Work first: the tree carries contextual add actions and keeps the
+   * active intake journey after the canonical hierarchy. The selected
+   * workspace owns the canvas; filters remain optional. */
   viewEl.appendChild(renderWorkWorkbench(view, S.workSelection));
   viewEl.appendChild(renderWorkFilters());
   /* Restore open history/More-options/filter disclosures, focus, and scroll
@@ -8411,6 +9382,83 @@ function rWork(){
   /* A poll re-render replaced every Move/Act control; keep the open chooser's
    * origin truthful and its focus return working against the new controls. */
   workActionRebindChooser();
+  workRememberRenderSnapshot();
+}
+
+function renderDecisionItem(item){
+  var card = h("article", "decision-item");
+  card.setAttribute("data-fl-role", "decision-item");
+  card.setAttribute("data-task-id", String(item.taskId || ""));
+  card.appendChild(h("h4", "decision-item-title", item.name || t("taskUntitled")));
+  card.appendChild(h("p", "decision-item-fact", t("decisionFact", { text: item.fact || t("workNoneYet") })));
+  card.appendChild(h("p", "decision-item-reason", t("decisionReason", { text: item.reason || t("workNoNext") })));
+  if(item.retained){
+    card.appendChild(h("p", "decision-item-retained", t("decisionRetained", { text: item.retained })));
+  }
+  card.appendChild(h("p", "decision-item-impact", t("decisionImpact", { text: item.impact || t("workPlacementUnknown") })));
+  var actions = h("div", "decision-item-actions");
+  var open = h("button", "btn primary sm", t("decisionOpen"));
+  open.type = "button";
+  open.setAttribute("data-fl-role", "decision-open");
+  open.addEventListener("click", function(){
+    if(workIsNarrowViewport()) workApplyMobilePane(workNextMobilePane(S.workMobilePane, "open-detail"));
+    showTask(item.taskId, item.card && item.card.breadcrumb);
+  });
+  actions.appendChild(open);
+  if(item.card) actions.appendChild(renderWorkMoveActControl(item.card));
+  card.appendChild(actions);
+  return card;
+}
+function renderDecisionCenter(view){
+  var model = collectDecisionGroups(view);
+  var root = h("section", "decision-center");
+  root.setAttribute("data-fl-role", "decision-center");
+  root.appendChild(h("h2", "decision-center-title", t("navDecisions")));
+  root.appendChild(h("p", "decision-center-hint", t("decisionCenterHint")));
+  if(!model.total){
+    root.appendChild(stateMsg("empty", t("decisionCenterEmpty")));
+    return root;
+  }
+  model.groups.forEach(function(group){
+    var section = h("section", "decision-group");
+    section.setAttribute("data-fl-role", "decision-group");
+    section.setAttribute("data-goal-id", String(group.goalId || ""));
+    section.appendChild(h("h3", "decision-group-title", group.goalName || t("workUntitledGoal")));
+    group.items.forEach(function(item){ section.appendChild(renderDecisionItem(item)); });
+    root.appendChild(section);
+  });
+  if(model.parentless.length){
+    var parentless = h("section", "decision-group decision-parentless");
+    parentless.setAttribute("data-fl-role", "decision-parentless");
+    parentless.appendChild(h("h3", "decision-group-title", t("decisionParentless")));
+    model.parentless.forEach(function(item){ parentless.appendChild(renderDecisionItem(item)); });
+    root.appendChild(parentless);
+  }
+  return root;
+}
+function rDecisions(){
+  var continuity = workCaptureWorkbenchContext();
+  viewEl.textContent = "";
+  if(!S.hadOk){
+    showDisconnected();
+    workRememberRenderSnapshot();
+    return;
+  }
+  var view;
+  try {
+    view = normalizeWorkHierarchy(S.workHierarchy);
+  } catch(err){
+    var errBox = h("div", "error-box");
+    errBox.setAttribute("data-fl-role", "work-hierarchy-error");
+    errBox.appendChild(document.createTextNode(t("workUnsupportedHierarchy")));
+    viewEl.appendChild(errBox);
+    workRestoreWorkbenchContext(continuity);
+    workRememberRenderSnapshot();
+    return;
+  }
+  viewEl.appendChild(renderDecisionCenter(view));
+  workRestoreWorkbenchContext(continuity);
+  workUpdateMobileBack();
   workRememberRenderSnapshot();
 }
 
@@ -12798,13 +13846,8 @@ function switchTab(name, opts){
     var leavingDraft = workerCaptureDraftFromDom();
     if(leavingDraft) S.workerDraft = leavingDraft;
   }
-  $$("#fl-tabs button").forEach(function(b){
-    var tab = b.getAttribute("data-tab");
-    var active = tab === effective
-      || (tab === "work" && effective !== "work" && LEGACY_TAB_REDIRECT[effective] === "work");
-    b.classList.toggle("active", active);
-  });
   S.tab = effective;
+  updateProductNav();
   if(S.tab !== "worker"){ S.workerFormActive = false; S.workerFormRendered = false; }
   if(S.tab !== "work") S.outcomeFormActive = false;
   hideDetail();
@@ -13637,6 +14680,11 @@ function hideDetail(){
   workMarkSelectedCard(null);
   /* Closing the drawer is an explicit close for any pending-action handoff. */
   workPendingHandoffReset();
+  if(workIsNarrowViewport()){
+    workApplyMobilePane(workNextMobilePane("detail", "back"));
+  } else {
+    workUpdateMobileBack();
+  }
   var target = S.detailReturnFocus;
   S.detailReturnFocus = null;
   if(target && document.contains(target) && typeof target.focus === "function") target.focus();
@@ -18006,6 +19054,7 @@ function showTask(id, crumb){
   S.detailTaskId = String(id || "");
   workMarkSelectedCard(S.detailTaskId);
   S.taskCrumb = resolveTaskBreadcrumb(S.taskCrumb, id, crumb);
+  if(workIsNarrowViewport()) workApplyMobilePane(workNextMobilePane(S.workMobilePane, "open-detail"));
   workScheduleReadingContextSave();
   loadingDetail(t("taskDetailLoading"));
   fetchJSON("/api/ops/tasks/" + encodeURIComponent(id)).then(function(task){
@@ -18999,7 +20048,7 @@ function render(){
   // FL-112A: identical Work presentation truth keeps the live Work DOM so
   // polling updates connection chrome without a hard page-like rebuild.
   // Real hierarchy/intake/filter/language changes still fall through to rWork.
-  if(tab === "work" && workShouldRetainDom()){
+  if((tab === "work" || tab === "decisions") && workShouldRetainDom()){
     if(!S.detail){
       detailEl.hidden = true;
       detailEl.textContent = "";
@@ -19013,6 +20062,7 @@ function render(){
   switch(tab){
     case "overview": rOverview(); break;
     case "work": rWork(); break;
+    case "decisions": rDecisions(); break;
     case "plans": rPlans(); break;
     case "goals": rGoals(); break;
     case "tasks": rTasks(); break;
@@ -19044,12 +20094,22 @@ function init(){
   scrimEl = document.getElementById("fl-scrim");
   workReadingContextPending = workReadSessionContext();
   if(!S.token){ showUnauthenticated(); return; }
-  $$("#fl-tabs button").forEach(function(btn){
+  $$("#fl-tabs [data-tab]").forEach(function(btn){
     btn.addEventListener("click", function(){
-      switchTab(btn.getAttribute("data-tab"));
+      var tab = btn.getAttribute("data-tab");
+      closeSystemMenuOnRouteSelection();
+      switchTab(tab);
     });
   });
+  var mobileBack = document.getElementById("fl-mobile-back");
+  if(mobileBack){
+    mobileBack.addEventListener("click", function(){ workMobileBack(); });
+  }
+  workBindViewportPresentation();
+  document.addEventListener("pointerdown", onSystemMenuPointerDown);
+  document.addEventListener("touchstart", onSystemMenuTouchStart);
   document.addEventListener("keydown", function(e){
+    if(onSystemMenuEscape(e)) return;
     if(e.key==="Escape"&&S.detail) hideDetail();
   });
   /* Native disclosures, the contained board, the real page scroll host, and

@@ -1,0 +1,2032 @@
+diff --git a/baseline/src/core/routing-explanation.ts b/workspace/src/core/routing-explanation.ts
+index 5fbe1c2..35e85d3 100644
+--- a/baseline/src/core/routing-explanation.ts
++++ b/workspace/src/core/routing-explanation.ts
+@@ -4,7 +4,8 @@
+  * One pure projection that converts the immutable Task-file `routingDecision`
+  * into a bounded, closed, serializable explanation of why the selected Worker
+  * was chosen, how many candidates Main compared, what historical evidence
+- * exists in aggregate, and whether a Competition is recorded as planned.
++ * exists in aggregate, whether a Competition is recorded as planned, and the
++ * frozen advisory/Main relationship when Main recorded one.
+  *
+  * Shared by CLI validate, daemon/MCP validate_file, and the Hub submit preview
+  * so no surface ever re-derives the decision or duplicates Core inference.
+@@ -16,7 +17,12 @@
+  * frozen copy that cannot pollute the TaskSpec or any other consumer.
+  */
+ 
+-import type { CompetitionTrigger, RoutingDecisionSnapshot } from "./types.js";
++import type {
++  CompetitionTrigger,
++  FrozenRoutingAdvisorySnapshot,
++  FrozenWorkerIdentity,
++  RoutingDecisionSnapshot,
++} from "./types.js";
+ 
+ /** Closed selection-basis category — the only reason vocabulary users see. */
+ export type RoutingSelectionBasis =
+@@ -72,6 +78,8 @@ export interface SafeRoutingExplanation {
+   competition: SafeRoutingCompetition | null;
+   /** Closed next-action code. */
+   nextAction: RoutingExplanationNextAction;
++  /** Frozen advisory/Main relationship. null when the Task did not record one. */
++  advisory: FrozenRoutingAdvisorySnapshot | null;
+ }
+ 
+ /** Bounded known reason-code map to the closed basis vocabulary. Custom codes
+@@ -157,6 +165,7 @@ export function projectSafeRoutingExplanation(input: {
+       evidence: null,
+       competition: null,
+       nextAction: "not-recorded",
++      advisory: null,
+     } satisfies SafeRoutingExplanation);
+   }
+ 
+@@ -186,9 +195,41 @@ export function projectSafeRoutingExplanation(input: {
+       triggers: [...decision.competition.triggers],
+     },
+     nextAction: nextActionForCompetition(decision.competition.intent),
++    advisory: projectSafeAdvisory(decision.advisory),
+   } satisfies SafeRoutingExplanation);
+ }
+ 
++function copyFrozenIdentity(identity: FrozenWorkerIdentity): FrozenWorkerIdentity {
++  return {
++    provider: identity.provider,
++    model: identity.model,
++    runtime: identity.runtime,
++    effort: identity.effort,
++    ...(identity.workerProfileId === undefined
++      ? {}
++      : { workerProfileId: identity.workerProfileId }),
++  };
++}
++
++/** Copy only the closed public advisory facts. Never invent a relationship. */
++function projectSafeAdvisory(
++  advisory: FrozenRoutingAdvisorySnapshot | undefined,
++): FrozenRoutingAdvisorySnapshot | null {
++  if (advisory === undefined) return null;
++  return {
++    overallResult: advisory.overallResult,
++    selection: advisory.selection,
++    ...(advisory.recommendedWorker === undefined
++      ? {}
++      : { recommendedWorker: copyFrozenIdentity(advisory.recommendedWorker) }),
++    ...(advisory.confidence === undefined ? {} : { confidence: advisory.confidence }),
++    ...(advisory.cannotDetermineReasons === undefined
++      ? {}
++      : { cannotDetermineReasons: [...advisory.cannotDetermineReasons] }),
++    selectedExecution: { ...advisory.selectedExecution },
++  };
++}
++
+ /** Concise CLI lines for the safe routing explanation. Closed codes only. */
+ export function formatRoutingExplanationHuman(
+   explanation: SafeRoutingExplanation,
+@@ -213,6 +254,30 @@ export function formatRoutingExplanationHuman(
+   }
+   lines.push(`  Shortlist: ${explanation.shortlistSize} candidate(s) compared`);
+   lines.push(`  Selection basis: ${explanation.basis ?? "not-recorded"}`);
++  if (explanation.advisory != null) {
++    const advisory = explanation.advisory;
++    lines.push(`  Advisory result: ${advisory.overallResult}`);
++    lines.push(`  Selection: ${advisory.selection}`);
++    if (advisory.recommendedWorker !== undefined) {
++      const recommended = advisory.recommendedWorker;
++      lines.push(
++        `  Recommended: ${recommended.provider}/${recommended.model} — ${recommended.runtime}, ${recommended.effort}`,
++      );
++    }
++    if (advisory.confidence !== undefined) {
++      lines.push(`  Confidence: ${advisory.confidence}`);
++    }
++    if (advisory.cannotDetermineReasons !== undefined) {
++      lines.push(
++        `  Cannot determine because: ${advisory.cannotDetermineReasons.join(", ")}`,
++      );
++    }
++    const execution = advisory.selectedExecution;
++    lines.push(`  Selected execution mode: ${execution.resolvedExecutionMode}`);
++    lines.push(`  Selected readiness: ${execution.readinessState}`);
++    lines.push(`  Can launch: ${execution.canLaunch ? "yes" : "no"}`);
++    lines.push(`  Selected next action: ${execution.nextAction}`);
++  }
+   if (explanation.evidence !== null) {
+     lines.push(`  Evidence scope: ${explanation.evidence.scope}`);
+     lines.push(
+diff --git a/baseline/src/core/task-preview.ts b/workspace/src/core/task-preview.ts
+index 6370a6f..5efdc7e 100644
+--- a/baseline/src/core/task-preview.ts
++++ b/workspace/src/core/task-preview.ts
+@@ -154,9 +154,10 @@ export interface SafeTaskAdmissionPreview {
+   classificationAdvice: ClassificationAdvice;
+   /**
+    * Privacy-safe pre-submit routing explanation: why this Worker was selected,
+-   * how many candidates were compared, aggregate historical evidence, and the
+-   * recorded Competition intent. Detached from mutable Task data, derived only
+-   * from the frozen Task-file routingDecision and resolved selection, and never
++   * how many candidates were compared, aggregate historical evidence, the
++   * recorded Competition intent, and the frozen advisory/Main relationship
++   * when recorded. Detached from mutable Task data, derived only from the
++   * frozen Task-file routingDecision and resolved selection, and never
+    * enters previewRevisionDigest.
+    */
+   routingExplanation: SafeRoutingExplanation;
+diff --git a/baseline/src/core/task.ts b/workspace/src/core/task.ts
+index f350a1e..19a4492 100644
+--- a/baseline/src/core/task.ts
++++ b/workspace/src/core/task.ts
+@@ -19,11 +19,19 @@ import {
+   type RuntimeName,
+ } from "./runtime-names.js";
+ import { isPricingRouteId, resolveWorkerSelection } from "./worker-profiles.js";
++import type {
++  RoutingCannotDetermineReason,
++  RoutingOverallResult,
++} from "./model-routing.js";
+ import {
+   freezeWorkerNetworkPolicy,
+   validateWorkerNetworkPolicy,
+   type WorkerNetworkPolicy,
+ } from "./network-policy.js";
++import type {
++  WorkerReadinessNextAction,
++  WorkerReadinessState,
++} from "./worker-readiness.js";
+ import { selectDeliveryProfile } from "./delivery-profiles.js";
+ import {
+   expandHome,
+@@ -48,10 +56,13 @@ import type {
+   DeliveryResolution,
+   DeliverySpec,
+   ExecutionPreference,
++  FrozenRoutingAdvisorySnapshot,
++  FrozenSelectedExecutionSnapshot,
+   FrozenWorkerIdentity,
+   QualityReport,
+   ResolvedExecutionMode,
+   RoutingDecisionSnapshot,
++  RoutingSelectionRelationship,
+   TaskAdvancedPolicyOverride,
+   TaskBackground,
+   TaskCodingExtension,
+@@ -204,6 +215,256 @@ function validateFrozenWorkerIdentity(raw: unknown, label: string): FrozenWorker
+   };
+ }
+ 
++/** Comparable routing identity is provider + model + runtime + effort. */
++function frozenIdentitiesMatch(a: FrozenWorkerIdentity, b: FrozenWorkerIdentity): boolean {
++  return a.provider === b.provider
++    && a.model === b.model
++    && a.runtime === b.runtime
++    && a.effort === b.effort;
++}
++
++/** Advisory relationship identity also binds optional workerProfileId.
++ *  Two Profiles that share an executable identity stay distinct. */
++function frozenAdvisoryIdentitiesMatch(
++  a: FrozenWorkerIdentity,
++  b: FrozenWorkerIdentity,
++): boolean {
++  return frozenIdentitiesMatch(a, b) && a.workerProfileId === b.workerProfileId;
++}
++
++const VALID_ROUTING_OVERALL_RESULTS = new Set<RoutingOverallResult>([
++  "recommended",
++  "cannot-determine",
++  "historical-best-not-launchable",
++]);
++const VALID_CANNOT_DETERMINE_REASONS = new Set<RoutingCannotDetermineReason>([
++  "insufficient-relevant-samples",
++  "single-comparable-identity",
++  "no-active-factors",
++  "score-gap-too-small",
++  "positive-factor-unavailable",
++  "profile-identity-unavailable",
++]);
++const VALID_SELECTION_RELATIONSHIPS = new Set<RoutingSelectionRelationship>([
++  "followed-recommendation",
++  "manual-override",
++  "selected-after-cannot-determine",
++]);
++const VALID_RESOLVED_EXECUTION_MODES = new Set<ResolvedExecutionMode>([
++  "single-run",
++  "persistent-session",
++  "native-goal",
++]);
++const VALID_READINESS_STATES = new Set<WorkerReadinessState>([
++  "ready",
++  "launchable",
++  "needs-attention",
++  "blocked",
++]);
++const VALID_READINESS_NEXT_ACTIONS = new Set<WorkerReadinessNextAction>([
++  "none",
++  "run-smoke-check",
++  "check-provider",
++  "configure-authentication",
++  "fix-runtime",
++  "change-pairing",
++  "choose-model",
++  "choose-execution-mode",
++]);
++
++function validateSelectedExecution(
++  raw: unknown,
++): FrozenSelectedExecutionSnapshot {
++  const obj = object(raw, "task.routingDecision.advisory.selectedExecution");
++  const extra = Object.keys(obj).filter(
++    (key) =>
++      key !== "resolvedExecutionMode"
++      && key !== "readinessState"
++      && key !== "canLaunch"
++      && key !== "nextAction",
++  );
++  if (extra.length > 0) {
++    throw new Error("task.routingDecision.advisory.selectedExecution contains an unsupported field");
++  }
++  const resolvedExecutionMode = obj.resolvedExecutionMode;
++  if (
++    typeof resolvedExecutionMode !== "string"
++    || !VALID_RESOLVED_EXECUTION_MODES.has(resolvedExecutionMode as ResolvedExecutionMode)
++  ) {
++    throw new Error(
++      "task.routingDecision.advisory.selectedExecution.resolvedExecutionMode must be single-run, persistent-session, or native-goal",
++    );
++  }
++  const readinessState = obj.readinessState;
++  if (
++    typeof readinessState !== "string"
++    || !VALID_READINESS_STATES.has(readinessState as WorkerReadinessState)
++  ) {
++    throw new Error(
++      "task.routingDecision.advisory.selectedExecution.readinessState must be ready, launchable, needs-attention, or blocked",
++    );
++  }
++  if (typeof obj.canLaunch !== "boolean") {
++    throw new Error("task.routingDecision.advisory.selectedExecution.canLaunch must be a boolean");
++  }
++  const nextAction = obj.nextAction;
++  if (
++    typeof nextAction !== "string"
++    || !VALID_READINESS_NEXT_ACTIONS.has(nextAction as WorkerReadinessNextAction)
++  ) {
++    throw new Error(
++      "task.routingDecision.advisory.selectedExecution.nextAction must be a closed readiness next-action code",
++    );
++  }
++  return {
++    resolvedExecutionMode: resolvedExecutionMode as ResolvedExecutionMode,
++    readinessState: readinessState as WorkerReadinessState,
++    canLaunch: obj.canLaunch,
++    nextAction: nextAction as WorkerReadinessNextAction,
++  };
++}
++
++function validateRoutingAdvisory(
++  raw: unknown,
++  shortlist: FrozenWorkerIdentity[],
++  selectedWorker: FrozenWorkerIdentity,
++): FrozenRoutingAdvisorySnapshot {
++  const obj = object(raw, "task.routingDecision.advisory");
++  const extra = Object.keys(obj).filter(
++    (key) =>
++      key !== "overallResult"
++      && key !== "selection"
++      && key !== "recommendedWorker"
++      && key !== "confidence"
++      && key !== "cannotDetermineReasons"
++      && key !== "selectedExecution",
++  );
++  if (extra.length > 0) {
++    throw new Error("task.routingDecision.advisory contains an unsupported field");
++  }
++  const overallResult = obj.overallResult;
++  if (
++    typeof overallResult !== "string"
++    || !VALID_ROUTING_OVERALL_RESULTS.has(overallResult as RoutingOverallResult)
++  ) {
++    throw new Error(
++      "task.routingDecision.advisory.overallResult must be recommended, cannot-determine, or historical-best-not-launchable",
++    );
++  }
++  const selection = obj.selection;
++  if (
++    typeof selection !== "string"
++    || !VALID_SELECTION_RELATIONSHIPS.has(selection as RoutingSelectionRelationship)
++  ) {
++    throw new Error(
++      "task.routingDecision.advisory.selection must be followed-recommendation, manual-override, or selected-after-cannot-determine",
++    );
++  }
++  const selectedExecution = validateSelectedExecution(obj.selectedExecution);
++  const recommendedWorker = obj.recommendedWorker === undefined
++    ? undefined
++    : validateFrozenWorkerIdentity(
++      obj.recommendedWorker,
++      "task.routingDecision.advisory.recommendedWorker",
++    );
++  if (recommendedWorker !== undefined) {
++    const recommendedInShortlist = shortlist.some(
++      (worker) => frozenAdvisoryIdentitiesMatch(worker, recommendedWorker),
++    );
++    if (!recommendedInShortlist) {
++      throw new Error(
++        "task.routingDecision.advisory.recommendedWorker must match an entry in the shortlist by provider, model, runtime, effort, and workerProfileId",
++      );
++    }
++  }
++  let confidence: number | undefined;
++  if (obj.confidence !== undefined) {
++    if (typeof obj.confidence !== "number" || !Number.isFinite(obj.confidence)
++      || obj.confidence < 0 || obj.confidence > 1) {
++      throw new Error(
++        "task.routingDecision.advisory.confidence must be a finite number between 0 and 1",
++      );
++    }
++    confidence = obj.confidence;
++  }
++  if ((recommendedWorker === undefined) !== (confidence === undefined)) {
++    throw new Error(
++      "task.routingDecision.advisory.recommendedWorker and confidence must be present together",
++    );
++  }
++  let cannotDetermineReasons: RoutingCannotDetermineReason[] | undefined;
++  if (obj.cannotDetermineReasons !== undefined) {
++    if (!Array.isArray(obj.cannotDetermineReasons) || obj.cannotDetermineReasons.length === 0) {
++      throw new Error(
++        "task.routingDecision.advisory.cannotDetermineReasons must be a non-empty array of closed reasons",
++      );
++    }
++    cannotDetermineReasons = obj.cannotDetermineReasons.map((reason, index) => {
++      if (
++        typeof reason !== "string"
++        || !VALID_CANNOT_DETERMINE_REASONS.has(reason as RoutingCannotDetermineReason)
++      ) {
++        throw new Error(
++          `task.routingDecision.advisory.cannotDetermineReasons[${index}] must be a closed cannot-determine reason`,
++        );
++      }
++      return reason as RoutingCannotDetermineReason;
++    });
++  }
++  if (overallResult === "cannot-determine") {
++    if (selection !== "selected-after-cannot-determine") {
++      throw new Error(
++        "task.routingDecision.advisory.selection must be selected-after-cannot-determine when overallResult is cannot-determine",
++      );
++    }
++    if (recommendedWorker !== undefined || confidence !== undefined) {
++      throw new Error(
++        "task.routingDecision.advisory must not include a recommended Worker or confidence when overallResult is cannot-determine",
++      );
++    }
++    if (cannotDetermineReasons === undefined) {
++      throw new Error(
++        "task.routingDecision.advisory.cannotDetermineReasons is required when overallResult is cannot-determine",
++      );
++    }
++  } else {
++    if (selection === "selected-after-cannot-determine") {
++      throw new Error(
++        "task.routingDecision.advisory.selection must be followed-recommendation or manual-override when a recommendation exists",
++      );
++    }
++    if (recommendedWorker === undefined || confidence === undefined) {
++      throw new Error(
++        "task.routingDecision.advisory.recommendedWorker and confidence are required when overallResult is recommended or historical-best-not-launchable",
++      );
++    }
++    if (cannotDetermineReasons !== undefined) {
++      throw new Error(
++        "task.routingDecision.advisory.cannotDetermineReasons must not be present unless overallResult is cannot-determine",
++      );
++    }
++    const sameAsSelected = frozenAdvisoryIdentitiesMatch(recommendedWorker, selectedWorker);
++    if (selection === "followed-recommendation" && !sameAsSelected) {
++      throw new Error(
++        "task.routingDecision.advisory.selection cannot be followed-recommendation unless the recommended Worker matches selectedWorker",
++      );
++    }
++    if (selection === "manual-override" && sameAsSelected) {
++      throw new Error(
++        "task.routingDecision.advisory.selection cannot be manual-override when selectedWorker matches the recommended Worker",
++      );
++    }
++  }
++  return {
++    overallResult: overallResult as RoutingOverallResult,
++    selection: selection as RoutingSelectionRelationship,
++    ...(recommendedWorker === undefined ? {} : { recommendedWorker }),
++    ...(confidence === undefined ? {} : { confidence }),
++    ...(cannotDetermineReasons === undefined ? {} : { cannotDetermineReasons }),
++    selectedExecution,
++  };
++}
++
+ /** Validate and freeze an explicit Main review requirement.
+  *  Absence is legacy and is not rewritten as skip or a default depth. */
+ export function parseReviewRequirement(raw: unknown): TaskReviewRequirement {
+@@ -311,6 +572,9 @@ function validateRoutingDecision(raw: unknown): RoutingDecisionSnapshot {
+       familySampleCounts[key] = value;
+     }
+   }
++  const advisory = obj.advisory === undefined
++    ? undefined
++    : validateRoutingAdvisory(obj.advisory, shortlist, selectedWorker);
+   return {
+     ...(taskFamily !== undefined ? { taskFamily } : {}),
+     shortlist,
+@@ -325,6 +589,7 @@ function validateRoutingDecision(raw: unknown): RoutingDecisionSnapshot {
+         ? { settingsDigest: stringValue(evidenceObj.settingsDigest, "task.routingDecision.evidenceSnapshot.settingsDigest") }
+         : {}),
+     },
++    ...(advisory === undefined ? {} : { advisory }),
+   };
+ }
+ 
+@@ -928,8 +1193,7 @@ export function parseTaskSpec(
+     const sw = routingDecision.selectedWorker;
+     // selectedWorker must be in the shortlist by frozen identity match.
+     const inShortlist = routingDecision.shortlist.some(
+-      (w) => w.provider === sw.provider && w.model === sw.model
+-        && w.runtime === sw.runtime && w.effort === sw.effort,
++      (w) => frozenIdentitiesMatch(w, sw),
+     );
+     if (!inShortlist) {
+       throw new Error(
+@@ -968,6 +1232,14 @@ export function parseTaskSpec(
+         "task.taskFamily and task.routingDecision.taskFamily must be identical when both are present",
+       );
+     }
++    if (routingDecision.advisory !== undefined) {
++      const frozenMode = routingDecision.advisory.selectedExecution.resolvedExecutionMode;
++      if (frozenMode !== common.executionMode) {
++        throw new Error(
++          `task.routingDecision.advisory.selectedExecution.resolvedExecutionMode "${frozenMode}" does not match resolved Task executionMode "${common.executionMode}"`,
++        );
++      }
++    }
+   }
+ 
+   if (root.version === 1) {
+diff --git a/baseline/src/core/types.ts b/workspace/src/core/types.ts
+index b7199fb..3a9f822 100644
+--- a/baseline/src/core/types.ts
++++ b/workspace/src/core/types.ts
+@@ -1,7 +1,15 @@
++import type {
++  RoutingCannotDetermineReason,
++  RoutingOverallResult,
++} from "./model-routing.js";
+ import type { PricingUnavailableReason } from "./pricing.js";
+ import type { QuotedCost, UnavailableCost } from "./pricing-calculator.js";
+ import type { RuntimeName } from "./runtime-names.js";
+ import type { WorkerNetworkPolicy } from "./network-policy.js";
++import type {
++  WorkerReadinessNextAction,
++  WorkerReadinessState,
++} from "./worker-readiness.js";
+ 
+ export type TaskStatus =
+   | "queued"
+@@ -230,6 +238,39 @@ export interface FrozenWorkerIdentity {
+   workerProfileId?: string;
+ }
+ 
++/** Closed Main relationship to the frozen M3-A advisory. Not an advisory result. */
++export type RoutingSelectionRelationship =
++  | "followed-recommendation"
++  | "manual-override"
++  | "selected-after-cannot-determine";
++
++/** Bounded selected execution/readiness frozen at decision time.
++ *  Reuses the M3-A closed readiness vocabulary; never stores diagnostics. */
++export interface FrozenSelectedExecutionSnapshot {
++  resolvedExecutionMode: ResolvedExecutionMode;
++  readinessState: WorkerReadinessState;
++  canLaunch: boolean;
++  nextAction: WorkerReadinessNextAction;
++}
++
++/** Optional nested snapshot of the M3-A advisory and Main's final relationship.
++ *  Omitted on legacy Task files; never invented during read or preview.
++ *  Recommended/selected relationship binds optional workerProfileId. */
++export interface FrozenRoutingAdvisorySnapshot {
++  /** M3-A executable-facing result. Not a fourth selection mode. */
++  overallResult: RoutingOverallResult;
++  /** How Main's selected Worker relates to that advisory. */
++  selection: RoutingSelectionRelationship;
++  /** Recommended identity when the advisory named one. Absent for cannot-determine. */
++  recommendedWorker?: FrozenWorkerIdentity;
++  /** Frozen advisory confidence in [0, 1]. Present only with recommendedWorker. */
++  confidence?: number;
++  /** Present only when overallResult is cannot-determine. */
++  cannotDetermineReasons?: RoutingCannotDetermineReason[];
++  /** Selected Worker's bounded execution/readiness at decision time. */
++  selectedExecution: FrozenSelectedExecutionSnapshot;
++}
++
+ /** Immutable Main-written routing decision stored before any Worker starts.
+  *  The frozen identity is used for comparison; workerProfileId is provenance only. */
+ export interface RoutingDecisionSnapshot {
+@@ -266,6 +307,8 @@ export interface RoutingDecisionSnapshot {
+     /** Settings version fingerprint for traceability. Never contains settings values. */
+     settingsDigest?: string;
+   };
++  /** Frozen M3-A advisory and Main relationship. Absent on legacy decisions. */
++  advisory?: FrozenRoutingAdvisorySnapshot;
+ }
+ 
+ /** Trigger reasons for considering or requiring a Competition. */
+diff --git a/baseline/src/mcp/server.ts b/workspace/src/mcp/server.ts
+index 0ddb072..7b12b8b 100644
+--- a/baseline/src/mcp/server.ts
++++ b/workspace/src/mcp/server.ts
+@@ -22,6 +22,7 @@ import {
+ import { assessIntegrationFeasibility } from "../core/integration-feasibility.js";
+ import { buildCompactIntegrationOperationView } from "../core/integration-operation.js";
+ import type { IntegrationOperationView } from "../core/types.js";
++import { projectSafeRoutingExplanation } from "../core/routing-explanation.js";
+ import {
+   isTaskPresentationLanguage,
+   parseTaskSpec,
+@@ -147,6 +148,49 @@ const routingDecisionSchema = z.object({
+     settingsDigest: z.string().min(1).max(200).optional()
+       .describe("Optional settings version fingerprint; never settings values"),
+   }).strict(),
++  advisory: z.object({
++    overallResult: z.enum([
++      "recommended",
++      "cannot-determine",
++      "historical-best-not-launchable",
++    ]).describe("Frozen M3-A overallResult; parseTaskSpec enforces pairing with selection"),
++    selection: z.enum([
++      "followed-recommendation",
++      "manual-override",
++      "selected-after-cannot-determine",
++    ]).describe("Closed Main relationship to the frozen advisory"),
++    recommendedWorker: frozenWorkerIdentitySchema.optional()
++      .describe("Recommended identity when the advisory named one; required with confidence"),
++    confidence: z.number().min(0).max(1).optional()
++      .describe("Frozen advisory confidence in [0, 1]; present only with recommendedWorker"),
++    cannotDetermineReasons: z.array(z.enum([
++      "insufficient-relevant-samples",
++      "single-comparable-identity",
++      "no-active-factors",
++      "score-gap-too-small",
++      "positive-factor-unavailable",
++      "profile-identity-unavailable",
++    ])).min(1).optional()
++      .describe("Required by parseTaskSpec when overallResult is cannot-determine"),
++    selectedExecution: z.object({
++      resolvedExecutionMode: z.enum(["single-run", "persistent-session", "native-goal"])
++        .describe("Frozen selected resolved execution mode"),
++      readinessState: z.enum(["ready", "launchable", "needs-attention", "blocked"])
++        .describe("Frozen selected readiness state"),
++      canLaunch: z.boolean().describe("Frozen selected canLaunch"),
++      nextAction: z.enum([
++        "none",
++        "run-smoke-check",
++        "check-provider",
++        "configure-authentication",
++        "fix-runtime",
++        "change-pairing",
++        "choose-model",
++        "choose-execution-mode",
++      ]).describe("Frozen selected readiness next action"),
++    }).strict(),
++  }).strict().optional()
++    .describe("Optional frozen advisory/Main relationship; omitted on legacy decisions"),
+ }).strict();
+ 
+ const taskInputSchema = z.object({
+@@ -184,7 +228,7 @@ const taskInputSchema = z.object({
+   /** Immutable Main routing-decision snapshot. Optional for legacy callers;
+    *  never auto-generated from workerProfileId. parseTaskSpec is the semantic authority. */
+   routingDecision: routingDecisionSchema.optional()
+-    .describe("Main routing-decision snapshot frozen before any Worker starts: shortlist, selectedWorker, selectedBecause, competition intent/triggers, evidenceSnapshot"),
++    .describe("Main routing-decision snapshot frozen before any Worker starts: shortlist, selectedWorker, selectedBecause, competition intent/triggers, evidenceSnapshot, optional advisory relationship"),
+   provider: z.enum(["deepseek", "qwen", "minimax", "glm", "volcengine", "xai", "openai"]).optional(),
+   model: z.string().min(1).optional(),
+   endpoint: z.string().url().optional(),
+@@ -376,6 +420,20 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
+         projectDir: spec.project,
+         policy: createPathPolicy(spec),
+       });
++      const profileLabel = spec.workerProfileId === undefined
++        ? undefined
++        : settings.workerProfiles.profiles.find((profile) => profile.id === spec.workerProfileId)?.label;
++      const routingExplanation = projectSafeRoutingExplanation({
++        ...(spec.routingDecision === undefined ? {} : { routingDecision: spec.routingDecision }),
++        selectedWorker: {
++          provider: spec.provider.name,
++          model: spec.provider.model,
++          runtime: spec.runtime.name,
++          effort: spec.runtime.effort,
++        },
++        ...(spec.workerProfileId === undefined ? {} : { workerProfileId: spec.workerProfileId }),
++        ...(profileLabel === undefined ? {} : { workerProfileLabel: profileLabel }),
++      });
+       return textAndData({
+         ...report,
+         budget: {
+@@ -386,6 +444,7 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
+         resolvedRuntimeMaxBudgetUsd: spec.runtime.maxBudgetUsd,
+         integrationFeasibility,
+         workspaceBoundaryAdvice,
++        routingExplanation,
+       });
+     },
+   );
+diff --git a/baseline/tests/daemon-cli.test.ts b/workspace/tests/daemon-cli.test.ts
+index 7621a00..75a5dc1 100644
+--- a/baseline/tests/daemon-cli.test.ts
++++ b/workspace/tests/daemon-cli.test.ts
+@@ -32,7 +32,7 @@ import {
+ } from "../src/daemon/client.js";
+ import { ForkLightDaemon } from "../src/daemon/server.js";
+ import { StateStore } from "../src/state/store.js";
+-import { SettingsService } from "../src/core/settings.js";
++import { cloneDefaults, SettingsService } from "../src/core/settings.js";
+ import { captureCandidateRevision } from "../src/core/candidate-revision.js";
+ import {
+   createReviewGraph,
+@@ -43,6 +43,11 @@ import { prepareWorkspace } from "../src/workspace/copy.js";
+ import { createPathPolicy } from "../src/workspace/path-policy.js";
+ import { writeWorkspacePatchReport } from "../src/workspace/patch.js";
+ import { formatRoutingAdviceHuman } from "../src/cli/routing-output.js";
++import { projectSafeRoutingExplanation } from "../src/core/routing-explanation.js";
++import {
++  buildTaskAdmissionPreview,
++  formatTaskAdmissionPreviewHuman,
++} from "../src/core/task-preview.js";
+ import {
+   APPLICABILITY_REASON_MAX,
+   humanIntegrationPreflightLines,
+@@ -228,6 +233,162 @@ test("routing CLI accepts full-identity legacy candidates with runtime and effor
+   }
+ });
+ 
++test("CLI validate/preview renders the frozen advisory relationship without private fields", async () => {
++  const home = await mkdtemp(path.join(tmpdir(), "forklight-cli-adv-"));
++  try {
++    await mkdir(path.join(home, "project"));
++    const deepseek = {
++      provider: "deepseek",
++      model: "deepseek-v4-flash",
++      runtime: "claude-code",
++      effort: "high",
++      workerProfileId: "default",
++    };
++    const qwen = {
++      provider: "qwen",
++      model: "qwen3.7-plus",
++      runtime: "claude-code",
++      effort: "high",
++    };
++    const routingDecision = {
++      taskFamily: "refactor",
++      shortlist: [deepseek, qwen],
++      selectedWorker: deepseek,
++      selectedBecause: { code: "user-specified", note: "PRIVATE_CLI_M3B_NOTE" },
++      competition: { intent: "none", triggers: [] },
++      evidenceSnapshot: {
++        scope: "none",
++        exactSampleCounts: { SECRET_CLI_SAMPLE_KEY: 0 },
++        settingsDigest: "SECRET_CLI_SETTINGS_DIGEST",
++      },
++      advisory: {
++        overallResult: "recommended",
++        selection: "followed-recommendation",
++        recommendedWorker: deepseek,
++        confidence: 0.91,
++        selectedExecution: {
++          resolvedExecutionMode: "single-run",
++          readinessState: "launchable",
++          canLaunch: true,
++          nextAction: "none",
++        },
++      },
++    };
++    const writeCliTask = async (fileName: string, decision: unknown): Promise<string> => {
++      const file = path.join(home, fileName);
++      await writeFile(
++        file,
++        `version: 2
++name: CLI Advisory Preview
++project: ./project
++workerProfileId: default
++taskFamily: refactor
++worker:
++  focusPaths: [src]
++contract:
++  outcome: CLI validate renders the frozen advisory relationship
++  context: [current settings]
++  inScope: [preview]
++  outOfScope: [mutation]
++  executionSteps: [validate]
++  deliverables: [safe preview]
++  modules:
++    - name: cli
++      responsibility: render the same safe routing explanation as Core
++      consumes: [task file]
++      produces: [preview]
++      boundaries: [no Task mutation]
++  callChain: [cli, preview]
++  scenarios:
++    - name: followed
++      given: advisory
++      when: validate
++      then: same facts
++    - name: private
++      given: note
++      when: validate
++      then: hidden
++  risks: [leak]
++  changeBudget:
++    maxFiles: 4
++    maxDiffLines: 80
++acceptance:
++  criteria: [safe]
++  commands:
++    - "true"
++routingDecision: ${JSON.stringify(decision)}
++`,
++      );
++      return file;
++    };
++    const taskFile = await writeCliTask("task.yaml", routingDecision);
++    const jsonResult = await runCli(home, ["validate", taskFile, "--json"], 20_000);
++    assert.ok(jsonResult.stdout.trim().length > 0, jsonResult.stderr || "CLI validate --json produced no preview");
++    const preview = JSON.parse(jsonResult.stdout) as {
++      routingExplanation: ReturnType<typeof projectSafeRoutingExplanation>;
++    };
++    assert.equal(preview.routingExplanation.advisory!.selection, "followed-recommendation");
++    assert.equal(preview.routingExplanation.advisory!.confidence, 0.91);
++    assert.deepEqual(preview.routingExplanation.advisory!.recommendedWorker, deepseek);
++
++    const settings = cloneDefaults();
++    const viaPreview = await buildTaskAdmissionPreview(taskFile, settings);
++    assert.deepEqual(viaPreview.routingExplanation, preview.routingExplanation);
++    assert.equal(viaPreview.routingExplanation.advisory!.selection, "followed-recommendation");
++    const humanResult = await runCli(home, ["validate", taskFile], 20_000);
++    assert.ok(humanResult.stdout.includes("Routing explanation:"), humanResult.stderr);
++    assert.match(humanResult.stdout, /Advisory result: recommended/);
++    assert.match(humanResult.stdout, /Selection: followed-recommendation/);
++    assert.match(humanResult.stdout, /Confidence: 0\.91/);
++    assert.equal(humanResult.stdout, formatTaskAdmissionPreviewHuman(viaPreview));
++    const serialized = `${jsonResult.stdout}\n${humanResult.stdout}`;
++    assert.ok(!serialized.includes("PRIVATE_CLI_M3B_NOTE"));
++    assert.ok(!serialized.includes("SECRET_CLI_SAMPLE_KEY"));
++    assert.ok(!serialized.includes("SECRET_CLI_SETTINGS_DIGEST"));
++
++    const twin = { ...deepseek, workerProfileId: "default-twin" };
++    const overrideFile = await writeCliTask("override.yaml", {
++      ...routingDecision,
++      shortlist: [deepseek, twin],
++      advisory: {
++        overallResult: "recommended",
++        selection: "manual-override",
++        recommendedWorker: twin,
++        confidence: 0.84,
++        selectedExecution: routingDecision.advisory.selectedExecution,
++      },
++    });
++    const overrideJson = await runCli(home, ["validate", overrideFile, "--json"], 20_000);
++    const overridePreview = JSON.parse(overrideJson.stdout) as {
++      routingExplanation: { advisory?: { selection?: string; recommendedWorker?: { workerProfileId?: string } } };
++    };
++    assert.equal(overridePreview.routingExplanation.advisory?.selection, "manual-override");
++    assert.equal(
++      overridePreview.routingExplanation.advisory?.recommendedWorker?.workerProfileId,
++      "default-twin",
++    );
++
++    const mismatchFile = await writeCliTask("mismatch.yaml", {
++      ...routingDecision,
++      advisory: {
++        ...routingDecision.advisory,
++        selectedExecution: {
++          ...routingDecision.advisory.selectedExecution,
++          resolvedExecutionMode: "native-goal",
++        },
++      },
++    });
++    const mismatchResult = await runCli(home, ["validate", mismatchFile, "--json"], 20_000);
++    assert.notEqual(mismatchResult.code, 0);
++    assert.match(
++      `${mismatchResult.stderr}\n${mismatchResult.stdout}`,
++      /does not match resolved Task executionMode/,
++    );
++  } finally {
++    await rm(home, { recursive: true, force: true });
++  }
++});
++
+ test("routing CLI human output explains an evidence-ready subset without judging missing history", () => {
+   const evidence = {
+     relevantSampleCount: 8,
+diff --git a/baseline/tests/daemon.test.ts b/workspace/tests/daemon.test.ts
+index 92ea41b..3374523 100644
+--- a/baseline/tests/daemon.test.ts
++++ b/workspace/tests/daemon.test.ts
+@@ -1978,6 +1978,7 @@ test("validate_file propagates the safe routing explanation over the socket", as
+     assert.equal(explanation.competition!.intent, "consider");
+     assert.deepEqual(explanation.competition!.triggers, ["critical"]);
+     assert.equal(explanation.nextAction, "consider-competition");
++    assert.equal(explanation.advisory, null);
+     assert.equal(explanation.selectedWorker.workerProfileLabel, "Local Grok Builder");
+ 
+     const json = JSON.stringify(preview);
+@@ -2000,6 +2001,216 @@ test("validate_file propagates the safe routing explanation over the socket", as
+   }
+ });
+ 
++const DAEMON_QWEN_WORKER = {
++  provider: "qwen",
++  model: "qwen3.7-plus",
++  runtime: "claude-code",
++  effort: "high",
++};
++const DAEMON_SELECTED_EXECUTION = {
++  resolvedExecutionMode: "single-run" as const,
++  readinessState: "launchable" as const,
++  canLaunch: true,
++  nextAction: "none" as const,
++};
++
++test("validate_file and submit_file freeze advisory relationship and stay privacy-safe", async () => {
++  const home = await mkdtemp(path.join(tmpdir(), "fl-rt-adv-"));
++  const seedStore = new StateStore(home);
++  try {
++    seedGrokBuilderSettings(new SettingsService(seedStore));
++  } finally {
++    seedStore.close();
++  }
++  const daemon = new ForkLightDaemon(home, 0);
++  await daemon.start();
++  try {
++    const worker = {
++      provider: "xai",
++      model: "grok-4.5",
++      runtime: "grok-build",
++      effort: "high",
++      workerProfileId: "local-grok-builder",
++    };
++    const decision: RoutingDecisionSnapshot = {
++      taskFamily: "refactor",
++      shortlist: [worker, DAEMON_QWEN_WORKER],
++      selectedWorker: worker,
++      selectedBecause: {
++        code: "user-specified",
++        note: "PRIVATE_DAEMON_M3B_NOTE",
++      },
++      competition: { intent: "none", triggers: [] },
++      evidenceSnapshot: {
++        scope: "exact-class",
++        exactSampleCounts: { "SECRET_DAEMON_SAMPLE_KEY": 1 },
++        settingsDigest: "SECRET_DAEMON_SETTINGS_DIGEST",
++      },
++      advisory: {
++        overallResult: "recommended",
++        selection: "manual-override",
++        recommendedWorker: DAEMON_QWEN_WORKER,
++        confidence: 0.84,
++        selectedExecution: DAEMON_SELECTED_EXECUTION,
++      },
++    };
++    const taskFile = await writeRoutingAdmissionTaskFile("local-grok-builder", decision);
++    const preview = await daemonRequest<SafeTaskAdmissionPreview>(
++      "validate_file",
++      { taskFile },
++      home,
++    );
++    assert.equal(preview.routingExplanation.advisory!.selection, "manual-override");
++    assert.deepEqual(preview.routingExplanation.advisory!.recommendedWorker, DAEMON_QWEN_WORKER);
++    assert.equal(preview.routingExplanation.advisory!.confidence, 0.84);
++    const json = JSON.stringify(preview);
++    assert.ok(!json.includes("PRIVATE_DAEMON_M3B_NOTE"));
++    assert.ok(!json.includes("SECRET_DAEMON_SAMPLE_KEY"));
++    assert.ok(!json.includes("SECRET_DAEMON_SETTINGS_DIGEST"));
++
++    const store2 = new StateStore(home);
++    try {
++      const viaShared = await buildTaskAdmissionPreview(taskFile, new SettingsService(store2).get());
++      assert.deepEqual(viaShared.routingExplanation, preview.routingExplanation);
++    } finally {
++      store2.close();
++    }
++
++    const cannotDetermine: RoutingDecisionSnapshot = {
++      ...decision,
++      selectedBecause: { code: "user-specified", note: "PRIVATE_DAEMON_M3B_NOTE" },
++      advisory: {
++        overallResult: "cannot-determine",
++        selection: "selected-after-cannot-determine",
++        cannotDetermineReasons: ["insufficient-relevant-samples"],
++        selectedExecution: DAEMON_SELECTED_EXECUTION,
++      },
++    };
++    const cannotFile = await writeRoutingAdmissionTaskFile("local-grok-builder", cannotDetermine);
++    const cannotPreview = await daemonRequest<SafeTaskAdmissionPreview>(
++      "validate_file",
++      { taskFile: cannotFile },
++      home,
++    );
++    assert.equal(cannotPreview.routingExplanation.advisory!.selection, "selected-after-cannot-determine");
++    assert.equal(cannotPreview.routingExplanation.advisory!.recommendedWorker, undefined);
++    assert.equal(cannotPreview.routingExplanation.advisory!.confidence, undefined);
++    assert.ok(!JSON.stringify(cannotPreview).includes("PRIVATE_DAEMON_M3B_NOTE"));
++
++    const submitted = await daemonRequest<TaskRecord>("submit_file", { taskFile }, home);
++    assert.deepEqual(submitted.spec.routingDecision?.advisory, decision.advisory);
++    assert.equal(submitted.spec.routingDecision?.selectedBecause.note, "PRIVATE_DAEMON_M3B_NOTE");
++  } finally {
++    await daemon.close();
++  }
++});
++
++test("validate_file rejects contradictory advisory before any Task mutation", async () => {
++  const home = await mkdtemp(path.join(tmpdir(), "fl-rt-bad-"));
++  const daemon = await startSeededDaemon(home);
++  try {
++    const worker = {
++      provider: "xai",
++      model: "grok-4.5",
++      runtime: "grok-build",
++      effort: "high",
++      workerProfileId: "local-grok-builder",
++    };
++    const decision: RoutingDecisionSnapshot = {
++      taskFamily: "refactor",
++      shortlist: [worker, DAEMON_QWEN_WORKER],
++      selectedWorker: worker,
++      selectedBecause: { code: "user-specified", note: "PRIVATE_DAEMON_M3B_NOTE" },
++      competition: { intent: "none", triggers: [] },
++      evidenceSnapshot: { scope: "none", exactSampleCounts: {} },
++      advisory: {
++        overallResult: "recommended",
++        selection: "manual-override",
++        recommendedWorker: worker,
++        confidence: 0.5,
++        selectedExecution: DAEMON_SELECTED_EXECUTION,
++      },
++    };
++    const taskFile = await writeRoutingAdmissionTaskFile("local-grok-builder", decision);
++    await assert.rejects(
++      () => daemonRequest("validate_file", { taskFile }, home),
++      /cannot be manual-override when selectedWorker matches/,
++    );
++    await assert.rejects(
++      () => daemonRequest("submit_file", { taskFile }, home),
++      /cannot be manual-override when selectedWorker matches/,
++    );
++    await assertNoMutation(home);
++  } finally {
++    await daemon.close();
++  }
++});
++
++test("validate_file binds Profile-aware override and rejects selected execution mode mismatch", async () => {
++  const home = await mkdtemp(path.join(tmpdir(), "fl-rt-prof-"));
++  const daemon = await startSeededDaemon(home);
++  try {
++    const worker = {
++      provider: "xai",
++      model: "grok-4.5",
++      runtime: "grok-build",
++      effort: "high",
++      workerProfileId: "local-grok-builder",
++    };
++    const twin = { ...worker, workerProfileId: "local-grok-twin" };
++    const override: RoutingDecisionSnapshot = {
++      taskFamily: "refactor",
++      shortlist: [worker, twin],
++      selectedWorker: worker,
++      selectedBecause: { code: "user-specified", note: "PRIVATE_DAEMON_M3B_NOTE" },
++      competition: { intent: "none", triggers: [] },
++      evidenceSnapshot: { scope: "none", exactSampleCounts: {} },
++      advisory: {
++        overallResult: "recommended",
++        selection: "manual-override",
++        recommendedWorker: twin,
++        confidence: 0.84,
++        selectedExecution: DAEMON_SELECTED_EXECUTION,
++      },
++    };
++    const overrideFile = await writeRoutingAdmissionTaskFile("local-grok-builder", override);
++    const preview = await daemonRequest<SafeTaskAdmissionPreview>(
++      "validate_file",
++      { taskFile: overrideFile },
++      home,
++    );
++    assert.equal(preview.routingExplanation.advisory!.selection, "manual-override");
++    assert.equal(preview.routingExplanation.advisory!.recommendedWorker!.workerProfileId, "local-grok-twin");
++    assert.equal(preview.routingExplanation.advisory!.selectedExecution.resolvedExecutionMode, "single-run");
++    assert.ok(!JSON.stringify(preview).includes("PRIVATE_DAEMON_M3B_NOTE"));
++
++    const mismatch: RoutingDecisionSnapshot = {
++      ...override,
++      advisory: {
++        overallResult: "cannot-determine",
++        selection: "selected-after-cannot-determine",
++        cannotDetermineReasons: ["insufficient-relevant-samples"],
++        selectedExecution: {
++          ...DAEMON_SELECTED_EXECUTION,
++          resolvedExecutionMode: "native-goal",
++        },
++      },
++    };
++    const mismatchFile = await writeRoutingAdmissionTaskFile("local-grok-builder", mismatch);
++    await assert.rejects(
++      () => daemonRequest("validate_file", { taskFile: mismatchFile }, home),
++      /does not match resolved Task executionMode/,
++    );
++    await assert.rejects(
++      () => daemonRequest("submit_file", { taskFile: mismatchFile }, home),
++      /does not match resolved Task executionMode/,
++    );
++    await assertNoMutation(home);
++  } finally {
++    await daemon.close();
++  }
++});
++
+ /** Fully typed valid routing decision — never an empty object, so stored
+  *  TaskSpec records compile without an unsafe cast. */
+ function validRoutingDecision(taskFamily = "refactor"): RoutingDecisionSnapshot {
+diff --git a/baseline/tests/mcp.test.ts b/workspace/tests/mcp.test.ts
+index 09a44e9..30b5741 100644
+--- a/baseline/tests/mcp.test.ts
++++ b/workspace/tests/mcp.test.ts
+@@ -16,9 +16,11 @@ import type {
+   EffectivePolicySnapshot,
+   CompetitionCandidateRecord,
+   CompetitionRecord,
++  FrozenRoutingAdvisorySnapshot,
+   IntegrationReceiptRecord,
+   IntegrationResultRecord,
+   IntegrationStageEvidence,
++  RoutingDecisionSnapshot,
+   TaskRecord,
+   TaskSpec,
+   VerificationResult,
+@@ -2709,7 +2711,9 @@ const DEFAULT_FROZEN_WORKER = {
+   workerProfileId: "default",
+ };
+ 
+-function routingDecisionFixture(overrides: Record<string, unknown> = {}) {
++function routingDecisionFixture(
++  overrides: Record<string, unknown> = {},
++): RoutingDecisionSnapshot {
+   return {
+     taskFamily: "main-orchestration-metadata",
+     shortlist: [
+@@ -2735,7 +2739,7 @@ function routingDecisionFixture(overrides: Record<string, unknown> = {}) {
+       },
+     },
+     ...overrides,
+-  };
++  } as RoutingDecisionSnapshot;
+ }
+ 
+ test("MCP tool discovery describes taskClass, taskFamily, and routingDecision", async () => {
+@@ -2764,6 +2768,13 @@ test("MCP tool discovery describes taskClass, taskFamily, and routingDecision",
+         "competition",
+         "evidenceSnapshot",
+         "exactSampleCounts",
++        "advisory",
++        "overallResult",
++        "followed-recommendation",
++        "manual-override",
++        "selected-after-cannot-determine",
++        "cannotDetermineReasons",
++        "selectedExecution",
+       ]) {
+         assert.ok(schemaText.includes(key), `${name} schema describes ${key}`);
+       }
+@@ -2820,6 +2831,7 @@ test("inlineTask + parseTaskSpec preserve exact routing metadata without inferen
+   assert.equal(spec.provider.model, spec.routingDecision!.selectedWorker.model);
+   assert.equal(spec.runtime.name, spec.routingDecision!.selectedWorker.runtime);
+   assert.equal(spec.runtime.effort, spec.routingDecision!.selectedWorker.effort);
++  assert.equal(spec.routingDecision!.advisory, undefined);
+ });
+ 
+ test("MCP validate/submit preserve routingDecision; identity drift and omit stay compatible", async () => {
+@@ -2892,6 +2904,11 @@ test("MCP validate/submit preserve routingDecision; identity drift and omit stay
+     });
+     assert.equal(legacy.isError, undefined, toolErrorText(legacy));
+     assert.equal((legacy.structuredContent as { passed?: boolean }).passed, true);
++    assert.equal(
++      (legacy.structuredContent as { routingExplanation?: { advisory?: unknown } }).routingExplanation?.advisory,
++      null,
++      "legacy omit must not invent an advisory relationship",
++    );
+ 
+     // Submit persists the exact snapshot on the stored Task.
+     const submit = await client.callTool({
+@@ -2929,6 +2946,213 @@ test("MCP validate/submit preserve routingDecision; identity drift and omit stay
+   }
+ });
+ 
++const MCP_QWEN_WORKER = {
++  provider: "qwen",
++  model: "qwen3.7-plus",
++  runtime: "claude-code",
++  effort: "high",
++};
++const MCP_SELECTED_EXECUTION = {
++  resolvedExecutionMode: "single-run" as const,
++  readinessState: "launchable" as const,
++  canLaunch: true,
++  nextAction: "none" as const,
++};
++
++test("MCP validate/submit carry frozen advisory relationship and hide private fields", async () => {
++  const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-rd-adv-"));
++  const daemon = new ForkLightDaemon(home, 0);
++  await daemon.start();
++  const server = createForkLightMcpServer(home);
++  const client = new Client({ name: "forklight-test", version: "1.0.0" });
++  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
++  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
++  try {
++    const followedAdvisory: FrozenRoutingAdvisorySnapshot = {
++      overallResult: "recommended",
++      selection: "followed-recommendation",
++      recommendedWorker: DEFAULT_FROZEN_WORKER,
++      confidence: 0.91,
++      selectedExecution: MCP_SELECTED_EXECUTION,
++    };
++    const followed = routingDecisionFixture({
++      selectedBecause: {
++        code: "user-specified",
++        note: "PRIVATE_MCP_M3B_NOTE",
++      },
++      evidenceSnapshot: {
++        scope: "none",
++        exactSampleCounts: { SECRET_MCP_SAMPLE_KEY: 0 },
++        settingsDigest: "SECRET_MCP_SETTINGS_DIGEST",
++      },
++      advisory: followedAdvisory,
++    });
++    const followedArgs = qualityContractArgs(home, {
++      taskClass: "m3-b-durable-routing-override",
++      taskFamily: "main-orchestration-metadata",
++      routingDecision: followed,
++    });
++    const valid = await client.callTool({ name: "forklight_validate", arguments: followedArgs });
++    assert.equal(valid.isError, undefined, toolErrorText(valid));
++    const body = valid.structuredContent as {
++      passed?: boolean;
++      routingExplanation?: {
++        advisory?: {
++          selection?: string;
++          confidence?: number;
++          recommendedWorker?: unknown;
++          overallResult?: string;
++        };
++      };
++    };
++    assert.equal(body.passed, true);
++    assert.equal(body.routingExplanation?.advisory?.selection, "followed-recommendation");
++    assert.equal(body.routingExplanation?.advisory?.overallResult, "recommended");
++    assert.equal(body.routingExplanation?.advisory?.confidence, 0.91);
++    assert.deepEqual(body.routingExplanation?.advisory?.recommendedWorker, DEFAULT_FROZEN_WORKER);
++    const serialized = JSON.stringify(valid);
++    assert.ok(!serialized.includes("PRIVATE_MCP_M3B_NOTE"));
++    assert.ok(!serialized.includes("SECRET_MCP_SAMPLE_KEY"));
++    assert.ok(!serialized.includes("SECRET_MCP_SETTINGS_DIGEST"));
++
++    const override = routingDecisionFixture({
++      selectedBecause: { code: "user-specified", note: "PRIVATE_MCP_M3B_NOTE" },
++      advisory: {
++        overallResult: "recommended",
++        selection: "manual-override",
++        recommendedWorker: MCP_QWEN_WORKER,
++        confidence: 0.84,
++        selectedExecution: MCP_SELECTED_EXECUTION,
++      },
++    });
++    const overrideValid = await client.callTool({
++      name: "forklight_validate",
++      arguments: qualityContractArgs(home, {
++        taskClass: "m3-b-durable-routing-override",
++        taskFamily: "main-orchestration-metadata",
++        routingDecision: override,
++      }),
++    });
++    assert.equal(overrideValid.isError, undefined, toolErrorText(overrideValid));
++    const overrideBody = overrideValid.structuredContent as {
++      routingExplanation?: { advisory?: { selection?: string; recommendedWorker?: unknown } };
++    };
++    assert.equal(overrideBody.routingExplanation?.advisory?.selection, "manual-override");
++    assert.deepEqual(overrideBody.routingExplanation?.advisory?.recommendedWorker, MCP_QWEN_WORKER);
++
++    const cannotDetermine = routingDecisionFixture({
++      selectedBecause: { code: "user-specified", note: "PRIVATE_MCP_M3B_NOTE" },
++      advisory: {
++        overallResult: "cannot-determine",
++        selection: "selected-after-cannot-determine",
++        cannotDetermineReasons: ["insufficient-relevant-samples"],
++        selectedExecution: MCP_SELECTED_EXECUTION,
++      },
++    });
++    const cannotValid = await client.callTool({
++      name: "forklight_validate",
++      arguments: qualityContractArgs(home, {
++        taskClass: "m3-b-durable-routing-override",
++        taskFamily: "main-orchestration-metadata",
++        routingDecision: cannotDetermine,
++      }),
++    });
++    assert.equal(cannotValid.isError, undefined, toolErrorText(cannotValid));
++    const cannotBody = cannotValid.structuredContent as {
++      routingExplanation?: {
++        advisory?: { selection?: string; recommendedWorker?: unknown; confidence?: number };
++      };
++    };
++    assert.equal(cannotBody.routingExplanation?.advisory?.selection, "selected-after-cannot-determine");
++    assert.equal(cannotBody.routingExplanation?.advisory?.recommendedWorker, undefined);
++    assert.equal(cannotBody.routingExplanation?.advisory?.confidence, undefined);
++
++    const contradictory = await client.callTool({
++      name: "forklight_validate",
++      arguments: qualityContractArgs(home, {
++        taskClass: "m3-b-durable-routing-override",
++        routingDecision: routingDecisionFixture({
++          selectedBecause: { code: "user-specified", note: "PRIVATE_MCP_M3B_NOTE" },
++          advisory: {
++            overallResult: "recommended",
++            selection: "manual-override",
++            recommendedWorker: DEFAULT_FROZEN_WORKER,
++            confidence: 0.5,
++            selectedExecution: MCP_SELECTED_EXECUTION,
++          },
++        }),
++      }),
++    });
++    assert.equal(contradictory.isError, true, "contradictory override must fail before admission");
++    assert.match(toolErrorText(contradictory), /cannot be manual-override when selectedWorker matches/);
++    assert.ok(!toolErrorText(contradictory).includes("PRIVATE_MCP_M3B_NOTE"));
++
++    const submit = await client.callTool({
++      name: "forklight_submit",
++      arguments: followedArgs,
++    });
++    assert.equal(submit.isError, undefined, toolErrorText(submit));
++    const taskId = String((submit.structuredContent as { taskId?: string }).taskId);
++    const stored = await daemonRequest<TaskRecord>("status", { taskId }, home);
++    assert.deepEqual(stored.spec.routingDecision?.advisory, followedAdvisory);
++    assert.equal(followed.advisory?.selection, "followed-recommendation");
++    assert.equal(stored.spec.routingDecision?.selectedBecause.note, "PRIVATE_MCP_M3B_NOTE");
++
++    const twin = { ...DEFAULT_FROZEN_WORKER, workerProfileId: "default-twin" };
++    const profileOverride = await client.callTool({
++      name: "forklight_validate",
++      arguments: qualityContractArgs(home, {
++        taskClass: "m3-b-durable-routing-override",
++        taskFamily: "main-orchestration-metadata",
++        routingDecision: routingDecisionFixture({
++          shortlist: [DEFAULT_FROZEN_WORKER, twin],
++          selectedBecause: { code: "user-specified", note: "PRIVATE_MCP_M3B_NOTE" },
++          advisory: {
++            overallResult: "recommended",
++            selection: "manual-override",
++            recommendedWorker: twin,
++            confidence: 0.84,
++            selectedExecution: MCP_SELECTED_EXECUTION,
++          },
++        }),
++      }),
++    });
++    assert.equal(profileOverride.isError, undefined, toolErrorText(profileOverride));
++    const profileBody = profileOverride.structuredContent as {
++      routingExplanation?: { advisory?: { selection?: string; recommendedWorker?: { workerProfileId?: string } } };
++    };
++    assert.equal(profileBody.routingExplanation?.advisory?.selection, "manual-override");
++    assert.equal(profileBody.routingExplanation?.advisory?.recommendedWorker?.workerProfileId, "default-twin");
++    assert.ok(!JSON.stringify(profileOverride).includes("PRIVATE_MCP_M3B_NOTE"));
++
++    const modeMismatch = await client.callTool({
++      name: "forklight_validate",
++      arguments: qualityContractArgs(home, {
++        taskClass: "m3-b-durable-routing-override",
++        routingDecision: routingDecisionFixture({
++          selectedBecause: { code: "user-specified", note: "PRIVATE_MCP_M3B_NOTE" },
++          advisory: {
++            overallResult: "cannot-determine",
++            selection: "selected-after-cannot-determine",
++            cannotDetermineReasons: ["insufficient-relevant-samples"],
++            selectedExecution: {
++              ...MCP_SELECTED_EXECUTION,
++              resolvedExecutionMode: "native-goal",
++            },
++          },
++        }),
++      }),
++    });
++    assert.equal(modeMismatch.isError, true, "mode mismatch must fail before admission");
++    assert.match(toolErrorText(modeMismatch), /does not match resolved Task executionMode/);
++    assert.ok(!toolErrorText(modeMismatch).includes("PRIVATE_MCP_M3B_NOTE"));
++  } finally {
++    await client.close();
++    await server.close();
++    await daemon.close();
++  }
++});
++
+ test("MCP validates the same optional Main-authored presentation shape as YAML Tasks", async () => {
+   const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-presentation-"));
+   const daemon = new ForkLightDaemon(home, 0);
+diff --git a/workspace/tests/routing-explanation.test.ts b/workspace/tests/routing-explanation.test.ts
+new file mode 100644
+index 0000000..e641131
+--- /dev/null
++++ b/workspace/tests/routing-explanation.test.ts
+@@ -0,0 +1,139 @@
++import assert from "node:assert/strict";
++import test from "node:test";
++import {
++  formatRoutingExplanationHuman,
++  projectSafeRoutingExplanation,
++} from "../src/core/routing-explanation.js";
++import type { RoutingDecisionSnapshot } from "../src/core/types.js";
++
++const DEEPSEEK = {
++  provider: "deepseek",
++  model: "deepseek-v4-flash",
++  runtime: "claude-code",
++  effort: "high",
++  workerProfileId: "default",
++};
++const QWEN = {
++  provider: "qwen",
++  model: "qwen3.7-plus",
++  runtime: "claude-code",
++  effort: "high",
++};
++const SELECTED_EXECUTION = {
++  resolvedExecutionMode: "single-run" as const,
++  readinessState: "launchable" as const,
++  canLaunch: true,
++  nextAction: "none" as const,
++};
++
++function snapshot(overrides: Partial<RoutingDecisionSnapshot> = {}): RoutingDecisionSnapshot {
++  return {
++    shortlist: [DEEPSEEK, QWEN],
++    selectedWorker: DEEPSEEK,
++    selectedBecause: { code: "user-specified", note: "PRIVATE_M3B_NOTE_NEVER_PROJECT" },
++    competition: { intent: "none", triggers: [] },
++    evidenceSnapshot: {
++      scope: "exact-class",
++      exactSampleCounts: { SECRET_M3B_SAMPLE_KEY: 2 },
++      settingsDigest: "SECRET_M3B_SETTINGS_DIGEST",
++    },
++    ...overrides,
++  };
++}
++
++function project(decision?: RoutingDecisionSnapshot) {
++  return projectSafeRoutingExplanation({
++    ...(decision === undefined ? {} : { routingDecision: decision }),
++    selectedWorker: DEEPSEEK,
++    workerProfileId: "default",
++    workerProfileLabel: "Default Worker",
++  });
++}
++
++test("projection of followed-recommendation keeps recommended, selected, confidence, and execution", () => {
++  const explanation = project(snapshot({
++    advisory: {
++      overallResult: "recommended",
++      selection: "followed-recommendation",
++      recommendedWorker: DEEPSEEK,
++      confidence: 0.91,
++      selectedExecution: SELECTED_EXECUTION,
++    },
++  }));
++  assert.equal(explanation.present, true);
++  assert.equal(explanation.advisory!.overallResult, "recommended");
++  assert.equal(explanation.advisory!.selection, "followed-recommendation");
++  assert.deepEqual(explanation.advisory!.recommendedWorker, DEEPSEEK);
++  assert.equal(explanation.advisory!.confidence, 0.91);
++  assert.deepEqual(explanation.advisory!.selectedExecution, SELECTED_EXECUTION);
++  assert.equal(explanation.selectedWorker.provider, "deepseek");
++  const human = formatRoutingExplanationHuman(explanation);
++  assert.match(human, /Advisory result: recommended/);
++  assert.match(human, /Selection: followed-recommendation/);
++  assert.match(human, /Confidence: 0\.91/);
++  assert.match(human, /Selected execution mode: single-run/);
++});
++
++test("projection of manual-override keeps both identities and never emits the private note", () => {
++  const explanation = project(snapshot({
++    advisory: {
++      overallResult: "recommended",
++      selection: "manual-override",
++      recommendedWorker: QWEN,
++      confidence: 0.84,
++      selectedExecution: SELECTED_EXECUTION,
++    },
++  }));
++  assert.equal(explanation.advisory!.selection, "manual-override");
++  assert.deepEqual(explanation.advisory!.recommendedWorker, QWEN);
++  assert.equal(explanation.advisory!.confidence, 0.84);
++  const serialized = JSON.stringify(explanation);
++  assert.ok(!serialized.includes("PRIVATE_M3B_NOTE_NEVER_PROJECT"));
++  assert.ok(!serialized.includes("SECRET_M3B_SETTINGS_DIGEST"));
++  assert.ok(!serialized.includes("SECRET_M3B_SAMPLE_KEY"));
++  assert.ok(!serialized.includes("settingsDigest"));
++  const human = formatRoutingExplanationHuman(explanation);
++  assert.ok(!human.includes("PRIVATE_M3B_NOTE_NEVER_PROJECT"));
++  assert.ok(!human.includes("SECRET_M3B_SAMPLE_KEY"));
++  assert.match(human, /Recommended: qwen\/qwen3\.7-plus/);
++});
++
++test("projection of cannot-determine stores no recommendation or confidence and implies no superiority", () => {
++  const explanation = project(snapshot({
++    advisory: {
++      overallResult: "cannot-determine",
++      selection: "selected-after-cannot-determine",
++      cannotDetermineReasons: ["insufficient-relevant-samples"],
++      selectedExecution: SELECTED_EXECUTION,
++    },
++  }));
++  assert.equal(explanation.advisory!.overallResult, "cannot-determine");
++  assert.equal(explanation.advisory!.selection, "selected-after-cannot-determine");
++  assert.equal(explanation.advisory!.recommendedWorker, undefined);
++  assert.equal(explanation.advisory!.confidence, undefined);
++  assert.deepEqual(
++    explanation.advisory!.cannotDetermineReasons,
++    ["insufficient-relevant-samples"],
++  );
++  const human = formatRoutingExplanationHuman(explanation);
++  assert.match(human, /Advisory result: cannot-determine/);
++  assert.match(human, /Selection: selected-after-cannot-determine/);
++  assert.match(human, /Cannot determine because: insufficient-relevant-samples/);
++  assert.doesNotMatch(human, /Recommended:/);
++  assert.doesNotMatch(human, /Confidence:/);
++  assert.doesNotMatch(human, /best|superior|winner/i);
++});
++
++test("legacy decision and missing routingDecision invent no advisory relationship", () => {
++  const legacy = project(snapshot());
++  assert.equal(legacy.present, true);
++  assert.equal(legacy.advisory, null);
++  assert.equal(legacy.basis, "user-specified");
++  const missing = project();
++  assert.equal(missing.present, false);
++  assert.equal(missing.advisory, null);
++  assert.equal(missing.nextAction, "not-recorded");
++  const human = formatRoutingExplanationHuman(legacy);
++  assert.doesNotMatch(human, /Advisory result:/);
++  assert.doesNotMatch(human, /followed-recommendation|manual-override|selected-after-cannot-determine/);
++});
+diff --git a/baseline/tests/task-preview.test.ts b/workspace/tests/task-preview.test.ts
+index 4f78e66..d9d683d 100644
+--- a/baseline/tests/task-preview.test.ts
++++ b/workspace/tests/task-preview.test.ts
+@@ -766,6 +766,7 @@ test("routing explanation degrades honestly when no routing decision exists", as
+   assert.equal(explanation.evidence, null);
+   assert.equal(explanation.competition, null);
+   assert.equal(explanation.nextAction, "not-recorded");
++  assert.equal(explanation.advisory, null);
+   // The resolved Worker remains visible even when reasoning was not recorded.
+   assert.equal(explanation.selectedWorker.provider, "xai");
+   assert.equal(explanation.selectedWorker.model, "grok-4.5");
+@@ -901,6 +902,142 @@ test("routing explanation never enters the preview revision digest", async () =>
+   assert.equal(projected.previewRevisionDigest, recomputed);
+ });
+ 
++const PREVIEW_QWEN_WORKER = {
++  provider: "qwen",
++  model: "qwen3.7-plus",
++  runtime: "claude-code",
++  effort: "high",
++};
++const PREVIEW_SELECTED_EXECUTION = {
++  resolvedExecutionMode: "single-run",
++  readinessState: "launchable",
++  canLaunch: true,
++  nextAction: "none",
++};
++
++test("preview followed-recommendation projects frozen advisory facts without rescoring", async () => {
++  const decision = routingDecisionFor("user-specified", {
++    shortlist: [GROK_SELECTED_WORKER, PREVIEW_QWEN_WORKER],
++    advisory: {
++      overallResult: "recommended",
++      selection: "followed-recommendation",
++      recommendedWorker: GROK_SELECTED_WORKER,
++      confidence: 0.91,
++      selectedExecution: PREVIEW_SELECTED_EXECUTION,
++    },
++  });
++  const taskFile = await writeRoutingDecisionTask(decision);
++  const preview = await buildTaskAdmissionPreview(taskFile, settingsWithGrokBuilder());
++  const advisory = preview.routingExplanation.advisory!;
++  assert.equal(advisory.overallResult, "recommended");
++  assert.equal(advisory.selection, "followed-recommendation");
++  assert.deepEqual(advisory.recommendedWorker, GROK_SELECTED_WORKER);
++  assert.equal(advisory.confidence, 0.91);
++  assert.deepEqual(advisory.selectedExecution, PREVIEW_SELECTED_EXECUTION);
++});
++
++test("preview manual-override keeps both identities and hides the private note", async () => {
++  const decision = routingDecisionFor("user-specified", {
++    shortlist: [GROK_SELECTED_WORKER, PREVIEW_QWEN_WORKER],
++    selectedBecause: { code: "user-specified", note: "PRIVATE_M3B_NOTE_NEVER_PROJECT" },
++    evidenceSnapshot: {
++      scope: "exact-class",
++      exactSampleCounts: { SECRET_M3B_SAMPLE_KEY: 1 },
++      settingsDigest: "SECRET_M3B_SETTINGS_DIGEST",
++    },
++    advisory: {
++      overallResult: "recommended",
++      selection: "manual-override",
++      recommendedWorker: PREVIEW_QWEN_WORKER,
++      confidence: 0.84,
++      selectedExecution: PREVIEW_SELECTED_EXECUTION,
++    },
++  });
++  const taskFile = await writeRoutingDecisionTask(decision);
++  const preview = await buildTaskAdmissionPreview(taskFile, settingsWithGrokBuilder());
++  assert.equal(preview.routingExplanation.advisory!.selection, "manual-override");
++  assert.deepEqual(preview.routingExplanation.advisory!.recommendedWorker, PREVIEW_QWEN_WORKER);
++  const json = JSON.stringify(preview);
++  const human = formatTaskAdmissionPreviewHuman(preview);
++  assert.ok(!json.includes("PRIVATE_M3B_NOTE_NEVER_PROJECT"));
++  assert.ok(!json.includes("SECRET_M3B_SETTINGS_DIGEST"));
++  assert.ok(!json.includes("SECRET_M3B_SAMPLE_KEY"));
++  assert.ok(!human.includes("PRIVATE_M3B_NOTE_NEVER_PROJECT"));
++  assert.match(human, /Selection: manual-override/);
++});
++
++test("preview cannot-determine records Main selection without recommendation or confidence", async () => {
++  const decision = routingDecisionFor("user-specified", {
++    advisory: {
++      overallResult: "cannot-determine",
++      selection: "selected-after-cannot-determine",
++      cannotDetermineReasons: ["insufficient-relevant-samples"],
++      selectedExecution: PREVIEW_SELECTED_EXECUTION,
++    },
++  });
++  const taskFile = await writeRoutingDecisionTask(decision);
++  const preview = await buildTaskAdmissionPreview(taskFile, settingsWithGrokBuilder());
++  const advisory = preview.routingExplanation.advisory!;
++  assert.equal(advisory.overallResult, "cannot-determine");
++  assert.equal(advisory.selection, "selected-after-cannot-determine");
++  assert.equal(advisory.recommendedWorker, undefined);
++  assert.equal(advisory.confidence, undefined);
++  const human = formatTaskAdmissionPreviewHuman(preview);
++  assert.match(human, /Cannot determine because: insufficient-relevant-samples/);
++  assert.doesNotMatch(human, /Recommended:/);
++  assert.doesNotMatch(human, /best|superior|winner/i);
++});
++
++test("preview accepts same-executable different-Profile override and rejects mode mismatch", async () => {
++  const twin = { ...GROK_SELECTED_WORKER, workerProfileId: "local-grok-twin" };
++  const overrideDecision = routingDecisionFor("user-specified", {
++    shortlist: [GROK_SELECTED_WORKER, twin],
++    selectedBecause: { code: "user-specified", note: "PRIVATE_M3B_NOTE_NEVER_PROJECT" },
++    advisory: {
++      overallResult: "recommended",
++      selection: "manual-override",
++      recommendedWorker: twin,
++      confidence: 0.84,
++      selectedExecution: PREVIEW_SELECTED_EXECUTION,
++    },
++  });
++  const overrideFile = await writeRoutingDecisionTask(overrideDecision);
++  const preview = await buildTaskAdmissionPreview(overrideFile, settingsWithGrokBuilder());
++  assert.equal(preview.routingExplanation.advisory!.selection, "manual-override");
++  assert.equal(preview.routingExplanation.advisory!.recommendedWorker!.workerProfileId, "local-grok-twin");
++  assert.equal(preview.routingExplanation.selectedWorker.workerProfileId, "local-grok-builder");
++  assert.equal(preview.routingExplanation.advisory!.selectedExecution.resolvedExecutionMode, "single-run");
++  const json = JSON.stringify(preview);
++  assert.ok(!json.includes("PRIVATE_M3B_NOTE_NEVER_PROJECT"));
++
++  const mismatch = routingDecisionFor("user-specified", {
++    advisory: {
++      overallResult: "cannot-determine",
++      selection: "selected-after-cannot-determine",
++      cannotDetermineReasons: ["insufficient-relevant-samples"],
++      selectedExecution: {
++        ...PREVIEW_SELECTED_EXECUTION,
++        resolvedExecutionMode: "native-goal",
++      },
++    },
++  });
++  const mismatchFile = await writeRoutingDecisionTask(mismatch);
++  await assert.rejects(
++    () => buildTaskAdmissionPreview(mismatchFile, settingsWithGrokBuilder()),
++    /does not match resolved Task executionMode/,
++  );
++});
++
++test("preview of a legacy routingDecision invents no advisory relationship", async () => {
++  const decision = routingDecisionFor("main-judgment");
++  const taskFile = await writeRoutingDecisionTask(decision);
++  const preview = await buildTaskAdmissionPreview(taskFile, settingsWithGrokBuilder());
++  assert.equal(preview.routingExplanation.present, true);
++  assert.equal(preview.routingExplanation.advisory, null);
++  const human = formatTaskAdmissionPreviewHuman(preview);
++  assert.doesNotMatch(human, /Advisory result:/);
++});
++
+ test("human routing explanation renders selection, evidence and Competition concisely", async () => {
+   const decision = routingDecisionFor("main-judgment", {
+     competition: { intent: "consider", triggers: ["critical"] },
+diff --git a/baseline/tests/task.test.ts b/workspace/tests/task.test.ts
+index 784eb85..61f1807 100644
+--- a/baseline/tests/task.test.ts
++++ b/workspace/tests/task.test.ts
+@@ -2004,6 +2004,383 @@ test("routingDecision taskFamily must match top-level taskFamily when both prese
+   );
+ });
+ 
++// --- M3-B frozen advisory relationship ---
++
++const DEEPSEEK_FROZEN = {
++  provider: "deepseek",
++  model: "deepseek-v4-flash",
++  runtime: "claude-code",
++  effort: "high",
++  workerProfileId: "default",
++};
++const QWEN_FROZEN = {
++  provider: "qwen",
++  model: "qwen3.7-plus",
++  runtime: "claude-code",
++  effort: "high",
++};
++const PRIVATE_ADVISORY_NOTE = "PRIVATE_M3B_NOTE_NEVER_PROJECT";
++
++function frozenSelectedExecution(overrides: Record<string, unknown> = {}) {
++  return {
++    resolvedExecutionMode: "single-run",
++    readinessState: "launchable",
++    canLaunch: true,
++    nextAction: "none",
++    ...overrides,
++  };
++}
++
++function advisoryRoutingDecision(overrides: Record<string, unknown> = {}) {
++  return {
++    shortlist: [DEEPSEEK_FROZEN, QWEN_FROZEN],
++    selectedWorker: DEEPSEEK_FROZEN,
++    selectedBecause: { code: "user-specified", note: PRIVATE_ADVISORY_NOTE },
++    competition: { intent: "none", triggers: [] },
++    evidenceSnapshot: {
++      scope: "none",
++      exactSampleCounts: {},
++      settingsDigest: "SECRET_M3B_SETTINGS_DIGEST",
++    },
++    ...overrides,
++  };
++}
++
++function parseAdvisoryDecision(routingDecision: Record<string, unknown>) {
++  return parseTaskSpec(
++    {
++      ...contractSpec(),
++      workerProfileId: "default",
++      routingDecision,
++    },
++    process.cwd(),
++  );
++}
++
++test("followed-recommendation stores the same recommended and selected identity with frozen confidence", () => {
++  const spec = parseAdvisoryDecision(advisoryRoutingDecision({
++    advisory: {
++      overallResult: "recommended",
++      selection: "followed-recommendation",
++      recommendedWorker: DEEPSEEK_FROZEN,
++      confidence: 0.91,
++      selectedExecution: frozenSelectedExecution(),
++    },
++  }));
++  const advisory = spec.routingDecision!.advisory!;
++  assert.equal(advisory.overallResult, "recommended");
++  assert.equal(advisory.selection, "followed-recommendation");
++  assert.deepEqual(advisory.recommendedWorker, DEEPSEEK_FROZEN);
++  assert.deepEqual(spec.routingDecision!.selectedWorker, DEEPSEEK_FROZEN);
++  assert.equal(advisory.confidence, 0.91);
++  assert.equal(advisory.cannotDetermineReasons, undefined);
++  assert.deepEqual(advisory.selectedExecution, frozenSelectedExecution());
++  assert.equal(spec.routingDecision!.selectedBecause.note, PRIVATE_ADVISORY_NOTE);
++});
++
++test("manual-override stores both identities, keeps confidence, and retains the private note on the Task", () => {
++  const spec = parseAdvisoryDecision(advisoryRoutingDecision({
++    selectedBecause: { code: "user-specified", note: PRIVATE_ADVISORY_NOTE },
++    advisory: {
++      overallResult: "recommended",
++      selection: "manual-override",
++      recommendedWorker: QWEN_FROZEN,
++      confidence: 0.84,
++      selectedExecution: frozenSelectedExecution({ readinessState: "ready" }),
++    },
++  }));
++  const advisory = spec.routingDecision!.advisory!;
++  assert.equal(advisory.selection, "manual-override");
++  assert.deepEqual(advisory.recommendedWorker, QWEN_FROZEN);
++  assert.deepEqual(spec.routingDecision!.selectedWorker, DEEPSEEK_FROZEN);
++  assert.equal(advisory.confidence, 0.84);
++  assert.equal(spec.routingDecision!.selectedBecause.note, PRIVATE_ADVISORY_NOTE);
++});
++
++test("cannot-determine stores Main selection without recommendation, confidence, or superiority", () => {
++  const spec = parseAdvisoryDecision(advisoryRoutingDecision({
++    advisory: {
++      overallResult: "cannot-determine",
++      selection: "selected-after-cannot-determine",
++      cannotDetermineReasons: ["insufficient-relevant-samples"],
++      selectedExecution: frozenSelectedExecution(),
++    },
++  }));
++  const advisory = spec.routingDecision!.advisory!;
++  assert.equal(advisory.overallResult, "cannot-determine");
++  assert.equal(advisory.selection, "selected-after-cannot-determine");
++  assert.equal(advisory.recommendedWorker, undefined);
++  assert.equal(advisory.confidence, undefined);
++  assert.deepEqual(advisory.cannotDetermineReasons, ["insufficient-relevant-samples"]);
++  assert.deepEqual(spec.routingDecision!.selectedWorker, DEEPSEEK_FROZEN);
++});
++
++test("historical-best-not-launchable with manual-override stays a recommendation relationship", () => {
++  const spec = parseAdvisoryDecision(advisoryRoutingDecision({
++    advisory: {
++      overallResult: "historical-best-not-launchable",
++      selection: "manual-override",
++      recommendedWorker: QWEN_FROZEN,
++      confidence: 0.7,
++      selectedExecution: frozenSelectedExecution({
++        readinessState: "launchable",
++        canLaunch: true,
++      }),
++    },
++  }));
++  assert.equal(spec.routingDecision!.advisory!.overallResult, "historical-best-not-launchable");
++  assert.equal(spec.routingDecision!.advisory!.selection, "manual-override");
++  assert.deepEqual(spec.routingDecision!.advisory!.recommendedWorker, QWEN_FROZEN);
++});
++
++test("legacy routingDecision without advisory remains readable and invents no relationship", () => {
++  const spec = parseAdvisoryDecision(advisoryRoutingDecision());
++  assert.ok(spec.routingDecision);
++  assert.equal(spec.routingDecision!.advisory, undefined);
++  assert.equal(spec.routingDecision!.selectedWorker.provider, "deepseek");
++});
++
++test("contradictory advisory shapes fail before a Task spec is produced", () => {
++  const cases: Array<{ name: string; advisory: Record<string, unknown>; pattern: RegExp }> = [
++    {
++      name: "recommended Worker outside shortlist",
++      advisory: {
++        overallResult: "recommended",
++        selection: "followed-recommendation",
++        recommendedWorker: {
++          provider: "xai",
++          model: "grok-4.6",
++          runtime: "grok-build",
++          effort: "xhigh",
++        },
++        confidence: 0.5,
++        selectedExecution: frozenSelectedExecution(),
++      },
++      pattern: /recommendedWorker must match an entry in the shortlist/,
++    },
++    {
++      name: "override that selects the recommendation",
++      advisory: {
++        overallResult: "recommended",
++        selection: "manual-override",
++        recommendedWorker: DEEPSEEK_FROZEN,
++        confidence: 0.5,
++        selectedExecution: frozenSelectedExecution(),
++      },
++      pattern: /cannot be manual-override when selectedWorker matches/,
++    },
++    {
++      name: "followed-recommendation with a different selected Worker",
++      advisory: {
++        overallResult: "recommended",
++        selection: "followed-recommendation",
++        recommendedWorker: QWEN_FROZEN,
++        confidence: 0.5,
++        selectedExecution: frozenSelectedExecution(),
++      },
++      pattern: /cannot be followed-recommendation unless the recommended Worker matches/,
++    },
++    {
++      name: "confidence without a recommendation",
++      advisory: {
++        overallResult: "cannot-determine",
++        selection: "selected-after-cannot-determine",
++        confidence: 0.4,
++        cannotDetermineReasons: ["insufficient-relevant-samples"],
++        selectedExecution: frozenSelectedExecution(),
++      },
++      pattern: /recommendedWorker and confidence must be present together/,
++    },
++    {
++      name: "cannot-determine claiming a recommended Worker",
++      advisory: {
++        overallResult: "cannot-determine",
++        selection: "selected-after-cannot-determine",
++        recommendedWorker: DEEPSEEK_FROZEN,
++        confidence: 0.4,
++        cannotDetermineReasons: ["insufficient-relevant-samples"],
++        selectedExecution: frozenSelectedExecution(),
++      },
++      pattern: /must not include a recommended Worker or confidence/,
++    },
++    {
++      name: "recommended overallResult with cannot-determine selection",
++      advisory: {
++        overallResult: "recommended",
++        selection: "selected-after-cannot-determine",
++        recommendedWorker: DEEPSEEK_FROZEN,
++        confidence: 0.4,
++        selectedExecution: frozenSelectedExecution(),
++      },
++      pattern: /must be followed-recommendation or manual-override/,
++    },
++    {
++      name: "unsupported advisory field",
++      advisory: {
++        overallResult: "recommended",
++        selection: "followed-recommendation",
++        recommendedWorker: DEEPSEEK_FROZEN,
++        confidence: 0.4,
++        selectedExecution: frozenSelectedExecution(),
++        note: PRIVATE_ADVISORY_NOTE,
++      },
++      pattern: /advisory contains an unsupported field/,
++    },
++  ];
++  for (const item of cases) {
++    assert.throws(
++      () => parseAdvisoryDecision(advisoryRoutingDecision({ advisory: item.advisory })),
++      (error: unknown) => {
++        assert.ok(error instanceof Error, item.name);
++        assert.match(error.message, item.pattern, item.name);
++        assert.ok(!error.message.includes(PRIVATE_ADVISORY_NOTE), `${item.name} must stay privacy-safe`);
++        assert.ok(!error.message.includes("SECRET_M3B_SETTINGS_DIGEST"), `${item.name} must not leak digest`);
++        return true;
++      },
++    );
++  }
++});
++
++test("advisory selected Worker still must match the resolved Task identity", () => {
++  assert.throws(
++    () => parseTaskSpec({
++      ...contractSpec(),
++      workerProfileId: "default",
++      routingDecision: advisoryRoutingDecision({
++        selectedWorker: QWEN_FROZEN,
++        shortlist: [DEEPSEEK_FROZEN, QWEN_FROZEN],
++        advisory: {
++          overallResult: "recommended",
++          selection: "manual-override",
++          recommendedWorker: DEEPSEEK_FROZEN,
++          confidence: 0.6,
++          selectedExecution: frozenSelectedExecution(),
++        },
++      }),
++    }, process.cwd()),
++    /does not match resolved Task provider/,
++  );
++});
++
++const DEEPSEEK_TWIN = {
++  ...DEEPSEEK_FROZEN,
++  workerProfileId: "default-twin",
++};
++
++test("advisory shortlist and relationship bind exact Profile when executable identity is shared", () => {
++  const sharedShortlist = [DEEPSEEK_FROZEN, DEEPSEEK_TWIN];
++  const forged = {
++    ...DEEPSEEK_FROZEN,
++    workerProfileId: "forged-default",
++  };
++  assert.throws(
++    () => parseAdvisoryDecision(advisoryRoutingDecision({
++      shortlist: sharedShortlist,
++      advisory: {
++        overallResult: "recommended",
++        selection: "followed-recommendation",
++        recommendedWorker: forged,
++        confidence: 0.5,
++        selectedExecution: frozenSelectedExecution(),
++      },
++    })),
++    /recommendedWorker must match an entry in the shortlist/,
++  );
++  assert.throws(
++    () => parseAdvisoryDecision(advisoryRoutingDecision({
++      shortlist: sharedShortlist,
++      advisory: {
++        overallResult: "recommended",
++        selection: "followed-recommendation",
++        recommendedWorker: DEEPSEEK_TWIN,
++        confidence: 0.5,
++        selectedExecution: frozenSelectedExecution(),
++      },
++    })),
++    /cannot be followed-recommendation unless the recommended Worker matches/,
++  );
++  assert.throws(
++    () => parseAdvisoryDecision(advisoryRoutingDecision({
++      shortlist: sharedShortlist,
++      advisory: {
++        overallResult: "recommended",
++        selection: "manual-override",
++        recommendedWorker: DEEPSEEK_FROZEN,
++        confidence: 0.5,
++        selectedExecution: frozenSelectedExecution(),
++      },
++    })),
++    /cannot be manual-override when selectedWorker matches/,
++  );
++
++  const followed = parseAdvisoryDecision(advisoryRoutingDecision({
++    shortlist: sharedShortlist,
++    advisory: {
++      overallResult: "recommended",
++      selection: "followed-recommendation",
++      recommendedWorker: DEEPSEEK_FROZEN,
++      confidence: 0.91,
++      selectedExecution: frozenSelectedExecution(),
++    },
++  }));
++  assert.equal(followed.routingDecision!.advisory!.selection, "followed-recommendation");
++  assert.equal(followed.routingDecision!.advisory!.recommendedWorker!.workerProfileId, "default");
++  assert.equal(followed.routingDecision!.selectedWorker.workerProfileId, "default");
++
++  const overridden = parseAdvisoryDecision(advisoryRoutingDecision({
++    shortlist: sharedShortlist,
++    advisory: {
++      overallResult: "recommended",
++      selection: "manual-override",
++      recommendedWorker: DEEPSEEK_TWIN,
++      confidence: 0.84,
++      selectedExecution: frozenSelectedExecution(),
++    },
++  }));
++  assert.equal(overridden.routingDecision!.advisory!.selection, "manual-override");
++  assert.equal(overridden.routingDecision!.advisory!.recommendedWorker!.workerProfileId, "default-twin");
++  assert.equal(overridden.routingDecision!.selectedWorker.workerProfileId, "default");
++});
++
++test("legacy selectedWorker shortlist membership stays four-field without advisory", () => {
++  const spec = parseAdvisoryDecision(advisoryRoutingDecision({
++    shortlist: [DEEPSEEK_TWIN],
++    selectedWorker: DEEPSEEK_FROZEN,
++  }));
++  assert.equal(spec.routingDecision!.advisory, undefined);
++  assert.equal(spec.routingDecision!.selectedWorker.workerProfileId, "default");
++  assert.equal(spec.routingDecision!.shortlist[0]!.workerProfileId, "default-twin");
++});
++
++test("advisory selected execution mode must match the resolved Task executionMode", () => {
++  assert.throws(
++    () => parseAdvisoryDecision(advisoryRoutingDecision({
++      advisory: {
++        overallResult: "cannot-determine",
++        selection: "selected-after-cannot-determine",
++        cannotDetermineReasons: ["insufficient-relevant-samples"],
++        selectedExecution: frozenSelectedExecution({ resolvedExecutionMode: "native-goal" }),
++      },
++    })),
++    (error: unknown) => {
++      assert.ok(error instanceof Error);
++      assert.match(error.message, /resolvedExecutionMode "native-goal" does not match resolved Task executionMode "single-run"/);
++      assert.ok(!error.message.includes(PRIVATE_ADVISORY_NOTE));
++      return true;
++    },
++  );
++  const spec = parseAdvisoryDecision(advisoryRoutingDecision({
++    advisory: {
++      overallResult: "cannot-determine",
++      selection: "selected-after-cannot-determine",
++      cannotDetermineReasons: ["insufficient-relevant-samples"],
++      selectedExecution: frozenSelectedExecution({ resolvedExecutionMode: "single-run" }),
++    },
++  }));
++  assert.equal(spec.executionMode, "single-run");
++  assert.equal(spec.routingDecision!.advisory!.selectedExecution.resolvedExecutionMode, "single-run");
++});
++
+ // --- Bounded policy adaptation transition chain ---
+ 
+ import {

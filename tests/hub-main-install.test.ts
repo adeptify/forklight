@@ -14,6 +14,7 @@ import {
   upsertClaudeMcpServer,
   upsertTomlMcpServer,
 } from "../src/hub/main-install.js";
+import { projectMainSetupResult } from "../src/setup/status.js";
 
 test("isTomlTableHeaderLine rejects array literals inside values", () => {
   assert.equal(isTomlTableHeaderLine("[mcp_servers.forklight]"), true);
@@ -323,6 +324,9 @@ test("installMainMcp for grok-build writes toml with backup", async () => {
   assert.equal(result.ok, true);
   assert.equal(result.installed, true);
   assert.ok(result.backupPath);
+  const projected = projectMainSetupResult(result, "mcp");
+  assert.equal(projected.newSessionNeeded, true);
+  assert.equal(projected.backupPath, result.backupPath);
 
   const content = await readFile(targetPath, "utf8");
   assert.match(content, /model = "grok"/);

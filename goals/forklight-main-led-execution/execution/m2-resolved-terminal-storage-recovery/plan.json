@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "name": "M2 exact resolved-terminal storage Candidate recovery",
+  "objective": "Recover the frozen two-path storage Candidate without changing behavior, then rerun its three original activated-source audits in strict serial order.",
+  "items": [
+    { "id": "exact-candidate-recovery", "task": "./01-exact-candidate.yaml", "dependsOn": [] },
+    { "id": "resolved-candidate-regression-audit", "task": "./02-resolved-candidate-regression-audit.yaml", "dependsOn": ["exact-candidate-recovery"] },
+    { "id": "public-storage-surface-audit", "task": "./03-public-storage-surface-audit.yaml", "dependsOn": ["resolved-candidate-regression-audit"] },
+    { "id": "scope-and-safety-audit", "task": "./04-scope-and-safety-audit.yaml", "dependsOn": ["public-storage-surface-audit"] }
+  ]
+}

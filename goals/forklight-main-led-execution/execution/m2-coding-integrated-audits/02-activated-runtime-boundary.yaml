@@ -1,0 +1,50 @@
+version: 2
+name: M2 audit activated Runtime identity and unsupported replay boundary
+project: /Users/yijunwang/code/forklight
+taskClass: m2-source-only-recovery-activation-boundary-audit
+taskFamily: forklight-integration-recovery
+workerProfileId: volcengine-glm52-1m
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 0
+  reason: Read-only zero-change activation-boundary audit has deterministic machine checks after reviewed Integration.
+contract:
+  outcome: Prove the activated client and Daemon build identities match and source-only recovery still refuses every build or activation delivery.
+  presentation: { summary: 核对激活版本一致，并确认恢复没有越界到 build/activation replay。, language: zh-CN }
+  context:
+    - Read the accepted Coding and audit-recovery specs completely; inspect current activated source only.
+    - Use ForkLight checkpoint MCP for approved commands. No source edit or Integration is permitted.
+  inScope: [Matched client/Daemon identity, source-only delivery gate, build/activation refusal tests, privacy-safe projection.]
+  outOfScope: [Edits, Runtime redesign, replay support, restart experiment, Integration, Store schema, Hub, docs, commit, push, credentials, or coordination machinery.]
+  executionSteps: [Inspect the recovery delivery gate, invoke build, focused tests, health, and diff check through checkpoint MCP, report bounded evidence.]
+  deliverables: [One zero-diff activation-boundary verdict.]
+  modules:
+    - name: Activated boundary
+      responsibility: Bind audited source to the matched active Daemon and preserve explicit unsupported replay states.
+      consumes: [Health identity, integrated delivery gate, focused tests.]
+      produces: [Pass or exact blocker.]
+      boundaries: [No restart, edit, replay, or new Runtime claim.]
+  callChain: [Build integrated source, query current health identity, inspect source-only gate, run refusal tests.]
+  scenarios:
+    - name: Activation truth
+      given: Safe Integration reported runtime activation passed.
+      when: Current build and health are checked.
+      then: Identities match and build/activation operations remain ineligible for recovery.
+  risks: [Do not infer support from health; unsupported side-effecting replay stays explicit.]
+  changeBudget: { maxFiles: 1, maxDiffLines: 20 }
+advancedPolicy: { maxDurationMs: null, observedTokenCeiling: null, noProgressTimeoutMs: null, fileLimit: null, fileLimitMode: warn, changedLineLimit: null, changedLineLimitMode: warn, baseMaxAttempts: 1, maxExtraAttempts: 0, maxMainCorrections: 0, maxMainReverifications: 0, maxConcurrency: 1, completionMode: warn, changeBudgetMode: warn, maxAdaptationRounds: 0 }
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: false
+  allowedCommands: []
+  focusPaths: [src/core/integration.ts, src/daemon/coordinator.ts, src/daemon/client.ts, tests/integration.test.ts, tests/daemon.test.ts]
+acceptance:
+  criteria: [Current client/Daemon identity is matched and build/activation recovery remains explicitly refused with zero source change.]
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/integration.test.ts tests/daemon.test.ts
+    - node dist/src/cli.js health --json | node -e 'let data=""; process.stdin.setEncoding("utf8"); process.stdin.on("data", chunk => data += chunk); process.stdin.on("end", () => { const value = JSON.parse(data); if (value.identityStatus !== "matched") process.exit(1); });'
+    - git diff --check

@@ -1,0 +1,91 @@
+version: 2
+name: M2-B audit canonical Main decision packet surfaces
+project: /Users/yijunwang/code/forklight
+taskClass: m2-main-decision-packet-audit
+taskFamily: forklight-quality-decision-chain
+workerProfileId: grok-4-6-xhigh
+executionPreference: auto
+contract:
+  outcome: Verify that one canonical non-mutating Main decision packet composes quality, correction, review, reuse, decision, Integration, blocker, stop, and exactly one next-action truth consistently through daemon, CLI, and MCP.
+  presentation:
+    summary: 只读核对 Main 决策包在 Core、Daemon、CLI 与 MCP 中语义一致且不会自动行动。
+    language: zh-CN
+  context:
+    - Starts only after the integrated review-gate audit passes.
+    - Use specs/m2-b-quality-decision-chain/spec.md as the sole accepted outcome boundary.
+  inScope:
+    - Inspect the canonical packet composer and CLI, MCP, and daemon projections.
+    - Check Worker claim labeling, Judge evidence authority, partial reuse/handoff, stop reason, blockers, and exactly one next action.
+  outOfScope:
+    - No edits, Provider calls beyond this Worker, automatic action, Integration, Hub, storage lifecycle, routing, commit, or push.
+  executionSteps:
+    - Trace the integrated packet inputs and one canonical composer.
+    - Compare structured and human projections across daemon, CLI, and MCP.
+    - Return a concise pass or named parity/authority gap.
+  deliverables:
+    - A read-only canonical decision-packet parity report.
+  modules:
+    - name: Decision packet surfaces
+      responsibility: Translate one canonical packet into bounded daemon, CLI, and MCP views without creating authority.
+      consumes: [Integrated packet composer, durable quality/decision evidence, and projection tests.]
+      produces: [A bounded parity and authority result.]
+      boundaries: [Exactly one next action, no raw private artifacts, and no mutations.]
+  callChain:
+    - Prior review-gate audit passes.
+    - This isolated Task reads the integrated packet and public projections.
+    - ForkLight independently runs packet, CLI, daemon, and MCP tests.
+    - Machine success releases the final privacy/scope audit.
+  scenarios:
+    - name: Packet parity
+      given: Existing quality and decision evidence spans all supported states.
+      when: Core, daemon, CLI, and MCP projections are compared.
+      then: They expose the same closed facts and exactly one next Main action.
+    - name: Misleading or mutating packet
+      given: A projection invents authority, hides a blocker, leaks private content, or launches work.
+      when: Inspection or tests run.
+      then: The audit fails and the Goal does not advance.
+  risks:
+    - Presentation code could duplicate eligibility logic; require one core packet authority.
+  changeBudget: { maxFiles: 1, maxDiffLines: 20 }
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: false
+  allowedCommands: []
+  focusPaths:
+    - src/core/task-decision-view.ts
+    - src/cli/supervision.ts
+    - src/daemon/coordinator.ts
+    - src/daemon/server.ts
+    - src/mcp/server.ts
+    - tests/task-decision-view.test.ts
+    - tests/cli-supervision.test.ts
+    - tests/daemon.test.ts
+    - tests/mcp.test.ts
+acceptance:
+  criteria:
+    - One canonical packet covers accepted quality and decision stages, blockers, stop/reuse facts, and exactly one next action.
+    - CLI compact inspect, MCP compact inspect, and daemon/API carry the same semantics without mutation.
+    - No source file changes.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/task-decision-view.test.ts tests/cli-supervision.test.ts tests/daemon.test.ts tests/mcp.test.ts
+    - git diff --check

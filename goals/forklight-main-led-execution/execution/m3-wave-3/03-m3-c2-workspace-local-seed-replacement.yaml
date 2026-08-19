@@ -1,0 +1,186 @@
+version: 2
+name: M3-C2 Workspace-local-seed exact-partial replacement
+project: /Users/yijunwang/code/forklight
+taskClass: m3-strategy-policy-advice-recovery
+taskFamily: forklight-routing-decision
+workerProfileId: grok-4-6-xhigh
+executionPreference: auto
+routingDecision:
+  taskFamily: forklight-routing-decision
+  shortlist:
+    - provider: xai
+      model: grok-4.6
+      runtime: grok-build
+      effort: xhigh
+      workerProfileId: grok-4-6-xhigh
+  selectedWorker:
+    provider: xai
+    model: grok-4.6
+    runtime: grok-build
+    effort: xhigh
+    workerProfileId: grok-4-6-xhigh
+  selectedBecause:
+    code: user-specified
+    note: 一骏 explicitly granted continuing authority after the prior bootstrap stop; the same accepted partial and Grok 4.6 Xhigh boundary remain selected without claiming a historical ranking.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+reviewRequirement:
+  requiredJudges: 2
+  reason: Strategy and policy advice affects Main routing choices, so two fresh different-view Judges must inspect non-automation, failure isolation and compatibility before Integration.
+runtime:
+  name: grok-build
+  executable: /Users/yijunwang/code/forklight/goals/forklight-main-led-execution/execution/m3-wave-3/m3-c2-workspace-local-seed-bootstrap.mjs
+  effort: xhigh
+  maxBudgetUsd: null
+contract:
+  outcome: Materialize the exact protected 14-path M3-C2 partial from a patch already inside this Task Workspace, correct the three known test defects and four accepted-contract gaps, and deliver the completed additive read-only strategy/policy advice through the unchanged M3-C2 quality chain.
+  presentation:
+    summary: 从Task自己的空间复用M3-C2部分成果，修完七个已定位缺口并完成交付。
+    language: zh-CN
+  context:
+    - Read AGENTS.md, specs/m3-c-strategy-policy-learning/spec.md and goals/forklight-main-led-execution/evidence/m3-c2-infra-pause-decision-packet.md completely before editing. They remain the sole product and recovery boundary; do not create another spec or roadmap.
+    - Original Task bbec21f9-ae21-4bfd-9cc4-9476aea3f73a and failed cross-Task bootstrap recovery 588fc40f-afad-448e-8306-e05859166842 are immutable and protected. Do not resume, repair, reverify or modify either Task.
+    - The exact 14-path partial is packaged at goals/forklight-main-led-execution/execution/m3-wave-3/m3-c2-protected-partial.patch and enters this Workspace through normal source snapshot preparation before Grok launches.
+    - Main proved the patch names exactly the accepted 14 paths, forward-applies to current source and reverse-applies to the original protected partial. The wrapper reads only this Task Workspace and cannot repeat the prior sandbox-external EPERM.
+    - This is a fresh honest Grok 4.6 Xhigh native Goal. Never claim continuity with either earlier Task, Session, Attempt or native Goal.
+    - The retained partial already separates execution-mode evidence, exposes additive Daemon/CLI/MCP advice, separates Main-direct history, and reports underlying Judge identity diversity. Preserve usable behavior and fix only verified gaps.
+    - The three diagnostic defects are two daemon fixture typing errors and one over-broad negative CLI assertion that matches desired explanatory wording.
+    - The four product gaps are intent-none history evaluation, trigger-incompatible Competition matching, legacy-unknown recommendation eligibility, and the missing strict-evidence recommendation gate.
+    - ForkLight serves one local developer. Add no checksum, content hash, manifest, lock, lease, version handshake, migration, multi-user or distributed coordination mechanism.
+    - The Task has one base Attempt, at most one Worker validation repair and one Main correction/reverification. It has no generic extra Attempt, adaptation, fallback, reroute or model switch. Stop when acceptance passes or the bounded evidence-based correction chain cannot close the frozen gaps.
+  inScope:
+    - Confirm the exact Workspace-local partial is materialized before inspecting or editing product code.
+    - Correct the two tests/daemon.test.ts fixture types with the narrowest accurate fixtures.
+    - Replace the over-broad legacy CLI negative assertion with a focused check that rejects actual automatic actions while preserving explicit negative explanatory output.
+    - For Competition intent none, return not-advised without evaluating or projecting historical Competition counts/outcomes.
+    - For consider or required, evaluate Competition history only when Main supplies valid triggers and include only history compatible with those triggers and requested scope.
+    - Keep legacy-unknown evidence visible but display-only; it cannot enter a recommendation cohort or be returned as an executable strategy.
+    - Preserve strict missing-evidence policy so unavailable positive factors cannot produce a strict-mode strategy recommendation.
+    - Add focused regression coverage for each corrected behavior, run the unchanged original acceptance commands, and hand off exact paths and remaining evidence limits.
+  outOfScope:
+    - Any new endpoint, entity, migration, historical rewrite, automatic Competition, Judge selection/replacement, vote, third Judge, retry policy, Integration authority, synthetic Provider Task, benchmark, global leaderboard, Hub/UI, M4 Token/value work, commit, push or reset.
+    - Any path outside the exact 14 focus paths, redesign of accepted M3-A/M3-B/M3-C1 contracts, or coordination/integrity mechanism beyond the operational exact-path/source-base seed check.
+  executionSteps:
+    - Read the accepted boundary and inspect the already-materialized exact partial plus the seven frozen gaps.
+    - Correct focused tests and product gates without recreating accepted behavior or widening the public surface.
+    - Run the build and focused suite, inspect the exact diff and stop immediately when all acceptance criteria pass.
+  deliverables:
+    - One exact-path Candidate containing the protected partial plus only the seven scoped corrections and focused coverage.
+    - Passing ForkLight independent acceptance evidence and one exact Revision ready for two fresh different-view Judges.
+    - A concise Worker handoff naming behavior, paths, verification and any remaining natural-history evidence limitation.
+  modules:
+    - name: Workspace-local partial adoption
+      responsibility: Reuse the exact protected product/test bytes without cross-Task reads or implementation reconstruction.
+      consumes: [Workspace-local seed patch, matching current source base, accepted 14-path boundary.]
+      produces: [The protected partial inside this isolated Workspace before native Goal work.]
+      boundaries: [No sibling Task access, source-project write, broader path or coordination protocol.]
+    - name: Mode-aware strategy evidence
+      responsibility: Keep comparable execution modes separate while excluding legacy unknown and preserving strict evidence gates.
+      consumes: [Natural terminal Task history, exact class, explicit family, accepted routing policy.]
+      produces: [Read-only evidence rows and supported recommendation or stable cannot-determine.]
+      boundaries: [No model-free ranking change, synthetic work, inferred mode or historical migration.]
+    - name: Explicit Competition and Judge policy explanation
+      responsibility: Explain only Main-supplied policy using compatible natural history and underlying identity truth.
+      consumes: [Competition intent and valid triggers, natural Competition records, explicit review requirement and Review Graph outcomes.]
+      produces: [Not-advised or explanatory policy projection without mutation, vote or inferred authority.]
+      boundaries: [Intent none does not evaluate history; no automatic Competition or Judge action.]
+    - name: Canonical public projection
+      responsibility: Keep Daemon, CLI and MCP output additive, compatible and privacy-safe.
+      consumes: [Canonical routing advice and focused strategy/policy projection.]
+      produces: [Consistent read-only JSON and human output.]
+      boundaries: [No second routing system, Store mutation or Hub/UI.]
+  callChain:
+    - ForkLight source snapshot places the exact seed patch inside the fresh Task Workspace.
+    - Main-owned bootstrap verifies the 14-path patch and applies it on the matching source base without reading another Task.
+    - Grok 4.6 Xhigh starts a fresh native Goal, corrects only the seven frozen gaps and self-checks.
+    - ForkLight independently runs the seed policy test and unchanged original M3-C2 commands, then captures one exact Candidate Revision.
+    - Exactly two fresh independent Judges inspect the same Revision from different views; Main reviews all paths and alone integrates serially.
+  scenarios:
+    - name: Workspace-local seed launches
+      given: The exact patch arrived through the Task source snapshot and current source matches its base.
+      when: The runtime wrapper starts inside Grok's Workspace sandbox.
+      then: It applies the 14 paths locally and creates native Goal state without any sibling Task access.
+    - name: Intent none stays unevaluated
+      given: Matching natural Competition history exists but Main supplies intent none.
+      when: Strategy/policy advice is requested.
+      then: Competition is not advised and historical counts or outcomes are not evaluated or projected.
+    - name: Trigger-compatible explanation only
+      given: Main supplies consider or required plus valid triggers and scoped Competition history contains multiple reasons.
+      when: Policy history is projected.
+      then: Only scope- and trigger-compatible history appears, and it cannot start or mutate work.
+    - name: Unknown and missing evidence stay honest
+      given: Legacy missing-mode rows or unavailable strict positive factors exist.
+      when: Execution strategies are scored.
+      then: Unknown remains display-only and strict mode returns cannot-determine rather than a recommendation.
+    - name: Exact replacement delivers
+      given: The Workspace-local partial and current source base match the authorized path set.
+      when: Grok closes all seven gaps and the independent commands run.
+      then: One verified Revision proceeds to two Judges and Main serial Integration.
+  risks:
+    - Rebuilding the partial could regress accepted behavior; exact Workspace-local materialization preserves the reusable result.
+    - A stale patch could create the wrong Candidate; exact path parsing plus forward source-base and reverse protected-partial checks fail before submission or launch.
+    - Historical summaries can look authoritative; focused none/trigger/unknown/strict tests must prove that advice remains explanatory and read-only.
+  changeBudget:
+    maxFiles: 15
+    maxDiffLines: 2400
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 60000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxWorkerValidationRepairs: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test, .forklight-boundary-capture, .forklight-receipt-retry, plans]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/statistics.ts
+    - src/core/model-routing.ts
+    - src/core/strategy-advice.ts
+    - src/daemon/coordinator.ts
+    - src/cli/routing-output.ts
+    - src/mcp/server.ts
+    - tests/statistics.test.ts
+    - tests/model-routing.test.ts
+    - tests/competition.test.ts
+    - tests/review-graph.test.ts
+    - tests/main-failure-attribution.test.ts
+    - tests/daemon.test.ts
+    - tests/daemon-cli.test.ts
+    - tests/mcp.test.ts
+acceptance:
+  criteria:
+    - The exact protected partial is materialized from the Task's own Workspace on the matching source base and the Candidate changes exactly the accepted 14 product/test paths.
+    - Provider/model/Runtime/effort/execution mode remains the comparable strategy identity; legacy unknown is visible but never recommended or inferred.
+    - Exact-class evidence wins and family fallback remains complete-set only; strict missing evidence, insufficient samples or insufficient gap returns cannot-determine without work creation.
+    - Non-model failure exclusion and ambiguous visibility remain intact, and Main-direct history stays separate from Worker comparison.
+    - Competition intent none remains not advised without historical evaluation; consider/required uses only compatible valid triggers and remains explanation only.
+    - Judge projection reports declared depth, usable/unusable results and distinct underlying execution identities without voting, inferred depth, assignment, replacement or Integration change.
+    - Existing routing fields and legacy callers remain compatible; Daemon, CLI and MCP expose consistent privacy-safe additive output with no Store mutation.
+    - No Hub/UI, M4, coordination mechanism or unrelated change exists; one native Goal, ForkLight independent verification, two Judges and Main serial Integration complete the chain.
+  commands:
+    - node goals/forklight-main-led-execution/execution/m3-wave-3/m3-c2-workspace-local-seed-bootstrap.test.mjs
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/statistics.test.ts tests/model-routing.test.ts tests/competition.test.ts tests/review-graph.test.ts tests/main-failure-attribution.test.ts tests/daemon.test.ts tests/daemon-cli.test.ts tests/mcp.test.ts
+    - git diff --check

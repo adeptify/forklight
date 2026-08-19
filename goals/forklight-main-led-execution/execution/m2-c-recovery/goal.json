@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "name": "M2-C exact Candidate recovery",
+  "objective": "Adopt exact M2-C Revision 99435c50 into a clean current-source Workspace, close only five frozen storage-lifecycle gaps, safely integrate the reviewed combined Candidate, and complete the existing three serial post-Integration audits before Main exercises the real local preview.",
+  "planFile": "./plan.json",
+  "policy": {
+    "maxDurationMs": null,
+    "noProgressTimeoutMs": null,
+    "maxCorrectionRounds": 1,
+    "maxReviewRounds": 2,
+    "maxNoNewEvidenceCycles": 2
+  },
+  "milestones": [
+    { "itemId": "recover-implement", "gate": "integration" },
+    { "itemId": "protection-audit", "gate": "machine" },
+    { "itemId": "surface-audit", "gate": "machine" },
+    { "itemId": "boundary-audit", "gate": "machine" }
+  ]
+}

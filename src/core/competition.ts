@@ -18,6 +18,10 @@ import {
   type ResolvedWorkerSelection,
 } from "./worker-profiles.js";
 import {
+  executionCapabilitiesForRuntime,
+  resolveExecutionMode,
+} from "./execution-mode.js";
+import {
   buildCandidateGapContract,
   candidateRevisionMatchesCurrentDiff,
   latestMainReview,
@@ -593,9 +597,10 @@ function cloneSpec(
 }
 
 /** Clone the contract spec from one candidate's own resolved Worker identity.
- *  Each candidate keeps its own provider/model/runtime/effort/policy - it never
- *  inherits the parent Task's runtime or Profile, so a Claude Code Worker and a
- *  Grok Build Worker can truthfully compete in one Competition. */
+ *  Each candidate keeps its own provider/model/runtime/effort/policy and
+ *  execution preference/mode — it never inherits the parent Task's runtime,
+ *  Profile, or frozen execution truth, so a Claude Code Worker and a Grok
+ *  Build Worker can truthfully compete in one Competition. */
 function cloneSpecFromIdentity(
   original: TaskSpec,
   resolved: ResolvedWorkerSelection,
@@ -618,6 +623,14 @@ function cloneSpecFromIdentity(
   if (resolved.profileId !== undefined) {
     cloned.workerProfileId = resolved.profileId;
   }
+  // Profile preference plus this Runtime's capability are the sole authority.
+  // Forced unsupported modes fail here, still inside pre-mutation admission.
+  const execution = resolveExecutionMode(
+    resolved.executionPreference,
+    executionCapabilitiesForRuntime(resolved.runtime),
+  );
+  cloned.executionPreference = execution.preference;
+  cloned.executionMode = execution.mode;
   // Each candidate freezes its own Profile's network policy; legacy omission
   // clears any stale policy cloned from the source contract.
   return applyResolvedNetworkPolicy(resolved, cloned);

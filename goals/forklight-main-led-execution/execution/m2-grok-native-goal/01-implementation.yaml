@@ -1,0 +1,158 @@
+version: 2
+name: M2-A integrate Grok CLI native Goal execution truth
+project: /Users/yijunwang/code/forklight
+taskClass: m2-grok-native-goal-truth
+taskFamily: forklight-runtime-recovery
+workerProfileId: grok-4-6-xhigh
+deliveryProfileId: forklight-self-upgrade
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 2
+  reason: Native Runtime identity, recovery, terminal truth, and sandbox policy are core high-risk behavior requiring two independent views.
+
+runtime:
+  name: grok-build
+  executable: /Users/yijunwang/code/forklight/goals/forklight-main-led-execution/execution/m2-grok-native-goal/grok-native-goal-bootstrap.mjs
+  effort: xhigh
+  maxBudgetUsd: null
+
+contract:
+  outcome: >-
+    ForkLight launches meaningful Grok 4.6 Xhigh work through Grok CLI's own /goal state machine,
+    admits success only from durable complete plus achieved native evidence, resumes the same Goal
+    after interruption, and creates a traceable successor Goal only for an authorized correction
+    after native completion.
+  presentation:
+    summary: 把Grok CLI自己的/goal做成ForkLight可验证、可恢复且不虚标的首选执行模式。
+    language: zh-CN
+  context:
+    - Read AGENTS.md and specs/m2-a-grok-execution-truth/work-items/grok-native-goal/spec.md completely before editing; that Work Item spec is the sole accepted requirement.
+    - This Worker itself runs inside a ForkLight isolated Workspace through a Main-reviewed bootstrap executable that converts the ordinary integrated prompt into Grok CLI native /goal.
+    - The Task must remain durably labelled persistent-session because the pre-change adapter cannot honestly advertise native-goal. Do not change Task records or call this bootstrap product support.
+    - Official Grok CLI 1.0.3 and a real isolated smoke prove native Goal id, state, pause, same-Goal resume, complete plus achieved classifier truth, and the need to keep the shell tool registered while denying actual Bash.
+    - The frozen storage Candidate changes only src/core/storage-lifecycle.ts and tests/storage-lifecycle.test.ts. This Task must never touch those paths.
+    - ForkLight serves one local developer. Add no lock, lease, checksum, content hash, version handshake, duplicate Goal store, or distributed coordination.
+    - Preserve all source work. Edit only this isolated Workspace. Never commit, push, change remotes, access credentials, or edit Hub/UI.
+  inScope:
+    - Make grok-build native Goal capability supported and resolve new Grok auto Tasks to native-goal while preserving explicit persistent-session and historical omitted truth.
+    - Launch first native work with /goal plus the complete Worker objective; resume paused or interrupted work with /goal resume in the same Session and Goal.
+    - Read and minimally validate only the exact Task-local native state and owned classifier-details artifact; reject exit zero or prose without complete plus achieved evidence.
+    - Record privacy-safe Goal observations and predecessor/successor Goal ids for authorized post-completion corrections.
+    - Keep Grok's planner dependencies registered while denying actual shell execution and protecting provider auth, configuration, and model writes to native state.json.
+    - Update focused tests and the three accepted user-facing documents only where product truth changes.
+  outOfScope:
+    - ForkLight Goal contracts as a substitute for Grok /goal, historical relabeling, Store or daemon protocol migration, new Goal database, ACP replacement, Review Graph policy, Integration, storage lifecycle, routing, economics, Hub/UI, credentials, commit, or push.
+    - Multi-user or distributed coordination, locks, leases, hashes, manifests, or version negotiation.
+  executionSteps:
+    - Trace the current Grok argv/env/sandbox/terminal path and execution-mode projections before editing.
+    - Add the smallest isolated native-state reader and connect first launch, resume, terminal gate, correction successor, and privacy-safe observations.
+    - Add focused failing-before regressions for false success, malformed/escaping state, paused/resume identity, successor identity, tool policy, legacy compatibility, and public truth.
+    - Run every acceptance command, inspect the actual Candidate against the allowed paths, and stop after one complete passing slice.
+  deliverables:
+    - Production Grok native /goal launch, resume, correction and terminal semantics.
+    - Minimal owned-state validation and privacy-safe durable observations.
+    - Focused compatibility, security, and false-completion regressions.
+    - Narrow documentation that distinguishes Grok /goal from ForkLight Goal contracts.
+  modules:
+    - name: Grok native Goal state boundary
+      responsibility: Read only this Task's Runtime-owned Goal state and map its verified terminal truth into a Worker result.
+      consumes: [Task-local Grok Home, Workspace namespace, Session id, native state.json, owned classifier details.]
+      produces: [Validated Goal observation, verified completion, or bounded fail-closed reason.]
+      boundaries: [No duplicate Store copy, hash, manifest, version handshake, raw prompt, or classifier prose event.]
+    - name: Grok native Goal adapter path
+      responsibility: Select /goal objective, /goal resume, or successor /goal correction while preserving isolation and one Task Workspace.
+      consumes: [Frozen execution mode, Session id, resume/correction intent, full Worker prompt, model, effort, tool and sandbox policy.]
+      produces: [Truthful argv/env, same-Goal continuation, successor provenance, Worker terminal result.]
+      boundaries: [No fallback relabel, Task recreation, shell execution, source-project write, credential write, commit, or push.]
+    - name: Public execution truth
+      responsibility: Project native-goal support consistently for new Grok Tasks without rewriting historical Task truth.
+      consumes: [Runtime capability, Task/Profile preference, current compatibility rules.]
+      produces: [Admission, preview, health, readiness, status and documentation agreement.]
+      boundaries: [No Store migration, Hub/UI, alternate resolver, or historical mutation.]
+  callChain:
+    - Main submits this bootstrap Task through the current persistent-session adapter and separately audits its exact task-local native Goal state.
+    - Grok native /goal researches, implements, self-checks and leaves one scoped Candidate in the isolated Workspace.
+    - ForkLight independently runs the unchanged accepted commands and captures a Candidate Revision.
+    - Two independent read-only Judges inspect the exact Candidate; Main reviews provenance and integrates serially through ForkLight.
+    - A fresh unwrapped Grok Task then proves the integrated native-goal product path before the storage recovery starts.
+  scenarios:
+    - name: False completion is rejected
+      given: Grok exits zero or prints completion prose without a valid complete and achieved owned native Goal state.
+      when: The adapter maps the Worker terminal result.
+      then: The Task fails closed before ForkLight independent acceptance.
+    - name: Same native Goal resumes
+      given: The Task-local state is paused or interrupted and retains its Goal id.
+      when: ForkLight continues the same Task.
+      then: The adapter sends /goal resume in the same Session and requires the same Goal id after launch.
+    - name: Authorized correction creates a successor
+      given: A native Goal completed and Main supplies typed correction feedback for reusable files.
+      when: ForkLight corrects the same Task.
+      then: A new /goal objective runs in the same Session and Workspace with a distinct Goal id linked to its predecessor.
+  risks:
+    - Accepting process exit or prose would falsely deliver a paused Goal; durable complete plus achieved plus owned details is mandatory.
+    - Broadly denying Runtime Home writes breaks native planning, while broad permission exposes auth/config/state to model tools; protect exact concrete files and test the policy.
+    - Changing legacy interpretation would falsify stored Tasks; change only new admitted Grok auto resolution and preserve explicit persistent-session.
+  changeBudget:
+    maxFiles: 18
+    maxDiffLines: 2200
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 60000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .runtime
+    - .forklight
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/workers/grok.ts
+    - src/workers/grok-goal.ts
+    - src/core/execution-mode.ts
+    - src/core/settings.ts
+    - tests/worker-runtime.test.ts
+    - tests/task.test.ts
+    - tests/worker-profiles.test.ts
+    - tests/worker-readiness.test.ts
+    - tests/cli-health.test.ts
+    - tests/task-preview.test.ts
+    - tests/competition.test.ts
+    - tests/goal.test.ts
+    - docs/configuration.md
+    - docs/main-clients/grok-build.md
+    - docs/main-led-delivery.md
+acceptance:
+  criteria:
+    - New Grok 4.6 Xhigh auto Tasks consistently freeze and project native-goal; explicit persistent-session and historical omitted records preserve compatible truth.
+    - First launch, same-Goal resume, and post-completion successor correction use Grok CLI /goal with the frozen Session, model, effort, env and bounded tool policy.
+    - Only exact Task-local complete plus achieved plus readable owned details admits Worker success; all false, paused, unknown, malformed, ambiguous, or escaping evidence fails closed.
+    - Candidate changes only accepted source, focused tests and narrow docs; ForkLight independent verification remains separate from Grok native skeptics.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/worker-runtime.test.ts tests/task.test.ts tests/worker-profiles.test.ts tests/worker-readiness.test.ts tests/cli-health.test.ts tests/task-preview.test.ts tests/competition.test.ts tests/goal.test.ts
+    - git diff --check

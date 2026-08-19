@@ -12,6 +12,7 @@ import path from "node:path";
 import test from "node:test";
 import {
   CandidateHandoffError,
+  buildHandoffSuccessorSpec,
   executeGoalTaskHandoff,
   hasSourceBlockingIntegration,
   isGoalTaskHandoffSourceEligible,
@@ -38,7 +39,7 @@ import {
 import { resolveReadiness } from "../src/core/dependency-resolver.js";
 import { SettingsService } from "../src/core/settings.js";
 import { upsertModelConfig } from "../src/core/model-catalog.js";
-import { upsertWorkerProfile } from "../src/core/worker-profiles.js";
+import { resolveWorkerSelection, upsertWorkerProfile } from "../src/core/worker-profiles.js";
 import {
   defaultAdvancedPolicyFields,
   enforcementCapabilityForRuntime,
@@ -1973,6 +1974,40 @@ function seedDestinationProfile(settings: SettingsService): void {
   settings.update({ modelCatalog: catalog, workerProfiles: profiles });
 }
 
+function seedDestinationExecutionProfiles(settings: SettingsService): void {
+  const current = settings.get();
+  const withFlash = upsertWorkerProfile(current.workerProfiles, {
+    id: "deepseek-flash-1m",
+    label: "DeepSeek Flash 1M",
+    runtime: "claude-code",
+    modelConfigId: "deepseek-flash",
+    effort: "high",
+    executionPreference: "auto",
+  }, current.modelCatalog);
+  settings.update({
+    workerProfiles: upsertWorkerProfile(withFlash, {
+      id: "codex-auto",
+      label: "Codex Auto",
+      runtime: "codex-cli",
+      provider: "openai",
+      model: "gpt-5.6-luna",
+      endpoint: "https://api.openai.com/v1",
+      effort: "medium",
+      executionPreference: "auto",
+    }, current.modelCatalog),
+  });
+}
+
+function resolveProfileSelection(settings: SettingsService, workerProfileId: string) {
+  const current = settings.get();
+  return resolveWorkerSelection({ workerProfileId }, {
+    execution: current.execution,
+    providerDefaults: current.providerDefaults,
+    workerProfiles: current.workerProfiles,
+    ...(current.modelCatalog === undefined ? {} : { modelCatalog: current.modelCatalog }),
+  });
+}
+
 function completeTwoFileGoalCandidate(
   store: StateStore,
   task: TaskRecord,
@@ -2288,6 +2323,131 @@ test("direct Goal handoff retains one path, freezes destination, and follows suc
     await coordinator.shutdown().catch(() => {});
     store.close();
     throw error;
+  }
+});
+
+test("direct Goal handoff freezes destination execution truth from the selected Runtime", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-goal-exec-truth-"));
+  const project = await mkdtemp(path.join(tmpdir(), "forklight-goal-exec-truth-proj-"));
+  mkdirSync(path.join(project, "src"), { recursive: true });
+  writeFileSync(path.join(project, "README.md"), "# Test\n");
+  writeFileSync(path.join(project, "src", "a.ts"), "export const a = 1;\n");
+  writeFileSync(path.join(project, "src", "b.ts"), "export const b = 1;\n");
+
+  const planFile = await writeHandoffChainPlan(home, project);
+  const goalFile = await writeHandoffGoalFile(home, planFile);
+  const store = new StateStore(home);
+  const settings = new SettingsService(store);
+  seedDestinationExecutionProfiles(settings);
+  const coordinator = new DaemonCoordinator(store, settings, 0, TEST_PROVIDER_AUTH_READY);
+  try {
+    const { taskIdsByItemId } = await coordinator.submitGoalFile(goalFile);
+    const foundation = taskIdsByItemId.foundation!;
+    const service = taskIdsByItemId.service!;
+    markSucceeded(store, foundation);
+    await coordinator.recover();
+
+    const serviceTask = store.getTask(service);
+    store.updateTask(service, {
+      spec: {
+        ...serviceTask.spec,
+        project,
+        workerProfileId: "grok-4-6-xhigh",
+        provider: { ...serviceTask.spec.provider, name: "xai", model: "grok-4.6" },
+        runtime: { ...serviceTask.spec.runtime, name: "grok-build", effort: "xhigh" },
+        executionPreference: "auto",
+        executionMode: "persistent-session",
+      },
+      sourcePath: project,
+    });
+    const sourceTask = store.getTask(service);
+    mkdirSync(sourceTask.paths.workspace, { recursive: true });
+    mkdirSync(sourceTask.paths.baseline, { recursive: true });
+    const { revisionId } = completeTwoFileGoalCandidate(store, sourceTask, { passed: false });
+    assert.equal(sourceTask.spec.runtime.name, "grok-build");
+    assert.equal(sourceTask.spec.executionPreference, "auto");
+    assert.equal(sourceTask.spec.executionMode, "persistent-session");
+
+    const request = {
+      taskId: service,
+      candidateRevisionId: revisionId,
+      reusablePaths: ["src/a.ts"],
+      remainingGaps: HANDOFF_GAPS,
+      destinationWorkerProfileId: "deepseek-flash-1m",
+      reason: "Hand Grok Candidate to DeepSeek Claude Code for the remaining gap.",
+      confirm: true as const,
+    };
+    const forcedSettings = structuredClone(settings.get());
+    const forcedDestination = forcedSettings.workerProfiles.profiles
+      .find((profile) => profile.id === "deepseek-flash-1m")!;
+    forcedDestination.executionPreference = "persistent-session";
+    const tasksBefore = store.listTasks().length;
+    const handoffsBefore = store.listCandidateHandoffs().length;
+    await assert.rejects(
+      () => executeGoalTaskHandoff(store, forcedSettings, request, { canLaunch: () => ({ ok: true }) }),
+      /persistent-session/,
+    );
+    assert.equal(store.listTasks().length, tasksBefore);
+    assert.equal(store.listCandidateHandoffs().length, handoffsBefore);
+
+    const view = await executeGoalTaskHandoff(
+      store,
+      settings.get(),
+      request,
+      { canLaunch: () => ({ ok: true }) },
+    );
+    const successor = store.getTask(view.successorTaskId);
+    const sourceAfter = store.getTask(service);
+    assert.equal(successor.spec.workerProfileId, "deepseek-flash-1m");
+    assert.equal(successor.spec.provider.name, "deepseek");
+    assert.equal(successor.spec.runtime.name, "claude-code");
+    assert.equal(successor.spec.executionPreference, "auto");
+    assert.equal(successor.spec.executionMode, "single-run");
+    assert.equal(sourceAfter.spec.executionPreference, "auto");
+    assert.equal(sourceAfter.spec.executionMode, "persistent-session");
+    assert.deepEqual(sourceAfter.spec.provider, sourceTask.spec.provider);
+    assert.deepEqual(sourceAfter.spec.runtime, sourceTask.spec.runtime);
+
+    const builderInput = {
+      reusablePaths: ["src/a.ts"],
+      remainingGaps: HANDOFF_GAPS,
+      digestPrefix: "abcd1234ef00",
+    };
+    const grokBuilt = buildHandoffSuccessorSpec(
+      sourceAfter.spec,
+      resolveProfileSelection(settings, "grok-4-6-xhigh"),
+      builderInput,
+    );
+    assert.equal(grokBuilt.executionPreference, "auto");
+    assert.equal(grokBuilt.executionMode, "native-goal");
+    const codexBuilt = buildHandoffSuccessorSpec(
+      sourceAfter.spec,
+      resolveProfileSelection(settings, "codex-auto"),
+      builderInput,
+    );
+    assert.equal(codexBuilt.executionPreference, "auto");
+    assert.equal(codexBuilt.executionMode, "native-goal");
+    const legacyBuilt = buildHandoffSuccessorSpec(
+      sourceAfter.spec,
+      resolveProfileSelection(settings, "default"),
+      builderInput,
+    );
+    assert.equal(legacyBuilt.executionPreference, "single-run");
+    assert.equal(legacyBuilt.executionMode, "single-run");
+    assert.throws(
+      () => buildHandoffSuccessorSpec(
+        sourceAfter.spec,
+        {
+          ...resolveProfileSelection(settings, "deepseek-flash-1m"),
+          executionPreference: "persistent-session",
+        },
+        builderInput,
+      ),
+      /persistent-session/,
+    );
+  } finally {
+    await coordinator.shutdown();
+    store.close();
   }
 });
 

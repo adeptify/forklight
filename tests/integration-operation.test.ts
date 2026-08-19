@@ -30,6 +30,7 @@ import { SettingsService } from "../src/core/settings.js";
 import type {
   AttemptRecord,
   DeliveryPlanView,
+  EventRecord,
   IntegrationOperationView,
   IntegrationReceiptRecord,
   IntegrationResultRecord,
@@ -1812,4 +1813,160 @@ test("self-upgrade evidence: omits hostile ids and timestamps from public projec
   assert.ok(!json.includes("passwd"));
   assert.ok(!json.includes("not-iso"));
   assert.ok(!json.includes("token="));
+});
+
+// --- Source-only Integration restart recovery (daemon ownership) ---
+
+/** Seed a source-only operation that crashed after the patch was applied and
+ *  `source-applied: passed` was durably recorded but before a result existed.
+ *  Returns the original Task/receipt/operation ids for a fresh coordinator. */
+async function crashedSourceOnlyOperationFixture(): Promise<{
+  home: string;
+  source: string;
+  store: StateStore;
+  settings: SettingsService;
+  task: TaskRecord;
+  receiptId: string;
+  operationId: string;
+}> {
+  const fixture = await operationFixture();
+  await fixture.coordinator.shutdown();
+  const { task, source, store, settings, receiptId } = fixture;
+
+  const original = await readFile(path.join(source, "value.txt"), "utf8");
+  store.consumeIntegrationReceipt(receiptId);
+  // The reviewed patch is already present in live source.
+  await writeFile(
+    path.join(source, "value.txt"),
+    await readFile(path.join(task.paths.workspace, "value.txt"), "utf8"),
+  );
+  // Deterministic backup captures the exact pre-apply source bytes.
+  const backupDir = path.join(task.paths.root, "integration", receiptId, "backup");
+  await mkdir(backupDir, { recursive: true });
+  await writeFile(path.join(backupDir, "value.txt"), original);
+
+  const operationId = randomUUID();
+  store.addEvent(
+    task.id, undefined, "integration.operation.started",
+    "Integration operation started",
+    { operationId, taskId: task.id, receiptId },
+  );
+  store.addEvent(
+    task.id, undefined, "integration.stage.completed",
+    "source-applied: passed",
+    { operationId, receiptId, evidence: { stage: "source-applied", status: "passed" } },
+  );
+
+  return {
+    home: fixture.home,
+    source,
+    store,
+    settings,
+    task: store.getTask(task.id),
+    receiptId,
+    operationId,
+  };
+}
+
+test("daemon recovery resumes one eligible source-only operation to completion once", async () => {
+  const fixture = await crashedSourceOnlyOperationFixture();
+  const coordinator = new DaemonCoordinator(fixture.store, fixture.settings, 0);
+  try {
+    await coordinator.recover();
+
+    const view = await coordinator.waitIntegration(fixture.operationId, 5_000);
+    assert.equal(view.status, "completed");
+    assert.equal(view.result?.status, "applied");
+    assert.equal(view.result?.id, fixture.operationId);
+    assert.deepEqual(
+      view.stages.map(({ stage, status }) => [stage, status]),
+      [
+        ["source-applied", "passed"],
+        ["source-verified", "passed"],
+        ["artifact-built", "not-applicable"],
+        ["runtime-activated", "not-applicable"],
+      ],
+    );
+
+    // Exactly one terminal row on the original operation id.
+    assert.equal(
+      fixture.store.listIntegrationResults(fixture.task.id)
+        .filter((result) => result.id === fixture.operationId).length,
+      1,
+    );
+    // No replay: the applied candidate bytes remain and were never re-applied.
+    assert.equal(await readFile(path.join(fixture.source, "value.txt"), "utf8"), "after\n");
+  } finally {
+    await coordinator.shutdown();
+    fixture.store.close();
+    await rm(fixture.home, { recursive: true, force: true });
+  }
+});
+
+test("daemon recovery refuses an unsafe source-only operation with bounded evidence", async () => {
+  const fixture = await crashedSourceOnlyOperationFixture();
+  // Diverge live source from the reviewed Candidate so the final-byte proof
+  // fails before any verification or result is produced.
+  await writeFile(path.join(fixture.source, "value.txt"), "diverged\n");
+
+  const coordinator = new DaemonCoordinator(fixture.store, fixture.settings, 0);
+  try {
+    await coordinator.recover();
+
+    // The bounded refusal is durable and names only a fixed reason.
+    const deadline = Date.now() + 5_000;
+    let recoveredEvent: EventRecord | undefined;
+    while (Date.now() < deadline) {
+      recoveredEvent = fixture.store.listEvents(fixture.task.id).find(
+        (event) =>
+          event.type === "integration.operation.recovered"
+          && (event.payload as { operationId?: unknown } | null)?.operationId
+            === fixture.operationId,
+      );
+      if (recoveredEvent !== undefined) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.ok(recoveredEvent, "recovered refusal event must be durable");
+    const payload = recoveredEvent.payload as { status?: unknown; reason?: unknown };
+    assert.equal(payload.status, "outcome-unknown");
+    assert.equal(payload.reason, "candidate-final-source-mismatch");
+    // Privacy: bounded refusal evidence never exposes absolute paths or bytes.
+    const serialized = JSON.stringify(recoveredEvent.payload);
+    assert.ok(!serialized.includes(fixture.source), "no absolute source path in refusal evidence");
+    assert.ok(!serialized.includes("diverged"), "no source bytes in refusal evidence");
+
+    // No fabricated result and no source mutation.
+    assert.equal(
+      fixture.store.listIntegrationResults(fixture.task.id)
+        .filter((result) => result.id === fixture.operationId).length,
+      0,
+    );
+    assert.equal(await readFile(path.join(fixture.source, "value.txt"), "utf8"), "diverged\n");
+  } finally {
+    await coordinator.shutdown();
+    fixture.store.close();
+    await rm(fixture.home, { recursive: true, force: true });
+  }
+});
+
+test("double recovery never starts a second owner or second terminal result", async () => {
+  const fixture = await crashedSourceOnlyOperationFixture();
+  const coordinator = new DaemonCoordinator(fixture.store, fixture.settings, 0);
+  try {
+    await coordinator.recover();
+    await coordinator.recover();
+
+    const view = await coordinator.waitIntegration(fixture.operationId, 5_000);
+    assert.equal(view.status, "completed");
+    assert.equal(view.result?.status, "applied");
+    assert.equal(
+      fixture.store.listIntegrationResults(fixture.task.id)
+        .filter((result) => result.id === fixture.operationId).length,
+      1,
+    );
+  } finally {
+    await coordinator.shutdown();
+    fixture.store.close();
+    await rm(fixture.home, { recursive: true, force: true });
+  }
 });

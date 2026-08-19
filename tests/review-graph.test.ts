@@ -8,6 +8,7 @@
  * invalidation, fresh Main override, and privacy boundaries.
  */
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -23,19 +24,31 @@ import { recordMainReview } from "../src/core/main-review.js";
 import {
   aggregateReviewAssignments,
   createReviewGraph,
+  evaluateReviewResultRepairEligibility,
   getReviewGraphStatus,
+  inspectReviewResultForCredentialLabelRepair,
+  inspectReviewResultForSummaryRepair,
   normalizeReviewerProfileIds,
   parseReviewResultText,
   projectReviewGraph,
   reconcileAllReviewGraphs,
   reconcileReviewAssignment,
+  reconcileReviewResultRepair,
+  repairReviewResult,
   REVIEW_EVIDENCE_PATH_MAX,
   REVIEW_FINDING_TEXT_MAX,
   REVIEW_MAX_FINDINGS,
+  REVIEW_RESULT_TEXT_MAX,
   REVIEW_SUMMARY_MAX,
   REVIEWER_TASK_NOT_INTEGRATABLE,
   PENDING_REVIEW_BLOCKS_INTEGRATION,
   STALE_MAIN_ACCEPT_AFTER_REVIEW,
+  REQUIRED_REVIEW_GRAPH_MISSING,
+  REQUIRED_REVIEW_GRAPH_UNDERSIZED,
+  REQUIRED_REVIEW_GRAPH_INSUFFICIENT_USABLE,
+  REQUIRED_REVIEW_GRAPH_STALE,
+  evaluateReviewRequirementGate,
+  evaluateReviewRequirementForTask,
   reviewerOutputBoundsLine,
 } from "../src/core/review-graph.js";
 import {
@@ -52,6 +65,8 @@ import type {
   VerificationResult,
 } from "../src/core/types.js";
 import { StateStore } from "../src/state/store.js";
+import { DEFAULT_ROUTING_POLICY } from "../src/core/model-routing.js";
+import { projectStrategyPolicyAdvice } from "../src/core/strategy-advice.js";
 import { prepareWorkspace } from "../src/workspace/copy.js";
 import { createPathPolicy } from "../src/workspace/path-policy.js";
 import { writeWorkspacePatchReport } from "../src/workspace/patch.js";
@@ -359,6 +374,31 @@ test("oversized summary still fails closed without truncation", () => {
   assert.equal(atLimit.summary.length, REVIEW_SUMMARY_MAX);
 });
 
+test("public parseReviewResultText stays strict and ignores a fifth relaxed-bound argument", () => {
+  const revisionId = "rev-public-strict";
+  const over501 = otherwiseValidReviewJson(revisionId, REVIEW_SUMMARY_MAX + 1);
+  assert.throws(
+    () => parseReviewResultText(over501, revisionId, "t", "t"),
+    /schema-violation/,
+  );
+  assert.equal(parseReviewResultText.length, 4);
+  assert.throws(
+    () => (parseReviewResultText as (...args: unknown[]) => unknown)(
+      over501,
+      revisionId,
+      "t",
+      "t",
+      { summaryMax: REVIEW_RESULT_TEXT_MAX },
+    ),
+    /schema-violation/,
+  );
+  const inspected = inspectReviewResultForSummaryRepair(over501, revisionId, "t", "t");
+  assert.equal(inspected.eligible, true);
+  if (inspected.eligible) {
+    assert.equal(inspected.original.summary.length, REVIEW_SUMMARY_MAX + 1);
+  }
+});
+
 test("parseReviewResultText accepts exact bounded JSON and rejects unsafe forms", () => {
   const revisionId = "rev-abc";
   const ok = parseReviewResultText(
@@ -474,6 +514,95 @@ test("parseReviewResultText accepts exact bounded JSON and rejects unsafe forms"
   assert.throws(
     () => parseReviewResultText(validResultJson(revisionId), revisionId, "expected", "other"),
     /wrong-identity/,
+  );
+});
+
+test("parseReviewResultText allows credential labels and rejects actual values", () => {
+  const revisionId = "rev-label-value";
+  const parseFields = (
+    summary: string,
+    findings: Array<{
+      severity: "info" | "warning" | "error";
+      evidencePath: string;
+      affectedBehavior: string;
+      recommendation: string;
+    }> = [],
+  ) => parseReviewResultText(
+    JSON.stringify({
+      schemaVersion: 1,
+      reviewedRevisionId: revisionId,
+      proposedDisposition: "accept",
+      summary,
+      findings,
+    }),
+    revisionId,
+    "t",
+    "t",
+  );
+
+  const option = parseFields("Document the --api-key flag without a value");
+  assert.equal(option.proposedDisposition, "accept");
+  assert.match(option.summary, /--api-key/);
+  const env = parseFields("Mentions API_KEY as an environment field name");
+  assert.match(env.summary, /API_KEY/);
+  const kebab = parseFields("The api-key setting is documented");
+  assert.match(kebab.summary, /api-key/);
+  const findingLabels = parseFields("ok", [{
+    severity: "info",
+    evidencePath: "src/app.ts",
+    affectedBehavior: "CLI still accepts --api-key",
+    recommendation: "Keep API_KEY as a field name only",
+  }]);
+  assert.equal(findingLabels.findings.length, 1);
+  const shortCliWord = parseFields("Mention --api-key abcdefg in the docs");
+  assert.match(shortCliWord.summary, /--api-key/);
+  const wrappedLabels = parseReviewResultText(
+    `Discussed --api-key and API_KEY\n${validResultJson(revisionId)}\nDone.`,
+    revisionId,
+    "t",
+    "t",
+  );
+  assert.equal(wrappedLabels.proposedDisposition, "revise");
+
+  const unsafeSummary = (summary: string): void => {
+    assert.throws(() => parseFields(summary), /unsafe-content/);
+  };
+  unsafeSummary("uses Bearer tokentoken");
+  unsafeSummary("provider token sk-abcdefgh");
+  unsafeSummary("password=hunter2");
+  unsafeSummary("password: hunter2x");
+  unsafeSummary("API_KEY=secret");
+  unsafeSummary("API-KEY: assignedvalue");
+  unsafeSummary("api-key=secret12");
+  unsafeSummary("--api-key=secret12");
+  unsafeSummary("export --api-key supersecret");
+  unsafeSummary("export --api-key abcdefgh");
+  assert.throws(
+    () => parseFields("ok", [{
+      severity: "error",
+      evidencePath: "src/app.ts",
+      affectedBehavior: "Command uses --api-key supersecret",
+      recommendation: "Remove the value",
+    }]),
+    /unsafe-content/,
+  );
+  assert.throws(
+    () => parseReviewResultText(
+      `Here is API_KEY=secret\n\`\`\`json\n${validResultJson(revisionId)}\n\`\`\``,
+      revisionId,
+      "t",
+      "t",
+    ),
+    /unsafe-content/,
+  );
+  assert.throws(
+    () => parseReviewResultText(
+      `config has "api-key":"secret12"\n${validResultJson(revisionId)}`,
+      revisionId,
+      "t",
+      "t",
+    ),
+    /unsafe-content/,
   );
 });
 
@@ -1400,6 +1529,7 @@ test("Hub UI explains multi-judge review in English and Chinese", async () => {
 test("daemon protocol: review_graph_create mutates; status is read-only", async () => {
   const { requiresMatchingBuildIdentity } = await import("../src/daemon/protocol.js");
   assert.equal(requiresMatchingBuildIdentity("review_graph_create"), true);
+  assert.equal(requiresMatchingBuildIdentity("review_graph_repair_result"), true);
   assert.equal(requiresMatchingBuildIdentity("review_graph_status"), false);
 });
 
@@ -1427,4 +1557,1539 @@ test("create requires confirm and bounded reason", async () => {
   } finally {
     fx.store.close();
   }
+});
+
+test("declared review requirement gate covers missing, undersized, pending, stale, and skip", () => {
+  const skip = evaluateReviewRequirementGate({
+    reviewRequirement: { requiredJudges: 0, reason: "Mechanical" },
+  });
+  assert.equal(skip.status, "explicit-skip");
+  assert.equal(skip.blocksIntegration, false);
+
+  const legacy = evaluateReviewRequirementGate({});
+  assert.equal(legacy.status, "not-declared");
+  assert.equal(legacy.blocksIntegration, false);
+
+  const missing = evaluateReviewRequirementGate({
+    reviewRequirement: { requiredJudges: 1, reason: "Need one Judge" },
+    currentRevisionId: "rev-current",
+  });
+  assert.equal(missing.status, "missing");
+  assert.ok(missing.rejectionReasons.includes(REQUIRED_REVIEW_GRAPH_MISSING));
+
+  const twoRequired = evaluateReviewRequirementGate({
+    reviewRequirement: { requiredJudges: 2, reason: "Need two Judges" },
+    currentRevisionId: "rev-current",
+    graph: {
+      schemaVersion: 1,
+      id: "g",
+      candidateTaskId: "t",
+      candidateRevisionId: "rev-current",
+      attemptId: "a",
+      attemptOrdinal: 1,
+      verificationEventSequence: 2,
+      patchDigest: "a".repeat(64),
+      status: "completed",
+      round: 1,
+      maxAssignments: 1,
+      assignmentIds: ["as1"],
+      createdAt: "t",
+      updatedAt: "t",
+      terminalEvidenceSequence: 4,
+    },
+    assignments: [{
+      id: "as1",
+      graphId: "g",
+      ordinal: 1,
+      candidateTaskId: "t",
+      candidateRevisionId: "rev-current",
+      reviewerWorkerProfileId: "p",
+      reviewerTaskId: "r",
+      status: "completed",
+      reason: "one",
+      frozenIdentity: { provider: "deepseek", model: "m", runtime: "claude-code", effort: "low" },
+      createdAt: "t",
+      updatedAt: "t",
+      result: {
+        schemaVersion: 1,
+        reviewedRevisionId: "rev-current",
+        proposedDisposition: "accept",
+        summary: "ok enough for a usable judge opinion",
+        findings: [],
+      },
+    }],
+    events: [{
+      id: 5,
+      taskId: "t",
+      sequence: 5,
+      timestamp: "t",
+      type: "main-review.completed",
+      summary: "accept",
+    }],
+  });
+  assert.equal(twoRequired.status, "undersized");
+  assert.equal(twoRequired.missingOpinions, 1);
+  assert.ok(twoRequired.rejectionReasons.includes(REQUIRED_REVIEW_GRAPH_UNDERSIZED));
+
+  const pending = evaluateReviewRequirementGate({
+    reviewRequirement: { requiredJudges: 1, reason: "Need one Judge" },
+    currentRevisionId: "rev-current",
+    graph: {
+      schemaVersion: 1,
+      id: "g",
+      candidateTaskId: "t",
+      candidateRevisionId: "rev-current",
+      attemptId: "a",
+      attemptOrdinal: 1,
+      verificationEventSequence: 2,
+      patchDigest: "a".repeat(64),
+      status: "running",
+      round: 1,
+      maxAssignments: 1,
+      assignmentIds: ["as1"],
+      createdAt: "t",
+      updatedAt: "t",
+    },
+    assignments: [{
+      id: "as1",
+      graphId: "g",
+      ordinal: 1,
+      candidateTaskId: "t",
+      candidateRevisionId: "rev-current",
+      reviewerWorkerProfileId: "p",
+      reviewerTaskId: "r",
+      status: "running",
+      reason: "one",
+      frozenIdentity: { provider: "deepseek", model: "m", runtime: "claude-code", effort: "low" },
+      createdAt: "t",
+      updatedAt: "t",
+    }],
+  });
+  assert.equal(pending.status, "pending");
+  assert.ok(pending.rejectionReasons.includes(PENDING_REVIEW_BLOCKS_INTEGRATION));
+
+  const stale = evaluateReviewRequirementGate({
+    reviewRequirement: { requiredJudges: 1, reason: "Need one Judge" },
+    currentRevisionId: "rev-new",
+    graph: {
+      schemaVersion: 1,
+      id: "g",
+      candidateTaskId: "t",
+      candidateRevisionId: "rev-old",
+      attemptId: "a",
+      attemptOrdinal: 1,
+      verificationEventSequence: 2,
+      patchDigest: "a".repeat(64),
+      status: "completed",
+      round: 1,
+      maxAssignments: 1,
+      assignmentIds: ["as1"],
+      createdAt: "t",
+      updatedAt: "t",
+      terminalEvidenceSequence: 4,
+    },
+    assignments: [{
+      id: "as1",
+      graphId: "g",
+      ordinal: 1,
+      candidateTaskId: "t",
+      candidateRevisionId: "rev-old",
+      reviewerWorkerProfileId: "p",
+      reviewerTaskId: "r",
+      status: "completed",
+      reason: "one",
+      frozenIdentity: { provider: "deepseek", model: "m", runtime: "claude-code", effort: "low" },
+      createdAt: "t",
+      updatedAt: "t",
+      result: {
+        schemaVersion: 1,
+        reviewedRevisionId: "rev-old",
+        proposedDisposition: "accept",
+        summary: "ok enough for a usable judge opinion",
+        findings: [],
+      },
+    }],
+  });
+  assert.equal(stale.status, "stale");
+  assert.ok(stale.rejectionReasons.includes(REQUIRED_REVIEW_GRAPH_STALE));
+  assert.ok(!stale.rejectionReasons.includes(REQUIRED_REVIEW_GRAPH_INSUFFICIENT_USABLE));
+});
+
+test("store-backed requirement gate is read-only and does not invent legacy policy", async () => {
+  const fx = await buildSucceededCandidate();
+  try {
+    const legacy = evaluateReviewRequirementForTask(fx.store, fx.task.id);
+    assert.equal(legacy.declared, false);
+    assert.equal(legacy.status, "not-declared");
+    assert.equal(legacy.blocksIntegration, false);
+
+    const current = fx.store.getTask(fx.task.id);
+    fx.store.updateTask(fx.task.id, {
+      spec: {
+        ...current.spec,
+        reviewRequirement: { requiredJudges: 1, reason: "Need one independent Judge" },
+      },
+    });
+    const missing = evaluateReviewRequirementForTask(fx.store, fx.task.id);
+    assert.equal(missing.status, "missing");
+    assert.ok(missing.rejectionReasons.includes(REQUIRED_REVIEW_GRAPH_MISSING));
+    assert.equal(fx.store.getReviewGraphByCandidateTaskId(fx.task.id), undefined);
+  } finally {
+    fx.store.close();
+  }
+});
+
+test("legacy and explicit-skip gates honor an existing Review Graph blocker", () => {
+  const pendingGraph = {
+    schemaVersion: 1 as const,
+    id: "g-pending",
+    candidateTaskId: "t",
+    candidateRevisionId: "rev-current",
+    attemptId: "a",
+    attemptOrdinal: 1,
+    verificationEventSequence: 2,
+    patchDigest: "a".repeat(64),
+    status: "running" as const,
+    round: 1 as const,
+    maxAssignments: 1 as const,
+    assignmentIds: ["as1"],
+    createdAt: "t",
+    updatedAt: "t",
+  };
+  const pendingAssignment = {
+    id: "as1",
+    graphId: "g-pending",
+    ordinal: 1,
+    candidateTaskId: "t",
+    candidateRevisionId: "rev-current",
+    reviewerWorkerProfileId: "p",
+    reviewerTaskId: "r",
+    status: "running" as const,
+    reason: "optional judge",
+    frozenIdentity: {
+      provider: "deepseek",
+      model: "m",
+      runtime: "claude-code",
+      effort: "low",
+    },
+    createdAt: "t",
+    updatedAt: "t",
+  };
+
+  const legacyPending = evaluateReviewRequirementGate({
+    currentRevisionId: "rev-current",
+    graph: pendingGraph,
+    assignments: [pendingAssignment],
+  });
+  assert.equal(legacyPending.declared, false);
+  assert.equal(legacyPending.status, "pending");
+  assert.equal(legacyPending.blocksIntegration, true);
+  assert.ok(legacyPending.rejectionReasons.includes(PENDING_REVIEW_BLOCKS_INTEGRATION));
+
+  const skipPending = evaluateReviewRequirementGate({
+    reviewRequirement: { requiredJudges: 0, reason: "Mechanical" },
+    currentRevisionId: "rev-current",
+    graph: pendingGraph,
+    assignments: [pendingAssignment],
+  });
+  assert.equal(skipPending.declared, true);
+  assert.equal(skipPending.requiredJudges, 0);
+  assert.equal(skipPending.status, "pending");
+  assert.equal(skipPending.blocksIntegration, true);
+  assert.ok(skipPending.rejectionReasons.includes(PENDING_REVIEW_BLOCKS_INTEGRATION));
+
+  const terminalGraph = {
+    ...pendingGraph,
+    id: "g-terminal",
+    status: "completed" as const,
+    terminalEvidenceSequence: 4,
+  };
+  const terminalAssignment = {
+    ...pendingAssignment,
+    id: "as-terminal",
+    graphId: "g-terminal",
+    status: "completed" as const,
+    result: {
+      schemaVersion: 1 as const,
+      reviewedRevisionId: "rev-current",
+      proposedDisposition: "accept" as const,
+      summary: "ok enough for a usable judge opinion",
+      findings: [],
+    },
+  };
+
+  const legacyStaleMain = evaluateReviewRequirementGate({
+    currentRevisionId: "rev-current",
+    graph: terminalGraph,
+    assignments: [terminalAssignment],
+    events: [{
+      id: 3,
+      taskId: "t",
+      sequence: 3,
+      timestamp: "t",
+      type: "main-review.completed",
+      summary: "accept before terminal review",
+    }],
+  });
+  assert.equal(legacyStaleMain.status, "stale-main-accept");
+  assert.equal(legacyStaleMain.blocksIntegration, true);
+  assert.ok(legacyStaleMain.rejectionReasons.includes(STALE_MAIN_ACCEPT_AFTER_REVIEW));
+
+  const skipStaleMain = evaluateReviewRequirementGate({
+    reviewRequirement: { requiredJudges: 0, reason: "Mechanical" },
+    currentRevisionId: "rev-current",
+    graph: terminalGraph,
+    assignments: [terminalAssignment],
+  });
+  assert.equal(skipStaleMain.requiredJudges, 0);
+  assert.equal(skipStaleMain.status, "stale-main-accept");
+  assert.ok(skipStaleMain.rejectionReasons.includes(STALE_MAIN_ACCEPT_AFTER_REVIEW));
+
+  const legacyFresh = evaluateReviewRequirementGate({
+    currentRevisionId: "rev-current",
+    graph: terminalGraph,
+    assignments: [terminalAssignment],
+    events: [{
+      id: 5,
+      taskId: "t",
+      sequence: 5,
+      timestamp: "t",
+      type: "main-review.completed",
+      summary: "fresh accept after review",
+    }],
+  });
+  assert.equal(legacyFresh.status, "not-declared");
+  assert.equal(legacyFresh.blocksIntegration, false);
+  assert.equal(legacyFresh.rejectionReasons.length, 0);
+});
+
+function summaryOfLength(length: number): string {
+  return "s".repeat(length);
+}
+
+function otherwiseValidReviewJson(
+  revisionId: string,
+  summaryLength: number,
+  extras: {
+    proposedDisposition?: "accept" | "revise" | "reject";
+    extraRoot?: Record<string, unknown>;
+    reviewedRevisionId?: string;
+    findings?: unknown;
+  } = {},
+): string {
+  return JSON.stringify({
+    schemaVersion: 1,
+    reviewedRevisionId: extras.reviewedRevisionId ?? revisionId,
+    proposedDisposition: extras.proposedDisposition ?? "accept",
+    summary: summaryOfLength(summaryLength),
+    findings: extras.findings ?? [],
+    ...extras.extraRoot,
+  });
+}
+
+const HISTORICAL_LABEL_FINDINGS = [
+  {
+    severity: "info" as const,
+    evidencePath: "src/app.ts",
+    affectedBehavior: "Mentions API_KEY and api-key as field names only",
+    recommendation: "Keep documenting the --api-key flag without embedding values",
+  },
+];
+
+function labelOnlyReviewJson(
+  revisionId: string,
+  extras: {
+    summary?: string;
+    proposedDisposition?: "accept" | "revise" | "reject";
+    extraRoot?: Record<string, unknown>;
+    reviewedRevisionId?: string;
+    findings?: unknown;
+  } = {},
+): string {
+  return JSON.stringify({
+    schemaVersion: 1,
+    reviewedRevisionId: extras.reviewedRevisionId ?? revisionId,
+    proposedDisposition: extras.proposedDisposition ?? "accept",
+    summary: extras.summary
+      ?? "The change correctly documents the --api-key option without storing a value",
+    findings: extras.findings ?? HISTORICAL_LABEL_FINDINGS,
+    ...extras.extraRoot,
+  });
+}
+
+function persistHistoricalUnsafeContent(store: StateStore, assignmentId: string): void {
+  const assignment = store.getReviewAssignment(assignmentId);
+  const graph = store.getReviewGraph(assignment.graphId);
+  const now = new Date().toISOString();
+  store.updateReviewAssignmentAndGraph(
+    {
+      ...assignment,
+      status: "failed",
+      failureCode: "unsafe-content",
+      updatedAt: now,
+      completedAt: now,
+    },
+    {
+      ...graph,
+      status: "completed",
+      updatedAt: now,
+    },
+  );
+}
+
+async function buildTwoJudgeFixture(): Promise<Fixture & {
+  usableAssignmentId: string;
+  failedAssignmentId: string;
+  graphId: string;
+}> {
+  const fx = await buildSucceededCandidate();
+  const alt = secondProfileId(fx.settings);
+  const created = await createReviewGraph(fx.store, fx.settings.get(), {
+    candidateTaskId: fx.task.id,
+    reviewerWorkerProfileIds: [fx.profileId, alt],
+    reason: "Two independent judges",
+    confirm: true,
+  });
+  const [usable, failed] = fx.store.listReviewAssignments(created.graph.id);
+  return {
+    ...fx,
+    usableAssignmentId: usable!.id,
+    failedAssignmentId: failed!.id,
+    graphId: created.graph.id,
+  };
+}
+
+async function buildTwoAssignmentHistoricalLabelGraph(): Promise<Fixture & {
+  usableAssignmentId: string;
+  failedAssignmentId: string;
+  originalFailureCode: string;
+  originalReviewerTaskId: string;
+  originalAttemptText: string;
+  originalStatus: string;
+}> {
+  const fx = await buildTwoJudgeFixture();
+  const usable = fx.store.getReviewAssignment(fx.usableAssignmentId);
+  const failed = fx.store.getReviewAssignment(fx.failedAssignmentId);
+  await finishReviewerWithResult(
+    fx.store,
+    usable.reviewerTaskId,
+    validResultJson(fx.revisionId, "accept"),
+  );
+  reconcileReviewAssignment(fx.store, usable.id);
+  const labelJson = labelOnlyReviewJson(fx.revisionId);
+  await finishReviewerWithResult(fx.store, failed.reviewerTaskId, labelJson);
+  persistHistoricalUnsafeContent(fx.store, failed.id);
+  const failedAfter = fx.store.getReviewAssignment(failed.id);
+  return {
+    ...fx,
+    originalFailureCode: failedAfter.failureCode ?? "",
+    originalReviewerTaskId: failed.reviewerTaskId,
+    originalAttemptText: fx.store.listAttempts(failed.reviewerTaskId).at(-1)?.resultText ?? "",
+    originalStatus: failedAfter.status,
+  };
+}
+
+async function buildTwoAssignmentOverlimitGraph(summaryLength = 507): Promise<Fixture & {
+  usableAssignmentId: string;
+  failedAssignmentId: string;
+  originalFailureCode: string;
+  originalReviewerTaskId: string;
+  originalAttemptText: string;
+  originalStatus: string;
+  reviewRoundsBefore: number;
+}> {
+  const fx = await buildSucceededCandidate();
+  const alt = secondProfileId(fx.settings);
+  const created = await createReviewGraph(fx.store, fx.settings.get(), {
+    candidateTaskId: fx.task.id,
+    reviewerWorkerProfileIds: [fx.profileId, alt],
+    reason: "Two independent judges",
+    confirm: true,
+  });
+  const [usable, failed] = fx.store.listReviewAssignments(created.graph.id);
+  await finishReviewerWithResult(
+    fx.store,
+    usable!.reviewerTaskId,
+    validResultJson(fx.revisionId, "accept"),
+  );
+  const overlimit = otherwiseValidReviewJson(fx.revisionId, summaryLength);
+  await finishReviewerWithResult(fx.store, failed!.reviewerTaskId, overlimit);
+  reconcileAllReviewGraphs(fx.store);
+  const failedAfter = fx.store.getReviewAssignment(failed!.id);
+  const attemptText = fx.store.listAttempts(failed!.reviewerTaskId).at(-1)?.resultText ?? "";
+  return {
+    ...fx,
+    usableAssignmentId: usable!.id,
+    failedAssignmentId: failed!.id,
+    originalFailureCode: failedAfter.failureCode ?? "",
+    originalReviewerTaskId: failed!.reviewerTaskId,
+    originalAttemptText: attemptText,
+    originalStatus: failedAfter.status,
+    reviewRoundsBefore: 0,
+  };
+}
+
+test("inspectReviewResultForSummaryRepair admits 507/558/733 and rejects 500 and other defects", async () => {
+  const { inspectReviewResultForSummaryRepair: inspectFromFocused } = await import("../src/core/review-result-repair.js");
+  assert.equal(inspectFromFocused, inspectReviewResultForSummaryRepair);
+  const revisionId = "rev-summary-repair";
+  const taskId = "judge-1";
+  for (const length of [507, 558, 733]) {
+    const inspected = inspectReviewResultForSummaryRepair(
+      otherwiseValidReviewJson(revisionId, length),
+      revisionId,
+      taskId,
+      taskId,
+    );
+    assert.equal(inspected.eligible, true, `${length} should be eligible`);
+    if (inspected.eligible) {
+      assert.equal(inspected.original.summary.length, length);
+      assert.equal(inspected.original.proposedDisposition, "accept");
+    }
+  }
+  const atLimit = inspectReviewResultForSummaryRepair(
+    otherwiseValidReviewJson(revisionId, REVIEW_SUMMARY_MAX),
+    revisionId,
+    taskId,
+    taskId,
+  );
+  assert.equal(atLimit.eligible, false);
+  assert.equal(atLimit.eligible ? undefined : atLimit.code, "summary-already-valid");
+
+  const malformed = inspectReviewResultForSummaryRepair("not json", revisionId, taskId, taskId);
+  assert.equal(malformed.eligible, false);
+
+  const extra = inspectReviewResultForSummaryRepair(
+    otherwiseValidReviewJson(revisionId, 507, { extraRoot: { extra: true } }),
+    revisionId,
+    taskId,
+    taskId,
+  );
+  assert.equal(extra.eligible, false);
+  assert.equal(extra.eligible ? undefined : extra.code, "extra-fields");
+
+  const stale = inspectReviewResultForSummaryRepair(
+    otherwiseValidReviewJson(revisionId, 507, { reviewedRevisionId: "other-rev" }),
+    revisionId,
+    taskId,
+    taskId,
+  );
+  assert.equal(stale.eligible, false);
+  assert.equal(stale.eligible ? undefined : stale.code, "stale-revision");
+
+  const unsafe = inspectReviewResultForSummaryRepair(
+    JSON.stringify({
+      schemaVersion: 1,
+      reviewedRevisionId: revisionId,
+      proposedDisposition: "accept",
+      summary: `${summaryOfLength(507)} Bearer sk-abcdefgh`,
+      findings: [],
+    }),
+    revisionId,
+    taskId,
+    taskId,
+  );
+  assert.equal(unsafe.eligible, false);
+  assert.equal(unsafe.eligible ? undefined : unsafe.code, "unsafe-content");
+
+  const labeledOverlong = inspectReviewResultForSummaryRepair(
+    JSON.stringify({
+      schemaVersion: 1,
+      reviewedRevisionId: revisionId,
+      proposedDisposition: "accept",
+      summary: `${summaryOfLength(498)}--api-key`,
+      findings: [],
+    }),
+    revisionId,
+    taskId,
+    taskId,
+  );
+  assert.equal(labeledOverlong.eligible, true);
+  if (labeledOverlong.eligible) {
+    assert.equal(labeledOverlong.original.summary.length, 507);
+    assert.match(labeledOverlong.original.summary, /--api-key/);
+  }
+
+  const oversized = inspectReviewResultForSummaryRepair(
+    "x".repeat(REVIEW_RESULT_TEXT_MAX + 1),
+    revisionId,
+    taskId,
+    taskId,
+  );
+  assert.equal(oversized.eligible, false);
+  assert.equal(oversized.eligible ? undefined : oversized.code, "oversized");
+});
+
+test("one-shot schema-only repair admits 507, rejects siblings, and updates effective gate", async () => {
+  const fx = await buildTwoAssignmentOverlimitGraph(507);
+  try {
+    const failedBefore = fx.store.getReviewAssignment(fx.failedAssignmentId);
+    assert.equal(failedBefore.status, "failed");
+    assert.equal(failedBefore.failureCode, "schema-violation");
+    assert.equal(failedBefore.resultRepair, undefined);
+    const beforeTasks = fx.store.listTasks().length;
+    const beforeAssignments = fx.store.listReviewAssignments(
+      fx.store.getReviewGraphByCandidateTaskId(fx.task.id)!.id,
+    );
+    assert.equal(beforeAssignments.length, 2);
+
+    const missingConfirm = evaluateReviewResultRepairEligibility(fx.store, {
+      candidateTaskId: fx.task.id,
+      assignmentId: fx.failedAssignmentId,
+    });
+    assert.equal(missingConfirm.eligible, false);
+    assert.equal(missingConfirm.code, "missing-confirm");
+
+    const valid500 = await buildSucceededCandidate();
+    try {
+      const created = await createReviewGraph(valid500.store, valid500.settings.get(), {
+        candidateTaskId: valid500.task.id,
+        reviewerWorkerProfileIds: [valid500.profileId, secondProfileId(valid500.settings)],
+        reason: "500-char sibling",
+        confirm: true,
+      });
+      const [first, second] = valid500.store.listReviewAssignments(created.graph.id);
+      await finishReviewerWithResult(
+        valid500.store,
+        first!.reviewerTaskId,
+        validResultJson(valid500.revisionId, "accept"),
+      );
+      await finishReviewerWithResult(
+        valid500.store,
+        second!.reviewerTaskId,
+        otherwiseValidReviewJson(valid500.revisionId, REVIEW_SUMMARY_MAX),
+      );
+      reconcileAllReviewGraphs(valid500.store);
+      const completed = valid500.store.getReviewAssignment(second!.id);
+      assert.equal(completed.status, "completed");
+      const rejected500 = evaluateReviewResultRepairEligibility(valid500.store, {
+        candidateTaskId: valid500.task.id,
+        assignmentId: second!.id,
+        confirm: true,
+      });
+      assert.equal(rejected500.eligible, false);
+      await assert.rejects(
+        () => repairReviewResult(valid500.store, valid500.settings.get(), {
+          candidateTaskId: valid500.task.id,
+          assignmentId: second!.id,
+          reason: "500 does not need repair",
+          confirm: true,
+        }),
+        /schema-violation|already|not a terminal/i,
+      );
+      assert.equal(valid500.store.getReviewAssignment(second!.id).resultRepair, undefined);
+    } finally {
+      valid500.store.close();
+    }
+
+    const wrongOwner = evaluateReviewResultRepairEligibility(fx.store, {
+      candidateTaskId: "not-this-candidate",
+      assignmentId: fx.failedAssignmentId,
+      confirm: true,
+    });
+    assert.equal(wrongOwner.eligible, false);
+    assert.equal(wrongOwner.code, "ownership-mismatch");
+
+    const usableReject = evaluateReviewResultRepairEligibility(fx.store, {
+      candidateTaskId: fx.task.id,
+      assignmentId: fx.usableAssignmentId,
+      confirm: true,
+    });
+    assert.equal(usableReject.eligible, false);
+
+    const eligible = evaluateReviewResultRepairEligibility(fx.store, {
+      candidateTaskId: fx.task.id,
+      assignmentId: fx.failedAssignmentId,
+      confirm: true,
+    });
+    assert.equal(eligible.eligible, true);
+    assert.equal(eligible.kind, "overlong-summary");
+    assert.equal(eligible.original?.summary.length, 507);
+
+    const repaired = await repairReviewResult(fx.store, fx.settings.get(), {
+      candidateTaskId: fx.task.id,
+      assignmentId: fx.failedAssignmentId,
+      reason: "Shorten only the over-limit summary",
+      confirm: true,
+    });
+    assert.equal(repaired.created, true);
+    const afterAssignment = fx.store.getReviewAssignment(fx.failedAssignmentId);
+    assert.equal(afterAssignment.status, fx.originalStatus);
+    assert.equal(afterAssignment.failureCode, fx.originalFailureCode);
+    assert.equal(afterAssignment.reviewerTaskId, fx.originalReviewerTaskId);
+    assert.equal(
+      fx.store.listAttempts(fx.originalReviewerTaskId).at(-1)?.resultText,
+      fx.originalAttemptText,
+    );
+    const graphRecord = fx.store.getReviewGraphByCandidateTaskId(fx.task.id)!;
+    assert.equal(graphRecord.assignmentIds.length, 2);
+    assert.equal(fx.store.listReviewAssignments(graphRecord.id).length, 2);
+    assert.equal(fx.store.listTasks().length, beforeTasks + 1);
+    const repairTask = fx.store.getTask(repaired.repairTaskId);
+    assert.equal(repairTask.spec.worker.allowEdits, false);
+    assert.equal(repairTask.spec.provider.name, afterAssignment.frozenIdentity.provider);
+    assert.equal(repairTask.spec.provider.model, afterAssignment.frozenIdentity.model);
+    assert.equal(repairTask.spec.runtime.name, afterAssignment.frozenIdentity.runtime);
+    assert.equal(repairTask.spec.runtime.effort, afterAssignment.frozenIdentity.effort);
+    assert.equal(repairTask.effectivePolicy?.values.baseMaxAttempts, 1);
+    assert.equal(repairTask.effectivePolicy?.values.maxExtraAttempts, 0);
+    assert.equal(repairTask.effectivePolicy?.values.maxMainCorrections, 0);
+    assert.equal(repairTask.effectivePolicy?.values.maxAdaptationRounds, 0);
+    assert.equal(repairTask.effectivePolicy?.values.maxMainReverifications, 0);
+    assert.equal(repairTask.effectivePolicy?.values.maxWorkerValidationRepairs, 0);
+    assert.equal(repairTask.taskFile.includes("result-repair"), true);
+
+    await assert.rejects(
+      () => repairReviewResult(fx.store, fx.settings.get(), {
+        candidateTaskId: fx.task.id,
+        assignmentId: fx.failedAssignmentId,
+        reason: "Second request must fail closed",
+        confirm: true,
+      }),
+      /already consumed|one-shot/i,
+    );
+    assert.equal(fx.store.listTasks().length, beforeTasks + 1);
+    assert.equal(fx.store.getReviewAssignment(fx.failedAssignmentId).resultRepair?.taskId, repaired.repairTaskId);
+
+    const shorter = otherwiseValidReviewJson(fx.revisionId, 80);
+    await finishReviewerWithResult(fx.store, repaired.repairTaskId, shorter);
+    reconcileReviewResultRepair(fx.store, fx.failedAssignmentId);
+    const records = fx.store.listReviewAssignments(graphRecord.id);
+    const aggregated = aggregateReviewAssignments(records);
+    assert.equal(aggregated.usable, 2);
+    assert.equal(aggregated.state, "agreement");
+    assert.equal(aggregated.dispositionCounts.accept, 2);
+    assert.match(aggregated.explanation, /accept/i);
+    const status = getReviewGraphStatus(fx.store, fx.task.id)!;
+    assert.equal(status.assignments.length, 2);
+    assert.equal(status.aggregation.usable, 2);
+    assert.equal(status.aggregation.state, "agreement");
+    assert.equal(status.aggregation.dispositionCounts.accept, 2);
+    assert.equal(status.requiresFreshMainReview, true);
+    const failedView = status.assignments.find((row) => row.id === fx.failedAssignmentId)!;
+    assert.equal(failedView.status, "failed");
+    assert.equal(failedView.failureCode, "schema-violation");
+    assert.equal(failedView.resultUsable, true);
+    assert.equal(failedView.resultRepair?.resultUsable, true);
+    assert.equal(failedView.result?.summary.length, 80);
+
+    const receipt = await preflightIntegration(fx.store, fx.task.id, INTEGRATION_DEFAULTS);
+    assert.ok(receipt.rejectionReasons.some((reason) =>
+      reason.includes(STALE_MAIN_ACCEPT_AFTER_REVIEW) || reason.includes("fresh Main"),
+    ));
+    recordMainReview(fx.store, fx.task.id, {
+      decision: "accept",
+      reason: "Fresh Main accept after summary-only repair",
+      confirm: true,
+    });
+    const afterAccept = await preflightIntegration(fx.store, fx.task.id, INTEGRATION_DEFAULTS);
+    assert.equal(afterAccept.rejectionReasons.length, 0);
+  } finally {
+    fx.store.close();
+  }
+});
+
+test("repair rejects failed Reviewer Tasks and permanently fails semantic drift", async () => {
+  const fx = await buildSucceededCandidate();
+  try {
+    const alt = secondProfileId(fx.settings);
+    const created = await createReviewGraph(fx.store, fx.settings.get(), {
+      candidateTaskId: fx.task.id,
+      reviewerWorkerProfileIds: [fx.profileId, alt],
+      reason: "Drift and failed-task siblings",
+      confirm: true,
+    });
+    const [usable, failed] = fx.store.listReviewAssignments(created.graph.id);
+    await finishReviewerWithResult(
+      fx.store,
+      usable!.reviewerTaskId,
+      validResultJson(fx.revisionId, "accept"),
+    );
+    await finishReviewerWithResult(
+      fx.store,
+      failed!.reviewerTaskId,
+      "not structured",
+      "failed",
+    );
+    reconcileAllReviewGraphs(fx.store);
+    const failedTask = evaluateReviewResultRepairEligibility(fx.store, {
+      candidateTaskId: fx.task.id,
+      assignmentId: failed!.id,
+      confirm: true,
+    });
+    assert.equal(failedTask.eligible, false);
+    assert.ok(
+      failedTask.code === "reviewer-task-not-succeeded"
+      || failedTask.code === "failure-not-schema-violation",
+    );
+
+    const overlimitFx = await buildTwoAssignmentOverlimitGraph(558);
+    try {
+      const repaired = await repairReviewResult(overlimitFx.store, overlimitFx.settings.get(), {
+        candidateTaskId: overlimitFx.task.id,
+        assignmentId: overlimitFx.failedAssignmentId,
+        reason: "Repair then drift",
+        confirm: true,
+      });
+      await finishReviewerWithResult(
+        overlimitFx.store,
+        repaired.repairTaskId,
+        otherwiseValidReviewJson(overlimitFx.revisionId, 40, { proposedDisposition: "reject" }),
+      );
+      const after = reconcileReviewResultRepair(overlimitFx.store, overlimitFx.failedAssignmentId);
+      assert.equal(after.resultRepair?.status, "failed");
+      assert.equal(after.resultRepair?.failureCode, "semantic-drift");
+      assert.equal(after.status, "failed");
+      assert.equal(after.failureCode, "schema-violation");
+      const status = getReviewGraphStatus(overlimitFx.store, overlimitFx.task.id)!;
+      assert.equal(status.aggregation.usable, 1);
+      assert.equal(status.assignments.find((row) => row.id === overlimitFx.failedAssignmentId)?.resultUsable, false);
+    } finally {
+      overlimitFx.store.close();
+    }
+  } finally {
+    fx.store.close();
+  }
+});
+
+test("restart reconcile resumes the same repair Task on a terminal Graph", async () => {
+  const fx = await buildTwoAssignmentOverlimitGraph(733);
+  try {
+    const repaired = await repairReviewResult(fx.store, fx.settings.get(), {
+      candidateTaskId: fx.task.id,
+      assignmentId: fx.failedAssignmentId,
+      reason: "Queued repair before restart",
+      confirm: true,
+    });
+    const graph = fx.store.getReviewGraphByCandidateTaskId(fx.task.id)!;
+    assert.ok(graph.status === "completed" || graph.status === "failed");
+    const first = reconcileAllReviewGraphs(fx.store);
+    const second = reconcileAllReviewGraphs(fx.store);
+    assert.equal(fx.store.getReviewAssignment(fx.failedAssignmentId).resultRepair?.taskId, repaired.repairTaskId);
+    assert.equal(fx.store.listReviewAssignments(graph.id).length, 2);
+    assert.equal(fx.store.getReviewAssignment(fx.failedAssignmentId).failureCode, "schema-violation");
+    assert.ok(!second.includes(repaired.repairTaskId));
+    assert.equal(
+      fx.store.listTasks().filter((task) => task.taskFile.includes("result-repair")).length,
+      1,
+    );
+    void first;
+  } finally {
+    fx.store.close();
+  }
+});
+
+test("interrupted repair Task stays resumable and does not consume the one-shot", async () => {
+  const fx = await buildTwoAssignmentOverlimitGraph(507);
+  try {
+    const repaired = await repairReviewResult(fx.store, fx.settings.get(), {
+      candidateTaskId: fx.task.id,
+      assignmentId: fx.failedAssignmentId,
+      reason: "Repair then daemon interrupt",
+      confirm: true,
+    });
+    const now = new Date().toISOString();
+    fx.store.setTaskStatus(repaired.repairTaskId, "running", { startedAt: now });
+    reconcileReviewResultRepair(fx.store, fx.failedAssignmentId);
+    assert.equal(fx.store.getReviewAssignment(fx.failedAssignmentId).resultRepair?.status, "running");
+
+    fx.store.setTaskStatus(repaired.repairTaskId, "interrupted", {
+      finishedAt: now,
+      error: "ForkLight daemon restarted during execution",
+    });
+    const first = reconcileAllReviewGraphs(fx.store);
+    const after = fx.store.getReviewAssignment(fx.failedAssignmentId);
+    assert.equal(after.resultRepair?.taskId, repaired.repairTaskId);
+    assert.notEqual(after.resultRepair?.status, "failed");
+    assert.equal(after.resultRepair?.failureCode, undefined);
+    assert.equal(after.failureCode, "schema-violation");
+    assert.equal(
+      fx.store.listTasks().filter((task) => task.taskFile.includes("result-repair")).length,
+      1,
+    );
+
+    const second = reconcileAllReviewGraphs(fx.store);
+    assert.equal(fx.store.getReviewAssignment(fx.failedAssignmentId).resultRepair?.status, "running");
+    assert.equal(fx.store.getTask(repaired.repairTaskId).status, "interrupted");
+    void first;
+    void second;
+
+    await finishReviewerWithResult(
+      fx.store,
+      repaired.repairTaskId,
+      otherwiseValidReviewJson(fx.revisionId, 60),
+    );
+    reconcileReviewResultRepair(fx.store, fx.failedAssignmentId);
+    const status = getReviewGraphStatus(fx.store, fx.task.id)!;
+    assert.equal(status.aggregation.usable, 2);
+    assert.equal(status.aggregation.state, "agreement");
+  } finally {
+    fx.store.close();
+  }
+});
+
+function repairProjectDirFor(
+  store: StateStore,
+  graphId: string,
+  assignmentId: string,
+): string {
+  return path.join(
+    path.dirname(store.databasePath),
+    "review-projects",
+    graphId,
+    assignmentId,
+    "result-repair",
+  );
+}
+
+function repairEventCount(store: StateStore, candidateTaskId: string): number {
+  return store.listEvents(candidateTaskId).filter((event) =>
+    event.type === "review.result-repair.created"
+    || event.type === "review.result-repair.completed"
+    || event.type === "review.result-repair.failed"
+  ).length;
+}
+
+test("repair rejects missing, unreadable, or invalid private packet before any mutation", async () => {
+  const assertNoMutation = async (
+    fx: Awaited<ReturnType<typeof buildTwoAssignmentOverlimitGraph>>,
+    mutate: () => Promise<void>,
+  ): Promise<void> => {
+    const assignment = fx.store.getReviewAssignment(fx.failedAssignmentId);
+    const graph = fx.store.getReviewGraph(assignment.graphId);
+    const projectDir = repairProjectDirFor(fx.store, graph.id, assignment.id);
+    const tasksBefore = fx.store.listTasks().length;
+    const eventsBefore = repairEventCount(fx.store, fx.task.id);
+    await mutate();
+    const rejected = evaluateReviewResultRepairEligibility(fx.store, {
+      candidateTaskId: fx.task.id,
+      assignmentId: fx.failedAssignmentId,
+      confirm: true,
+    });
+    assert.equal(rejected.eligible, false);
+    assert.equal(rejected.code, "private-packet-unavailable");
+    await assert.rejects(
+      () => repairReviewResult(fx.store, fx.settings.get(), {
+        candidateTaskId: fx.task.id,
+        assignmentId: fx.failedAssignmentId,
+        reason: "Packet must fail closed",
+        confirm: true,
+      }),
+      /private packet is missing, unreadable, or invalid/i,
+    );
+    const after = fx.store.getReviewAssignment(fx.failedAssignmentId);
+    assert.equal(after.resultRepair, undefined);
+    assert.equal(after.status, fx.originalStatus);
+    assert.equal(after.failureCode, fx.originalFailureCode);
+    assert.equal(fx.store.listTasks().length, tasksBefore);
+    assert.equal(repairEventCount(fx.store, fx.task.id), eventsBefore);
+    assert.equal(existsSync(projectDir), false);
+  };
+
+  const missing = await buildTwoAssignmentOverlimitGraph(507);
+  try {
+    await assertNoMutation(missing, async () => {
+      const assignment = missing.store.getReviewAssignment(missing.failedAssignmentId);
+      const graph = missing.store.getReviewGraph(assignment.graphId);
+      const withoutPacket = { ...assignment };
+      delete withoutPacket.privatePacketPath;
+      missing.store.updateReviewAssignmentAndGraph(withoutPacket, graph);
+    });
+  } finally {
+    missing.store.close();
+  }
+
+  const unreadable = await buildTwoAssignmentOverlimitGraph(507);
+  try {
+    await assertNoMutation(unreadable, async () => {
+      const assignment = unreadable.store.getReviewAssignment(unreadable.failedAssignmentId);
+      const graph = unreadable.store.getReviewGraph(assignment.graphId);
+      const blocker = path.join(unreadable.home, "packet-not-a-file");
+      await mkdir(blocker);
+      unreadable.store.updateReviewAssignmentAndGraph(
+        { ...assignment, privatePacketPath: blocker },
+        graph,
+      );
+    });
+  } finally {
+    unreadable.store.close();
+  }
+
+  const invalid = await buildTwoAssignmentOverlimitGraph(507);
+  try {
+    await assertNoMutation(invalid, async () => {
+      const assignment = invalid.store.getReviewAssignment(invalid.failedAssignmentId);
+      assert.ok(assignment.privatePacketPath);
+      await writeFile(assignment.privatePacketPath, "not-json{");
+    });
+  } finally {
+    invalid.store.close();
+  }
+});
+
+test("admitted repair copies the original private packet bytes unchanged", async () => {
+  const fx = await buildTwoAssignmentOverlimitGraph(507);
+  try {
+    const assignment = fx.store.getReviewAssignment(fx.failedAssignmentId);
+    assert.ok(assignment.privatePacketPath);
+    const marked = Buffer.concat([
+      await readFile(assignment.privatePacketPath),
+      Buffer.from("\n\n"),
+    ]);
+    await writeFile(assignment.privatePacketPath, marked);
+    const repaired = await repairReviewResult(fx.store, fx.settings.get(), {
+      candidateTaskId: fx.task.id,
+      assignmentId: fx.failedAssignmentId,
+      reason: "Copy exact packet bytes",
+      confirm: true,
+    });
+    const graph = fx.store.getReviewGraphByCandidateTaskId(fx.task.id)!;
+    const copied = await readFile(
+      path.join(
+        repairProjectDirFor(fx.store, graph.id, fx.failedAssignmentId),
+        "REVIEW_PACKET.json",
+      ),
+    );
+    assert.deepEqual(copied, marked);
+    assert.equal(repaired.created, true);
+    assert.equal(
+      fx.store.getReviewAssignment(fx.failedAssignmentId).resultRepair?.taskId,
+      repaired.repairTaskId,
+    );
+  } finally {
+    fx.store.close();
+  }
+});
+
+test("inspectReviewResultForCredentialLabelRepair admits label-only JSON and rejects values", async () => {
+  const { inspectReviewResultForCredentialLabelRepair: inspectFromFocused } = await import(
+    "../src/core/review-result-repair.js"
+  );
+  assert.equal(inspectFromFocused, inspectReviewResultForCredentialLabelRepair);
+  const revisionId = "rev-label-inspect";
+  const taskId = "judge-1";
+  const admitted = inspectReviewResultForCredentialLabelRepair(
+    labelOnlyReviewJson(revisionId),
+    revisionId,
+    taskId,
+    taskId,
+  );
+  assert.equal(admitted.eligible, true);
+  if (admitted.eligible) {
+    assert.equal(admitted.original.proposedDisposition, "accept");
+    assert.match(admitted.original.summary, /--api-key/);
+  }
+
+  const missingLabel = inspectReviewResultForCredentialLabelRepair(
+    validResultJson(revisionId),
+    revisionId,
+    taskId,
+    taskId,
+  );
+  assert.equal(missingLabel.eligible, false);
+  assert.equal(missingLabel.eligible ? undefined : missingLabel.code, "missing-known-label");
+
+  const actualValues = [
+    "export --api-key supersecret",
+    "API_KEY=secret",
+    "API-KEY: assignedvalue",
+    '"api-key":"secret12"',
+    "uses Bearer tokentoken",
+    "provider token sk-abcdefgh",
+    "password=hunter2",
+  ];
+  for (const summary of actualValues) {
+    const inspected = inspectReviewResultForCredentialLabelRepair(
+      JSON.stringify({
+        schemaVersion: 1,
+        reviewedRevisionId: revisionId,
+        proposedDisposition: "accept",
+        summary,
+        findings: [],
+      }),
+      revisionId,
+      taskId,
+      taskId,
+    );
+    assert.equal(inspected.eligible, false, summary);
+    assert.equal(inspected.eligible ? undefined : inspected.code, "unsafe-content", summary);
+  }
+
+  const extra = inspectReviewResultForCredentialLabelRepair(
+    labelOnlyReviewJson(revisionId, { extraRoot: { extra: true } }),
+    revisionId,
+    taskId,
+    taskId,
+  );
+  assert.equal(extra.eligible, false);
+  assert.equal(extra.eligible ? undefined : extra.code, "extra-fields");
+});
+
+test("historical label-only unsafe-content repair is one-shot, same-identity, and gates Integration", async () => {
+  const fx = await buildTwoAssignmentHistoricalLabelGraph();
+  try {
+    const failedBefore = fx.store.getReviewAssignment(fx.failedAssignmentId);
+    assert.equal(failedBefore.status, "failed");
+    assert.equal(failedBefore.failureCode, "unsafe-content");
+    assert.equal(failedBefore.resultRepair, undefined);
+    const beforeTasks = fx.store.listTasks().length;
+    const graphId = fx.store.getReviewGraphByCandidateTaskId(fx.task.id)!.id;
+    assert.equal(fx.store.listReviewAssignments(graphId).length, 2);
+
+    const missingConfirm = evaluateReviewResultRepairEligibility(fx.store, {
+      candidateTaskId: fx.task.id,
+      assignmentId: fx.failedAssignmentId,
+    });
+    assert.equal(missingConfirm.eligible, false);
+    assert.equal(missingConfirm.code, "missing-confirm");
+
+    const eligible = evaluateReviewResultRepairEligibility(fx.store, {
+      candidateTaskId: fx.task.id,
+      assignmentId: fx.failedAssignmentId,
+      confirm: true,
+    });
+    assert.equal(eligible.eligible, true);
+    assert.equal(eligible.kind, "credential-label");
+    assert.match(eligible.original?.summary ?? "", /--api-key/);
+
+    const repaired = await repairReviewResult(fx.store, fx.settings.get(), {
+      candidateTaskId: fx.task.id,
+      assignmentId: fx.failedAssignmentId,
+      reason: "Rewrite only the label-only summary",
+      confirm: true,
+    });
+    assert.equal(repaired.created, true);
+    const afterAssignment = fx.store.getReviewAssignment(fx.failedAssignmentId);
+    assert.equal(afterAssignment.status, fx.originalStatus);
+    assert.equal(afterAssignment.failureCode, fx.originalFailureCode);
+    assert.equal(afterAssignment.reviewerTaskId, fx.originalReviewerTaskId);
+    assert.equal(
+      fx.store.listAttempts(fx.originalReviewerTaskId).at(-1)?.resultText,
+      fx.originalAttemptText,
+    );
+    assert.equal(fx.store.listReviewAssignments(graphId).length, 2);
+    assert.equal(fx.store.listTasks().length, beforeTasks + 1);
+    const repairTask = fx.store.getTask(repaired.repairTaskId);
+    assert.equal(repairTask.spec.worker.allowEdits, false);
+    assert.equal(repairTask.spec.provider.name, afterAssignment.frozenIdentity.provider);
+    assert.equal(repairTask.spec.provider.model, afterAssignment.frozenIdentity.model);
+    assert.equal(repairTask.spec.runtime.name, afterAssignment.frozenIdentity.runtime);
+    assert.equal(repairTask.spec.runtime.effort, afterAssignment.frozenIdentity.effort);
+    assert.equal(repairTask.effectivePolicy?.values.baseMaxAttempts, 1);
+    assert.equal(repairTask.effectivePolicy?.values.maxExtraAttempts, 0);
+    const instructions = await readFile(
+      path.join(repairProjectDirFor(fx.store, graphId, fx.failedAssignmentId), "INSTRUCTIONS.md"),
+      "utf8",
+    );
+    assert.match(instructions, /credential field or option name/);
+    assert.match(instructions, /do not write secret values/i);
+    assert.doesNotMatch(instructions, /Shorten ONLY the summary field to at most 500 characters/);
+
+    await assert.rejects(
+      () => repairReviewResult(fx.store, fx.settings.get(), {
+        candidateTaskId: fx.task.id,
+        assignmentId: fx.failedAssignmentId,
+        reason: "Second historical request must fail closed",
+        confirm: true,
+      }),
+      /already consumed|one-shot/i,
+    );
+    assert.equal(fx.store.listTasks().length, beforeTasks + 1);
+    assert.equal(
+      fx.store.getReviewAssignment(fx.failedAssignmentId).resultRepair?.taskId,
+      repaired.repairTaskId,
+    );
+
+    await finishReviewerWithResult(
+      fx.store,
+      repaired.repairTaskId,
+      labelOnlyReviewJson(fx.revisionId, {
+        summary: "Documents --api-key, API_KEY, and api-key as names only",
+      }),
+    );
+    reconcileReviewResultRepair(fx.store, fx.failedAssignmentId);
+    const status = getReviewGraphStatus(fx.store, fx.task.id)!;
+    assert.equal(status.assignments.length, 2);
+    assert.equal(status.aggregation.usable, 2);
+    assert.equal(status.aggregation.state, "agreement");
+    assert.equal(status.requiresFreshMainReview, true);
+    const failedView = status.assignments.find((row) => row.id === fx.failedAssignmentId)!;
+    assert.equal(failedView.status, "failed");
+    assert.equal(failedView.failureCode, "unsafe-content");
+    assert.equal(failedView.resultUsable, true);
+    assert.equal(failedView.resultRepair?.resultUsable, true);
+    assert.match(failedView.result?.summary ?? "", /API_KEY/);
+    assert.deepEqual(failedView.result?.findings, HISTORICAL_LABEL_FINDINGS);
+
+    const receipt = await preflightIntegration(fx.store, fx.task.id, INTEGRATION_DEFAULTS);
+    assert.ok(receipt.rejectionReasons.some((reason) =>
+      reason.includes(STALE_MAIN_ACCEPT_AFTER_REVIEW) || reason.includes("fresh Main"),
+    ));
+    recordMainReview(fx.store, fx.task.id, {
+      decision: "accept",
+      reason: "Fresh Main accept after label-only summary repair",
+      confirm: true,
+    });
+    const afterAccept = await preflightIntegration(fx.store, fx.task.id, INTEGRATION_DEFAULTS);
+    assert.equal(afterAccept.rejectionReasons.length, 0);
+  } finally {
+    fx.store.close();
+  }
+});
+
+test("historical label repair permanently fails when the repaired summary is unchanged", async () => {
+  const fx = await buildTwoAssignmentHistoricalLabelGraph();
+  try {
+    const repaired = await repairReviewResult(fx.store, fx.settings.get(), {
+      candidateTaskId: fx.task.id,
+      assignmentId: fx.failedAssignmentId,
+      reason: "Repair then return the original summary unchanged",
+      confirm: true,
+    });
+    await finishReviewerWithResult(fx.store, repaired.repairTaskId, fx.originalAttemptText);
+    const after = reconcileReviewResultRepair(fx.store, fx.failedAssignmentId);
+    assert.equal(after.resultRepair?.status, "failed");
+    assert.equal(after.resultRepair?.failureCode, "semantic-drift");
+    assert.equal(after.status, "failed");
+    assert.equal(after.failureCode, "unsafe-content");
+    assert.equal(after.resultRepair?.taskId, repaired.repairTaskId);
+    assert.equal(after.resultRepair?.result, undefined);
+    const status = getReviewGraphStatus(fx.store, fx.task.id)!;
+    const failedView = status.assignments.find((row) => row.id === fx.failedAssignmentId)!;
+    assert.equal(status.aggregation.usable, 1);
+    assert.equal(failedView.resultUsable, false);
+    assert.equal(failedView.resultRepair?.resultUsable, false);
+    assert.equal(failedView.status, "failed");
+    assert.equal(failedView.failureCode, "unsafe-content");
+    await assert.rejects(
+      () => repairReviewResult(fx.store, fx.settings.get(), {
+        candidateTaskId: fx.task.id,
+        assignmentId: fx.failedAssignmentId,
+        reason: "No retry after unchanged-summary drift",
+        confirm: true,
+      }),
+      /already consumed|one-shot/i,
+    );
+  } finally {
+    fx.store.close();
+  }
+});
+
+test("historical unsafe-content repair rejects siblings before mutation", async () => {
+  const assertNoMutation = async (
+    setup: (fx: Awaited<ReturnType<typeof buildTwoJudgeFixture>>) => Promise<void>,
+    expectedCode?: string,
+  ): Promise<void> => {
+    const fx = await buildTwoJudgeFixture();
+    try {
+      const usable = fx.store.getReviewAssignment(fx.usableAssignmentId);
+      await finishReviewerWithResult(
+        fx.store,
+        usable.reviewerTaskId,
+        validResultJson(fx.revisionId, "accept"),
+      );
+      reconcileReviewAssignment(fx.store, usable.id);
+      await setup(fx);
+      const assignment = fx.store.getReviewAssignment(fx.failedAssignmentId);
+      const projectDir = repairProjectDirFor(fx.store, fx.graphId, assignment.id);
+      const tasksBefore = fx.store.listTasks().length;
+      const eventsBefore = repairEventCount(fx.store, fx.task.id);
+      const rejected = evaluateReviewResultRepairEligibility(fx.store, {
+        candidateTaskId: fx.task.id,
+        assignmentId: fx.failedAssignmentId,
+        confirm: true,
+      });
+      assert.equal(rejected.eligible, false);
+      if (expectedCode !== undefined) {
+        assert.equal(rejected.code, expectedCode);
+      }
+      await assert.rejects(
+        () => repairReviewResult(fx.store, fx.settings.get(), {
+          candidateTaskId: fx.task.id,
+          assignmentId: fx.failedAssignmentId,
+          reason: "Sibling must fail closed",
+          confirm: true,
+        }),
+      );
+      const after = fx.store.getReviewAssignment(fx.failedAssignmentId);
+      assert.equal(after.resultRepair, undefined);
+      assert.equal(fx.store.listTasks().length, tasksBefore);
+      assert.equal(repairEventCount(fx.store, fx.task.id), eventsBefore);
+      assert.equal(existsSync(projectDir), false);
+    } finally {
+      fx.store.close();
+    }
+  };
+
+  await assertNoMutation(async (fx) => {
+    const failed = fx.store.getReviewAssignment(fx.failedAssignmentId);
+    await finishReviewerWithResult(
+      fx.store,
+      failed.reviewerTaskId,
+      JSON.stringify({
+        schemaVersion: 1,
+        reviewedRevisionId: fx.revisionId,
+        proposedDisposition: "accept",
+        summary: "export --api-key supersecret",
+        findings: [],
+      }),
+    );
+    reconcileReviewAssignment(fx.store, failed.id);
+    assert.equal(fx.store.getReviewAssignment(failed.id).failureCode, "unsafe-content");
+  }, "unsafe-content");
+
+  await assertNoMutation(async (fx) => {
+    const failed = fx.store.getReviewAssignment(fx.failedAssignmentId);
+    await finishReviewerWithResult(fx.store, failed.reviewerTaskId, "not structured json");
+    persistHistoricalUnsafeContent(fx.store, failed.id);
+  }, "malformed-json");
+
+  await assertNoMutation(async (fx) => {
+    const failed = fx.store.getReviewAssignment(fx.failedAssignmentId);
+    await finishReviewerWithResult(
+      fx.store,
+      failed.reviewerTaskId,
+      labelOnlyReviewJson(fx.revisionId, { extraRoot: { extra: true } }),
+    );
+    persistHistoricalUnsafeContent(fx.store, failed.id);
+  }, "extra-fields");
+
+  await assertNoMutation(async (fx) => {
+    const failed = fx.store.getReviewAssignment(fx.failedAssignmentId);
+    await finishReviewerWithResult(
+      fx.store,
+      failed.reviewerTaskId,
+      labelOnlyReviewJson(fx.revisionId, { reviewedRevisionId: "other-rev" }),
+    );
+    persistHistoricalUnsafeContent(fx.store, failed.id);
+  }, "stale-revision");
+
+  await assertNoMutation(async (fx) => {
+    const failed = fx.store.getReviewAssignment(fx.failedAssignmentId);
+    await finishReviewerWithResult(fx.store, failed.reviewerTaskId, "not structured", "failed");
+    reconcileReviewAssignment(fx.store, failed.id);
+  });
+
+  await assertNoMutation(async (fx) => {
+    const failed = fx.store.getReviewAssignment(fx.failedAssignmentId);
+    await finishReviewerWithResult(
+      fx.store,
+      failed.reviewerTaskId,
+      validResultJson(fx.revisionId, "accept"),
+    );
+    persistHistoricalUnsafeContent(fx.store, failed.id);
+  }, "missing-known-label");
+
+  await assertNoMutation(async (fx) => {
+    const failed = fx.store.getReviewAssignment(fx.failedAssignmentId);
+    await finishReviewerWithResult(
+      fx.store,
+      failed.reviewerTaskId,
+      labelOnlyReviewJson(fx.revisionId),
+    );
+    persistHistoricalUnsafeContent(fx.store, failed.id);
+    const assignment = fx.store.getReviewAssignment(failed.id);
+    const graph = fx.store.getReviewGraph(assignment.graphId);
+    const withoutPacket = { ...assignment };
+    delete withoutPacket.privatePacketPath;
+    fx.store.updateReviewAssignmentAndGraph(withoutPacket, graph);
+  }, "private-packet-unavailable");
+});
+
+test("historical label repair permanently fails semantic drift and resumes the same Task", async () => {
+  const driftFx = await buildTwoAssignmentHistoricalLabelGraph();
+  try {
+    const repaired = await repairReviewResult(driftFx.store, driftFx.settings.get(), {
+      candidateTaskId: driftFx.task.id,
+      assignmentId: driftFx.failedAssignmentId,
+      reason: "Repair then drift",
+      confirm: true,
+    });
+    await finishReviewerWithResult(
+      driftFx.store,
+      repaired.repairTaskId,
+      labelOnlyReviewJson(driftFx.revisionId, { proposedDisposition: "reject" }),
+    );
+    const after = reconcileReviewResultRepair(driftFx.store, driftFx.failedAssignmentId);
+    assert.equal(after.resultRepair?.status, "failed");
+    assert.equal(after.resultRepair?.failureCode, "semantic-drift");
+    assert.equal(after.status, "failed");
+    assert.equal(after.failureCode, "unsafe-content");
+    assert.equal(after.resultRepair?.taskId, repaired.repairTaskId);
+    const status = getReviewGraphStatus(driftFx.store, driftFx.task.id)!;
+    assert.equal(status.aggregation.usable, 1);
+    assert.equal(
+      status.assignments.find((row) => row.id === driftFx.failedAssignmentId)?.resultUsable,
+      false,
+    );
+    await assert.rejects(
+      () => repairReviewResult(driftFx.store, driftFx.settings.get(), {
+        candidateTaskId: driftFx.task.id,
+        assignmentId: driftFx.failedAssignmentId,
+        reason: "No retry after drift",
+        confirm: true,
+      }),
+      /already consumed|one-shot/i,
+    );
+  } finally {
+    driftFx.store.close();
+  }
+
+  const findingFx = await buildTwoAssignmentHistoricalLabelGraph();
+  try {
+    const repaired = await repairReviewResult(findingFx.store, findingFx.settings.get(), {
+      candidateTaskId: findingFx.task.id,
+      assignmentId: findingFx.failedAssignmentId,
+      reason: "Repair then change a finding",
+      confirm: true,
+    });
+    await finishReviewerWithResult(
+      findingFx.store,
+      repaired.repairTaskId,
+      labelOnlyReviewJson(findingFx.revisionId, {
+        findings: [{
+          severity: "warning",
+          evidencePath: "src/app.ts",
+          affectedBehavior: "Changed finding text",
+          recommendation: "This is semantic drift",
+        }],
+      }),
+    );
+    const after = reconcileReviewResultRepair(findingFx.store, findingFx.failedAssignmentId);
+    assert.equal(after.resultRepair?.status, "failed");
+    assert.equal(after.resultRepair?.failureCode, "semantic-drift");
+    assert.equal(after.failureCode, "unsafe-content");
+  } finally {
+    findingFx.store.close();
+  }
+
+  const revisionFx = await buildTwoAssignmentHistoricalLabelGraph();
+  try {
+    const repaired = await repairReviewResult(revisionFx.store, revisionFx.settings.get(), {
+      candidateTaskId: revisionFx.task.id,
+      assignmentId: revisionFx.failedAssignmentId,
+      reason: "Repair then change revision",
+      confirm: true,
+    });
+    await finishReviewerWithResult(
+      revisionFx.store,
+      repaired.repairTaskId,
+      labelOnlyReviewJson(revisionFx.revisionId, { reviewedRevisionId: "other-rev" }),
+    );
+    const after = reconcileReviewResultRepair(revisionFx.store, revisionFx.failedAssignmentId);
+    assert.equal(after.resultRepair?.status, "failed");
+    assert.equal(after.resultRepair?.failureCode, "stale-revision");
+    assert.equal(after.failureCode, "unsafe-content");
+  } finally {
+    revisionFx.store.close();
+  }
+
+  const restartFx = await buildTwoAssignmentHistoricalLabelGraph();
+  try {
+    const repaired = await repairReviewResult(restartFx.store, restartFx.settings.get(), {
+      candidateTaskId: restartFx.task.id,
+      assignmentId: restartFx.failedAssignmentId,
+      reason: "Queued historical repair before restart",
+      confirm: true,
+    });
+    const graph = restartFx.store.getReviewGraphByCandidateTaskId(restartFx.task.id)!;
+    const first = reconcileAllReviewGraphs(restartFx.store);
+    const second = reconcileAllReviewGraphs(restartFx.store);
+    assert.equal(
+      restartFx.store.getReviewAssignment(restartFx.failedAssignmentId).resultRepair?.taskId,
+      repaired.repairTaskId,
+    );
+    assert.equal(restartFx.store.listReviewAssignments(graph.id).length, 2);
+    assert.equal(
+      restartFx.store.getReviewAssignment(restartFx.failedAssignmentId).failureCode,
+      "unsafe-content",
+    );
+    assert.ok(!second.includes(repaired.repairTaskId));
+    assert.equal(
+      restartFx.store.listTasks().filter((task) => task.taskFile.includes("result-repair")).length,
+      1,
+    );
+    void first;
+
+    const now = new Date().toISOString();
+    restartFx.store.setTaskStatus(repaired.repairTaskId, "running", { startedAt: now });
+    reconcileReviewResultRepair(restartFx.store, restartFx.failedAssignmentId);
+    restartFx.store.setTaskStatus(repaired.repairTaskId, "interrupted", {
+      finishedAt: now,
+      error: "ForkLight daemon restarted during execution",
+    });
+    reconcileAllReviewGraphs(restartFx.store);
+    const interrupted = restartFx.store.getReviewAssignment(restartFx.failedAssignmentId);
+    assert.equal(interrupted.resultRepair?.taskId, repaired.repairTaskId);
+    assert.notEqual(interrupted.resultRepair?.status, "failed");
+    assert.equal(interrupted.failureCode, "unsafe-content");
+  } finally {
+    restartFx.store.close();
+  }
+});
+
+test("judge policy history counts shared identities once and never votes", () => {
+  const shared = {
+    provider: "xai",
+    model: "grok-4.6",
+    runtime: "grok-build",
+    effort: "xhigh",
+  };
+  const projection = projectStrategyPolicyAdvice({
+    taskClass: "coding:judge-policy",
+    policy: DEFAULT_ROUTING_POLICY,
+    competitionIntent: "none",
+    competitionTriggers: [],
+    shouldRunCompetition: false,
+    exactEvidence: new Map(),
+    ordinaryTasks: [{ taskClass: "coding:judge-policy", requiredJudges: 2 }],
+    reviewGraphs: [{
+      taskClass: "coding:judge-policy",
+      assignments: [
+        { ...shared, terminal: true, usable: true },
+        { ...shared, terminal: true, usable: false },
+        {
+          provider: "deepseek",
+          model: "v4",
+          runtime: "claude-code",
+          effort: "high",
+          terminal: true,
+          usable: true,
+        },
+      ],
+    }],
+  });
+  assert.equal(projection.judgePolicy.determination, "explained");
+  assert.equal(projection.judgePolicy.votes, false);
+  assert.equal(projection.judgePolicy.infersRequirement, false);
+  assert.equal(projection.judgePolicy.assignsOrReplacesJudge, false);
+  assert.equal(projection.judgePolicy.changesIntegrationAuthority, false);
+  assert.deepEqual(projection.judgePolicy.declaredRequiredJudges, {
+    present: true,
+    depths: [2],
+    mixed: false,
+  });
+  assert.equal(projection.judgePolicy.usableOutcomeCount, 2);
+  assert.equal(projection.judgePolicy.unusableOutcomeCount, 1);
+  assert.equal(projection.judgePolicy.distinctUnderlyingIdentityCount, 2);
+
+  const missing = projectStrategyPolicyAdvice({
+    taskClass: "coding:judge-policy",
+    policy: DEFAULT_ROUTING_POLICY,
+    competitionIntent: "none",
+    competitionTriggers: [],
+    shouldRunCompetition: false,
+    exactEvidence: new Map(),
+    ordinaryTasks: [{ taskClass: "coding:judge-policy" }],
+    reviewGraphs: [{
+      taskClass: "coding:judge-policy",
+      assignments: [{ ...shared, terminal: true, usable: false }],
+    }],
+  });
+  assert.equal(missing.judgePolicy.determination, "cannot-determine");
+  assert.ok(missing.judgePolicy.reasons.includes("requirement-absent"));
+  assert.ok(missing.judgePolicy.reasons.includes("no-usable-history"));
+  assert.equal(missing.judgePolicy.declaredRequiredJudges.present, false);
+  assert.equal(missing.judgePolicy.usableOutcomeCount, 0);
+  assert.equal(missing.judgePolicy.unusableOutcomeCount, 1);
 });

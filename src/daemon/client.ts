@@ -109,14 +109,17 @@ export function daemonRequestTimeoutMs(
   method: DaemonMethod,
   params: Record<string, unknown>,
 ): number {
-  // Remediation and candidate reverification execute the Task's configured
-  // acceptance suite before they can respond. Keep the transport from timing
-  // out first; the per-command timeout remains authoritative inside the
-  // daemon. Callers may request a longer transport window when they know the
-  // suite size.
+  // Long observations — remediation/candidate verification suites, storage
+  // reclaim, and read-only storage audit/preview scans — may legitimately
+  // outlive the generic short-method window before they can respond. Keep the
+  // transport from timing out first; the daemon's own operation authority
+  // remains the source of truth. Callers may request a longer transport window
+  // when they know the work size.
   const requested = method === "integration_wait" || method === "checkpoint_wait"
+    || method === "delivery_prepare" || method === "delivery_decide"
     ? params.timeoutMs
-    : method === "remediation_verify" || method === "candidate_reverify"
+    : method === "remediation_verify" || method === "candidate_reverify" || method === "storage_reclaim"
+        || method === "storage_audit" || method === "storage_preview"
       ? (params.requestTimeoutMs ?? 6 * 60 * 60 * 1000)
       : undefined;
   return typeof requested === "number"

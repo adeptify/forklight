@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "name": "M2-B risk-declared review and Main decision packet",
+  "objective": "Deliver a safely integrated and independently audited explicit 0/1/2-Judge Task requirement and one canonical Main decision packet while preserving legacy, privacy, read-only, and Main-authority boundaries.",
+  "planFile": "./plan.json",
+  "policy": {
+    "maxDurationMs": null,
+    "noProgressTimeoutMs": null,
+    "maxCorrectionRounds": 1,
+    "maxReviewRounds": 2,
+    "maxNoNewEvidenceCycles": 2
+  },
+  "milestones": [
+    { "itemId": "implement", "gate": "integration" },
+    { "itemId": "review-gate-audit", "gate": "machine" },
+    { "itemId": "decision-packet-audit", "gate": "machine" },
+    { "itemId": "privacy-scope-audit", "gate": "machine" }
+  ]
+}

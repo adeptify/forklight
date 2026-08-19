@@ -1,0 +1,166 @@
+version: 2
+name: M2-C adopt exact Candidate and close five frozen gaps
+project: /Users/yijunwang/code/forklight
+taskClass: m2-task-storage-lifecycle-recovery
+taskFamily: forklight-storage-lifecycle
+workerProfileId: grok-4-6-xhigh
+deliveryProfileId: forklight-self-upgrade
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 2
+  reason: Destructive lifecycle recovery, path/process safety, and Store write ordering require two independent reviews.
+
+provider:
+  name: xai
+  model: grok-4.6
+  keychainService: forklight.xai.api-key
+runtime:
+  name: grok-build
+  executable: grok
+  effort: xhigh
+  maxBudgetUsd: null
+
+contract:
+  outcome: >-
+    Produce one source-compatible M2-C Candidate that adopts exact verified Revision
+    99435c50-1815-414b-9430-df6eef1b619b and closes only five frozen storage-lifecycle
+    safety and output gaps without rebuilding accepted behavior or touching real local data.
+  presentation:
+    summary: 复用已验证的 17 条路径，只修五个冻结缺口，形成可安全合入的完整 Candidate。
+    language: zh-CN
+  context:
+    - Read specs/m2-c-task-storage-lifecycle/spec.md and specs/m2-c-task-storage-lifecycle/work-items/correction-cap-recovery/spec.md completely before editing.
+    - The exact seed is goals/forklight-main-led-execution/execution/m2-c-recovery/99435c50-1815-414b-9430-df6eef1b619b.patch with sha256 237cbfe2403fc43519e1b467d542c74b5a02525ebe5dda98b592e89abb0c3b0f.
+    - The seed is the durable successor Candidate that already passed build, 346 focused tests, and diff check. It is read-only input, not a new design.
+    - Verify the seed digest and apply it once inside this clean isolated Workspace with git apply -p2. On a resumed persistent Session, detect the already-applied state and never apply it twice.
+    - ForkLight serves one local developer. Use current Store truth, simple path ownership, and Main-serial Integration; add no lock, lease, general hash, version handshake, or distributed coordination.
+    - Never mutate the real ForkLight Home, source project, Store, credentials, remotes, backups, Hub, or Integration from the Worker.
+  inScope:
+    - Preserve and inspect the exact 17 seeded paths only as needed to close the five named gaps.
+    - Keep protected and unknown entries visible in all-eligible preview while deletion targets remain reclaimable-only and unknown wins next action.
+    - Treat stored workerPid ownership as a Task-id set; duplicate PID ownership protects all implicated Tasks and is never signalled.
+    - Refuse symlinked physical runs and Task roots while allowing only a configured Home alias whose physical roots are ordinary and contained.
+    - Integrity-gate retain before Store write and report retained byte breakdown plus prior terminal eligibility without persisting raw user notes.
+    - Add focused temporary-Home regressions and retain the complete parent M2-C verification surface.
+  outOfScope:
+    - Rebuilding or redesigning accepted lifecycle behavior, new commands, new eligibility states, or unrelated refactors.
+    - Historical backup deletion, Store row deletion, unknown or durable deletion, real-home mutation, scheduled cleanup, Hub, routing, Worker semantics, handoff admission, Competition, economics, commit, or push.
+    - Locks, leases, content-addressing, general checksums, manifests, version handshakes, multi-user or distributed coordination, or duplicate integrity checks.
+    - Editing the seed patch or any path outside the frozen 17-path set.
+  executionSteps:
+    - Verify the exact seed digest; stop without edits if it differs.
+    - In the clean current-source Workspace run git apply -p2 --check on the seed and apply it exactly once; stop on any source-base mismatch.
+    - Trace only the five frozen gaps through the seeded lifecycle authority, Store call, and CLI/MCP consumers.
+    - Implement the smallest complete fixes and focused regressions without weakening already verified protection behavior.
+    - Run every acceptance command, inspect the exact combined diff, and remove any unrelated or generated change.
+  deliverables:
+    - One exact combined 17-path Candidate relative to current source.
+    - Focused evidence for all-eligible visibility, duplicate PID ambiguity, physical symlink refusal, retain integrity preflight, and retain bytes/prior reason.
+    - A bounded Worker handoff naming what changed, self-check results, and any remaining blocker.
+  modules:
+    - name: Seed adoption
+      responsibility: Materialize one exact durable Candidate into a clean current-source Workspace before ordinary edits.
+      consumes: [Frozen Revision patch, full digest, current source baseline, and 17 affected paths.]
+      produces: [Exact adopted bytes or a source-base mismatch stop.]
+      boundaries: [One Candidate identity check only; no Store rewrite, second-hop handoff, source mutation, or general content-addressing.]
+    - name: Storage lifecycle gap correction
+      responsibility: Close the five frozen gaps in the existing canonical lifecycle authority and its narrow consumers.
+      consumes: [Seeded lifecycle code, parent spec scenarios, Store integrity access, process and filesystem observations.]
+      produces: [Protected preview truth, ambiguous PID safety, physical containment, and truthful retain behavior.]
+      boundaries: [No new lifecycle state machine, distributed coordination, backup/unknown deletion, or unrelated redesign.]
+    - name: Focused regressions
+      responsibility: Prove the five behaviors in temporary Homes and preserve the full accepted suite.
+      consumes: [Existing M2-C tests and exact five gaps.]
+      produces: [Deterministic regressions and complete independent verifier evidence.]
+      boundaries: [No real ForkLight Home mutation, synthetic test-count work, Hub test, or private raw note assertion.]
+  callChain:
+    - Main binds the new Task to the exact prior Revision, digest, 17 paths, five gaps, and current source base.
+    - Grok 4.6 Xhigh uses one persistent Session to import the seed and fix only the gaps inside its isolated Workspace.
+    - ForkLight independently runs the approved digest, build, focused suite, and diff checks and captures one exact combined Candidate Revision.
+    - Two independent read-only Judges inspect the exact Candidate from different safety views; Main resolves them and records the final decision.
+    - Only after Main accept does ForkLight safe Integration apply, verify, build, activate, and release the serial read-only audits.
+  scenarios:
+    - name: Exact seed adoption
+      given: The frozen patch digest matches and applies to the current clean source baseline.
+      when: The Worker starts the new isolated Workspace.
+      then: All 17 prior Candidate paths are present before five-gap correction and the final Candidate remains relative to current source.
+    - name: Seed mismatch stops
+      given: Seed bytes or current source base differ from the frozen Revision contract.
+      when: Digest or git apply check runs.
+      then: The Worker stops without compensating edits, source mutation, Store rewrite, or a newly invented adoption path.
+    - name: Five gaps close without expansion
+      given: The exact seed is present and the parent spec freezes five remaining gaps.
+      when: Correction and regressions complete.
+      then: Every gap passes, previously verified behavior stays intact, and no sixth feature or forbidden path appears.
+  risks:
+    - Wrong seed or source drift could manufacture a misleading Candidate; exact digest and git apply check stop before edits.
+    - Broad rewriting could discard usable partial output; the Worker edits only evidence-backed gap paths and Main reviews the combined diff.
+    - Destructive tests could touch real data; every automated mutation uses a temporary ForkLight Home.
+  changeBudget:
+    maxFiles: 17
+    maxDiffLines: 3800
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 60000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .runtime
+    - .forklight
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - docs/operations.md
+    - src/cli.ts
+    - src/cli/exchange-receipts.ts
+    - src/core/config.ts
+    - src/core/storage-lifecycle.ts
+    - src/core/types.ts
+    - src/daemon/coordinator.ts
+    - src/daemon/protocol.ts
+    - src/daemon/server.ts
+    - src/mcp/exchange-receipts.ts
+    - src/mcp/server.ts
+    - src/state/store.ts
+    - tests/daemon-cli.test.ts
+    - tests/daemon.test.ts
+    - tests/mcp.test.ts
+    - tests/storage-lifecycle.test.ts
+    - tests/store.test.ts
+acceptance:
+  criteria:
+    - The exact frozen seed is adopted into a clean current-source Workspace and the final Candidate contains the accepted 17 paths only.
+    - All-eligible preview retains protected and unknown entries, names targets only for reclaimable Tasks, and lets unknown win the one next action.
+    - Duplicate stored PID ownership and symlinked physical runs or Task roots fail closed without signalling or deletion; a Home alias alone remains supported.
+    - Retain runs Store integrity before writing and reports retained bytes plus prior terminal eligibility while persisting no raw note.
+    - The complete parent M2-C focused suite passes in temporary Homes and Candidate contains no generated, Hub, backup, coordination, or unrelated change.
+  commands:
+    - test "$(shasum -a 256 goals/forklight-main-led-execution/execution/m2-c-recovery/99435c50-1815-414b-9430-df6eef1b619b.patch | awk '{print $1}')" = "237cbfe2403fc43519e1b467d542c74b5a02525ebe5dda98b592e89abb0c3b0f"
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/storage-lifecycle.test.ts tests/store.test.ts tests/daemon.test.ts tests/daemon-cli.test.ts tests/mcp.test.ts
+    - git diff --check

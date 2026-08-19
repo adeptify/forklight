@@ -2,12 +2,23 @@ import type {
   AttemptRecord,
   DeliveryLineage,
   EventRecord,
+  ExecutionPreference,
   IntegrationResultRecord,
   LiveStageProjection,
+  MainDecisionPacket,
+  ResolvedExecutionMode,
   TaskDecisionView,
   TaskRecord,
   TaskStatus,
 } from "../core/types.js";
+import {
+  buildMainDecisionPacket,
+  formatMainDecisionPacketHuman,
+} from "../core/main-decision-packet.js";
+import {
+  executionModeFromTaskSpec,
+  executionPreferenceFromTaskSpec,
+} from "../core/execution-mode.js";
 import { buildDeliveryLineage } from "../core/delivery-lineage.js";
 import { buildTaskDecisionView } from "../core/task-decision-view.js";
 import {
@@ -79,6 +90,8 @@ export interface CompactTaskSummary {
   updatedAt: string;
   startedAt?: string;
   finishedAt?: string;
+  executionPreference: ExecutionPreference;
+  executionMode: ResolvedExecutionMode;
 }
 
 export interface WaitProgressSummary {
@@ -147,6 +160,7 @@ export interface CompactInspection {
   verification: CompactVerificationHint;
   lineage: DeliveryLineage;
   decision: TaskDecisionView;
+  decisionPacket: MainDecisionPacket;
   diff: { generated: boolean; utf8Bytes: number; lineCount: number };
 }
 
@@ -169,6 +183,182 @@ function takeValue(arguments_: string[], index: number, flag: string): string {
   const value = arguments_[index + 1];
   if (value === undefined || value.startsWith("--")) throw new Error(`Missing value for ${flag}`);
   return value;
+}
+
+export interface ParsedDeliveryPrepareOptions {
+  taskFile?: string;
+  taskId?: string;
+  reviewerProfileIds: string[];
+  reason: string;
+  timeoutMs: number;
+  confirm: true;
+  includeDiffMaxBytes?: number;
+  json: boolean;
+}
+
+export interface ParsedDeliveryDecideOptions {
+  taskId: string;
+  decision: "accept" | "revise" | "reject";
+  revisionId: string;
+  digest: string;
+  reason: string;
+  timeoutMs: number;
+  confirm: true;
+  json: boolean;
+}
+
+function parseDeliveryInteger(raw: string, label: string, allowZero: boolean): number {
+  if (!(allowZero ? /^(?:0|[1-9]\d*)$/ : /^[1-9]\d*$/).test(raw)) {
+    throw new Error(`${label} must be a ${allowZero ? "nonnegative" : "positive"} integer`);
+  }
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || (allowZero ? value < 0 : value <= 0)) {
+    throw new Error(`${label} must be a ${allowZero ? "nonnegative" : "positive"} integer`);
+  }
+  return value;
+}
+
+function takeDeliveryValue(arguments_: string[], index: number, flag: string): string {
+  const value = arguments_[index + 1];
+  if (value === undefined || value.startsWith("--")) throw new Error(`Missing value for ${flag}`);
+  return value;
+}
+
+function parseReviewerProfileList(raw: string): string[] {
+  return raw.split(",").map((part) => part.trim()).filter((part) => part.length > 0);
+}
+
+export function parseDeliveryPrepareOptions(arguments_: string[]): ParsedDeliveryPrepareOptions {
+  let taskFile: string | undefined;
+  let taskId: string | undefined;
+  const reviewerProfileIds: string[] = [];
+  let reason: string | undefined;
+  let timeoutMs: number | undefined;
+  let includeDiffMaxBytes: number | undefined;
+  let confirm = false;
+  let json = false;
+  const seen = new Set<string>();
+
+  for (let index = 0; index < arguments_.length; index += 1) {
+    const flag = arguments_[index]!;
+    if (flag === "--json") {
+      if (seen.has(flag)) throw new Error("Duplicate delivery prepare option: --json");
+      seen.add(flag);
+      json = true;
+      continue;
+    }
+    if (flag === "--confirm") {
+      if (seen.has(flag)) throw new Error("Duplicate delivery prepare option: --confirm");
+      seen.add(flag);
+      confirm = true;
+      continue;
+    }
+    if (flag === "--reviewer-profile") {
+      const value = takeDeliveryValue(arguments_, index, flag);
+      index += 1;
+      reviewerProfileIds.push(value.trim());
+      continue;
+    }
+    if (![
+      "--task-file", "--task", "--reviewer-profiles", "--reason",
+      "--timeout-ms", "--include-diff-max-bytes",
+    ].includes(flag)) {
+      throw new Error(`Unknown delivery prepare option: ${flag}`);
+    }
+    if (flag !== "--reviewer-profiles" && seen.has(flag)) {
+      throw new Error(`Duplicate delivery prepare option: ${flag}`);
+    }
+    seen.add(flag);
+    const value = takeDeliveryValue(arguments_, index, flag);
+    index += 1;
+    if (flag === "--task-file") taskFile = value;
+    else if (flag === "--task") taskId = value;
+    else if (flag === "--reviewer-profiles") {
+      reviewerProfileIds.push(...parseReviewerProfileList(value));
+    } else if (flag === "--reason") reason = value;
+    else if (flag === "--timeout-ms") timeoutMs = parseDeliveryInteger(value, "--timeout-ms", false);
+    else includeDiffMaxBytes = parseDeliveryInteger(value, "--include-diff-max-bytes", true);
+  }
+  if (!confirm) throw new Error("delivery prepare requires --confirm");
+  if ((taskFile === undefined) === (taskId === undefined)) {
+    throw new Error("delivery prepare requires exactly one of --task-file or --task");
+  }
+  if (reason === undefined) throw new Error("delivery prepare requires --reason");
+  if (timeoutMs === undefined) throw new Error("delivery prepare requires --timeout-ms");
+  return {
+    ...(taskFile === undefined ? { taskId: taskId! } : { taskFile }),
+    reviewerProfileIds,
+    reason,
+    timeoutMs,
+    confirm: true,
+    ...(includeDiffMaxBytes === undefined ? {} : { includeDiffMaxBytes }),
+    json,
+  };
+}
+
+export function parseDeliveryDecideOptions(
+  arguments_: string[],
+  taskId: string,
+): ParsedDeliveryDecideOptions {
+  let decision: "accept" | "revise" | "reject" | undefined;
+  let revisionId: string | undefined;
+  let digest: string | undefined;
+  let reason: string | undefined;
+  let timeoutMs: number | undefined;
+  let confirm = false;
+  let json = false;
+  const seen = new Set<string>();
+
+  for (let index = 0; index < arguments_.length; index += 1) {
+    const flag = arguments_[index]!;
+    if (flag === "--json") {
+      if (seen.has(flag)) throw new Error("Duplicate delivery decide option: --json");
+      seen.add(flag);
+      json = true;
+      continue;
+    }
+    if (flag === "--confirm") {
+      if (seen.has(flag)) throw new Error("Duplicate delivery decide option: --confirm");
+      seen.add(flag);
+      confirm = true;
+      continue;
+    }
+    if (![
+      "--decision", "--revision", "--digest", "--reason", "--timeout-ms",
+    ].includes(flag)) {
+      throw new Error(`Unknown delivery decide option: ${flag}`);
+    }
+    if (seen.has(flag)) throw new Error(`Duplicate delivery decide option: ${flag}`);
+    seen.add(flag);
+    const value = takeDeliveryValue(arguments_, index, flag);
+    index += 1;
+    if (flag === "--decision") {
+      if (value !== "accept" && value !== "revise" && value !== "reject") {
+        throw new Error("delivery decide --decision must be accept, revise, or reject");
+      }
+      decision = value;
+    } else if (flag === "--revision") revisionId = value;
+    else if (flag === "--digest") digest = value;
+    else if (flag === "--reason") reason = value;
+    else timeoutMs = parseDeliveryInteger(value, "--timeout-ms", false);
+  }
+  if (!confirm) throw new Error("delivery decide requires --confirm");
+  if (taskId.trim().length === 0) throw new Error("delivery decide requires a task id");
+  if (decision === undefined) throw new Error("delivery decide requires --decision");
+  if (revisionId === undefined) throw new Error("delivery decide requires --revision");
+  if (digest === undefined) throw new Error("delivery decide requires --digest");
+  if (reason === undefined) throw new Error("delivery decide requires --reason");
+  if (timeoutMs === undefined) throw new Error("delivery decide requires --timeout-ms");
+  return {
+    taskId,
+    decision,
+    revisionId,
+    digest,
+    reason,
+    timeoutMs,
+    confirm: true,
+    json,
+  };
 }
 
 export function parseWaitOptions(arguments_: string[], defaultPollMs: number): ParsedWaitOptions {
@@ -242,6 +432,8 @@ function compactTaskSummary(task: TaskRecord): CompactTaskSummary {
     updatedAt: task.updatedAt,
     ...(task.startedAt === undefined ? {} : { startedAt: task.startedAt }),
     ...(task.finishedAt === undefined ? {} : { finishedAt: task.finishedAt }),
+    executionPreference: executionPreferenceFromTaskSpec(task.spec),
+    executionMode: executionModeFromTaskSpec(task.spec),
   };
 }
 
@@ -475,6 +667,7 @@ export function buildCompactInspection(input: {
   eventLimit: number;
   integrationResults?: IntegrationResultRecord[];
   decision?: TaskDecisionView;
+  decisionPacket?: MainDecisionPacket;
   nowMs?: number;
   quietAfterMs?: number;
 }): CompactInspection {
@@ -499,6 +692,12 @@ export function buildCompactInspection(input: {
   };
   const nowMs = input.nowMs ?? Date.now();
   const quietAfterMs = input.quietAfterMs ?? DEFAULT_QUIET_AFTER_MS;
+  const decision = input.decision ?? buildTaskDecisionView({
+    task: input.task,
+    attempts: input.attempts,
+    events: input.events,
+    integrationResults: input.integrationResults ?? [],
+  });
   return {
     task: compactTaskSummary(input.task),
     progress: buildWaitProgressSummary(snapshot, nowMs, quietAfterMs),
@@ -522,11 +721,11 @@ export function buildCompactInspection(input: {
     })),
     verification: extractVerificationHint(input.events),
     lineage: buildDeliveryLineage(input.attempts, input.events),
-    decision: input.decision ?? buildTaskDecisionView({
+    decision,
+    decisionPacket: input.decisionPacket ?? buildMainDecisionPacket({
       task: input.task,
-      attempts: input.attempts,
+      decision,
       events: input.events,
-      integrationResults: input.integrationResults ?? [],
     }),
     diff: {
       generated: diff !== undefined,
@@ -577,12 +776,14 @@ export function humanCompactInspectionLines(inspection: CompactInspection): stri
     `name: ${inspection.task.name}`,
     `status: ${inspection.task.status}`,
     `updatedAt: ${inspection.task.updatedAt}`,
+    `execution: requested=${inspection.task.executionPreference} resolved=${inspection.task.executionMode}`,
     `activity: ${inspection.progress.activity}`,
     `latestEventSequence: ${inspection.progress.latestEventSequence}`,
     `decision: ${inspection.decision.stage}`,
     `nextAction: ${inspection.decision.nextAction}`,
     `attempts: ${inspection.attempts.length}`,
   ];
+  lines.push(formatMainDecisionPacketHuman(inspection.decisionPacket));
   for (const attempt of inspection.attempts) {
     lines.push(
       `  #${attempt.ordinal} ${attempt.status} exit=${attempt.exitCode ?? "-"} turns=${attempt.turns ?? "-"}`

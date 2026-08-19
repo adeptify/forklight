@@ -8,16 +8,19 @@
 
 import { createHash, randomBytes } from "node:crypto";
 import {
+  chmodSync,
   copyFileSync,
   createReadStream,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   renameSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -39,6 +42,7 @@ import {
   type BundleVerification,
 } from "../core/clean-run-bundle.js";
 import { isBuildIdentity, type BuildIdentity } from "../core/build-identity.js";
+import { DAEMON_SOCKET_NAME } from "../core/config.js";
 import { runCaptured, type CapturedProcess } from "../core/process.js";
 import { sleepMs } from "../core/time.js";
 
@@ -50,6 +54,8 @@ const COMMAND_TIMEOUT_MS = 60_000;
 const CLEANUP_WAIT_MS = 10_000;
 const MCP_HANDSHAKE_TIMEOUT_MS = 30_000;
 const IDENTITY_TAR_PATH = "package/dist/build-identity.json";
+/** Darwin `sockaddr_un.sun_path[104]` includes the terminating NUL. */
+const DARWIN_SUN_PATH_BYTES = 104;
 
 const CREDENTIAL_ENV_RE = /(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTHORIZATION|AUTH|API[_-]?KEY|DEEPSEEK|OPENAI|ANTHROPIC|MINIMAX|VOLCENGINE|GROK|XAI|AWS_|AZURE|GCP_)/i;
 
@@ -118,6 +124,11 @@ export interface BundleBuilderHooks {
   readonly handshakeMcp: (request: McpHandshakeRequest) => Promise<McpHandshakeResult>;
   /** When true, skip the npm-test recursion guard (fixture unit tests only). */
   readonly allowUnderNpmTest?: boolean;
+  /**
+   * Create one unique owner-private OS temp root. Isolated FORKLIGHT_HOME is
+   * derived below this root and is independent of output/staging.
+   */
+  readonly createRuntimeRoot?: () => string;
 }
 
 export interface BuildCleanRunBundleOptions {
@@ -136,6 +147,8 @@ interface OwnedCleanup {
   daemonPid?: number | undefined;
   daemonStopHome?: string | undefined;
   prefixDir?: string | undefined;
+  /** Staging work tree for npm isolation during owned `daemon stop`. */
+  workDir?: string | undefined;
 }
 
 function defaultHashFile(target: string): Promise<string> {
@@ -301,7 +314,15 @@ function defaultHooks(): BundleBuilderHooks {
     nowIso: () => new Date().toISOString(),
     randomSuffix: () => randomBytes(6).toString("hex"),
     handshakeMcp: defaultMcpHandshake,
+    createRuntimeRoot: createOwnerPrivateRuntimeRoot,
   };
+}
+
+/** Unique OS temp directory with owner-only permissions. Never a shared name. */
+function createOwnerPrivateRuntimeRoot(): string {
+  const root = mkdtempSync(path.join(tmpdir(), "flh-"));
+  chmodSync(root, 0o700);
+  return root;
 }
 
 function mergeHooks(partial?: Partial<BundleBuilderHooks>): BundleBuilderHooks {
@@ -315,10 +336,11 @@ function mergeHooks(partial?: Partial<BundleBuilderHooks>): BundleBuilderHooks {
     randomSuffix: partial.randomSuffix ?? defaults.randomSuffix,
     handshakeMcp: partial.handshakeMcp ?? defaults.handshakeMcp,
   };
+  const createRuntimeRoot = partial.createRuntimeRoot ?? createOwnerPrivateRuntimeRoot;
   if (partial.allowUnderNpmTest !== undefined) {
-    return { ...merged, allowUnderNpmTest: partial.allowUnderNpmTest };
+    return { ...merged, createRuntimeRoot, allowUnderNpmTest: partial.allowUnderNpmTest };
   }
-  return merged;
+  return { ...merged, createRuntimeRoot };
 }
 
 function combinedOutput(result: CapturedProcess): string {
@@ -420,6 +442,21 @@ export function parseJsonObject(text: string): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
+/**
+ * Installed `daemon stop` is authoritative only when the command exits 0,
+ * is not timed out, and stdout is `{ stopped: true, message: "Daemon stopped" }`.
+ * Exit 0 or "not running" alone is not authority; nonzero exit with that JSON is stale.
+ */
+function isAuthoritativeDaemonStop(result: CapturedProcess): boolean {
+  if (result.timedOut || result.exitCode !== 0) return false;
+  try {
+    const parsed = parseJsonObject(result.stdout);
+    return parsed.stopped === true && parsed.message === "Daemon stopped";
+  } catch {
+    return false;
+  }
+}
+
 async function waitForPidExit(
   hooks: BundleBuilderHooks,
   pid: number,
@@ -458,6 +495,7 @@ async function signalExactPid(
 
 /**
  * Stop only recorded Hub/daemon PIDs and isolated-home daemon authority.
+ * Authoritative installed stop completes Daemon cleanup without a stale-PID signal.
  * Never scans process names or signals untracked PIDs.
  */
 async function stopOwnedProcesses(
@@ -473,7 +511,7 @@ async function stopOwnedProcesses(
 
   if (owned.daemonStopHome !== undefined && owned.prefixDir !== undefined) {
     const stopEnv = buildMinimalIsolatedEnv({
-      workDir: path.dirname(owned.daemonStopHome),
+      workDir: owned.workDir ?? path.dirname(owned.daemonStopHome),
       forklightHome: owned.daemonStopHome,
     });
     const stop = await hooks.runCommand({
@@ -483,6 +521,9 @@ async function stopOwnedProcesses(
       env: stopEnv,
       timeoutMs: COMMAND_TIMEOUT_MS,
     });
+    if (isAuthoritativeDaemonStop(stop)) {
+      return { hubGone, daemonGone: true };
+    }
     const stopAccepted = stop.exitCode === 0
       || /not running/i.test(combinedOutput(stop));
     if (!stopAccepted && owned.daemonPid === undefined) {
@@ -577,6 +618,21 @@ async function verifyInstalledEntrypoints(
   return { cliOk: true, mcpOk: true, installedIdentity };
 }
 
+/**
+ * Darwin only: refuse launch when isolated Home joined with DAEMON_SOCKET_NAME
+ * plus NUL exceeds `sun_path[104]`. Public text is a closed existing category
+ * with no path.
+ */
+function assertDarwinRuntimeSocketFits(isolatedHome: string): void {
+  if (process.platform !== "darwin") return;
+  const socketPath = path.join(isolatedHome, DAEMON_SOCKET_NAME);
+  if (Buffer.byteLength(socketPath, "utf8") + 1 <= DARWIN_SUN_PATH_BYTES) return;
+  throw new BundleBuilderError(
+    "hub-lifecycle-failed",
+    "local socket path exceeds the platform limit",
+  );
+}
+
 async function verifyHubDaemonLifecycle(
   hooks: BundleBuilderHooks,
   prefixDir: string,
@@ -585,6 +641,8 @@ async function verifyHubDaemonLifecycle(
   packagedIdentity: BuildIdentity,
   owned: OwnedCleanup,
 ): Promise<BundleVerification["hubDaemonLifecycle"]> {
+  assertDarwinRuntimeSocketFits(isolatedHome);
+
   const env = buildMinimalIsolatedEnv({
     workDir,
     forklightHome: isolatedHome,
@@ -640,6 +698,7 @@ async function verifyHubDaemonLifecycle(
   owned.hubPid = hubPid;
   owned.daemonStopHome = isolatedHome;
   owned.prefixDir = prefixDir;
+  owned.workDir = workDir;
 
   const status = await hooks.runCommand({
     command: process.execPath,
@@ -742,6 +801,7 @@ async function verifyHubDaemonLifecycle(
   delete owned.daemonPid;
   delete owned.daemonStopHome;
   delete owned.prefixDir;
+  delete owned.workDir;
 
   return Object.freeze({
     passed: true,
@@ -810,9 +870,27 @@ function publishBundle(
 }
 
 /**
+ * Closed public cleanup-failed text. Admits only a prior category or unexpected,
+ * returned vs threw, and exact or unknown Hub/Daemon outcomes. Never copies
+ * exception, path, log, PID or command text.
+ */
+function closedCleanupFailedMessage(input: {
+  readonly error: unknown;
+  readonly cleanup: "returned" | "threw";
+  readonly hubGone: boolean | "unknown";
+  readonly daemonGone: boolean | "unknown";
+}): string {
+  const prior = input.error instanceof BundleBuilderError ? input.error.category : "unexpected";
+  const hubGone = typeof input.hubGone === "boolean" ? String(input.hubGone) : "unknown";
+  const daemonGone = typeof input.daemonGone === "boolean" ? String(input.daemonGone) : "unknown";
+  return `prior=${prior} cleanup=${input.cleanup} hubGone=${hubGone} daemonGone=${daemonGone}`;
+}
+
+/**
  * Build one verified clean-user bundle. On any failure, stops only exact
- * owned processes, removes private staging, and leaves an existing destination
- * untouched. Never retries automatically. Cleanup failures are not swallowed.
+ * owned processes, removes the generated runtime root, then private staging,
+ * and leaves an existing destination untouched. Never retries automatically.
+ * Cleanup failures are not swallowed.
  */
 export async function buildCleanRunBundle(
   options: BuildCleanRunBundleOptions,
@@ -834,11 +912,21 @@ export async function buildCleanRunBundle(
 
   const owned: OwnedCleanup = {};
   let stagingCreated = false;
+  let runtimeRoot: string | undefined;
+  let runtimeRootCreated = false;
 
   const cleanupStaging = (): void => {
     if (stagingCreated && hooks.fs.existsSync(plan.stagingDirectory)) {
       hooks.fs.rmSync(plan.stagingDirectory, { recursive: true, force: true });
     }
+  };
+
+  const cleanupRuntimeRoot = (): void => {
+    if (!runtimeRootCreated || runtimeRoot === undefined) return;
+    if (hooks.fs.existsSync(runtimeRoot)) {
+      hooks.fs.rmSync(runtimeRoot, { recursive: true, force: true });
+    }
+    runtimeRootCreated = false;
   };
 
   try {
@@ -853,7 +941,9 @@ export async function buildCleanRunBundle(
 
     const workDir = path.join(plan.stagingDirectory, "work");
     const prefixDir = path.join(workDir, "prefix");
-    const isolatedHome = path.join(workDir, "home");
+    runtimeRoot = (hooks.createRuntimeRoot ?? createOwnerPrivateRuntimeRoot)();
+    runtimeRootCreated = true;
+    const isolatedHome = path.join(runtimeRoot, "home");
     hooks.fs.mkdirSync(workDir, { recursive: true, mode: 0o700 });
     hooks.fs.mkdirSync(path.join(workDir, "npm-home"), { recursive: true, mode: 0o700 });
     hooks.fs.mkdirSync(path.join(workDir, "npm-cache"), { recursive: true, mode: 0o700 });
@@ -959,6 +1049,9 @@ export async function buildCleanRunBundle(
       hubDaemonLifecycle,
     };
 
+    // Processes already stopped inside lifecycle; remove only this root next.
+    cleanupRuntimeRoot();
+
     const evidence = buildBundleEvidence({
       createdAt: hooks.nowIso(),
       tarballFileName: packArtifact.filename,
@@ -993,17 +1086,26 @@ export async function buildCleanRunBundle(
       ) {
         cleanupError = new BundleBuilderError(
           "cleanup-failed",
-          "owned Hub or isolated daemon did not stop after verification failure",
+          closedCleanupFailedMessage({
+            error,
+            cleanup: "returned",
+            hubGone: cleanup.hubGone,
+            daemonGone: cleanup.daemonGone,
+          }),
         );
       }
-    } catch (stopError) {
-      cleanupError = stopError instanceof BundleBuilderError
-        ? stopError
-        : new BundleBuilderError(
-          "cleanup-failed",
-          "owned process cleanup failed after verification error",
-        );
+    } catch {
+      cleanupError = new BundleBuilderError(
+        "cleanup-failed",
+        closedCleanupFailedMessage({
+          error,
+          cleanup: "threw",
+          hubGone: "unknown",
+          daemonGone: "unknown",
+        }),
+      );
     }
+    cleanupRuntimeRoot();
     cleanupStaging();
     // Never hide a cleanup failure behind the earlier verification error.
     if (cleanupError !== undefined) throw cleanupError;

@@ -1,0 +1,90 @@
+version: 2
+name: M2-B final privacy compatibility and scope audit
+project: /Users/yijunwang/code/forklight
+taskClass: m2-quality-chain-privacy-scope-audit
+taskFamily: forklight-quality-decision-chain
+workerProfileId: grok-4-6-xhigh
+executionPreference: auto
+contract:
+  outcome: Verify that the integrated M2-B delivery preserves legacy Tasks, privacy and read-only boundaries, contains no Hub or unrelated product work, and is ready for Main to start the dependency-gated M2-C Work Item.
+  presentation:
+    summary: 最终只读确认 M2-B 的 legacy、隐私、无自动行动和修改范围边界。
+    language: zh-CN
+  context:
+    - This is the final read-only M2-B operational milestone after review-gate and packet audits pass.
+    - The accepted boundary is specs/m2-b-quality-decision-chain/spec.md; M2-C must not start until this gate passes.
+  inScope:
+    - Inspect legacy readability, bounded privacy-safe projections, non-mutating read paths, and absence of Hub/storage/routing changes.
+  outOfScope:
+    - No edits, historical cleanup, Integration, settings mutation, Hub, storage implementation, routing, commit, or push.
+  executionSteps:
+    - Inspect the exact integrated business paths and focused privacy/legacy tests.
+    - Confirm all build output remains generated and no forbidden path or automatic action appears.
+    - Return the final bounded M2-B operational handoff.
+  deliverables:
+    - A read-only privacy, compatibility, and scope result for M2-C handoff.
+  modules:
+    - name: M2-B boundary audit
+      responsibility: Confirm legacy, privacy, read-only, and allowed-path truth after Integration.
+      consumes: [Integrated source, approved spec, Candidate/Integration evidence, and focused tests.]
+      produces: [A final bounded pass or named blocker for M2-C.]
+      boundaries: [No product edit, cleanup, invented review evidence, or next-Work-Item execution.]
+  callChain:
+    - Decision-packet audit passes.
+    - This isolated Task inspects the integrated source and scope.
+    - ForkLight runs the focused acceptance suite and diff check.
+    - Machine success completes the M2-B operational Goal and permits Main to register M2-C with requiredJudges 2.
+  scenarios:
+    - name: Boundary clean
+      given: M2-B is integrated and prior audits pass.
+      when: Legacy, privacy, mutation, and path boundaries are checked.
+      then: The Goal completes with no source change and M2-C may start.
+    - name: Forbidden expansion
+      given: Hub, storage, routing, private data, automatic actions, or legacy breakage appears.
+      when: Inspection or tests run.
+      then: The Task fails and Main receives the exact blocker without cleanup or scope expansion.
+  risks:
+    - Generated build output must not be confused with business Candidate scope.
+  changeBudget: { maxFiles: 1, maxDiffLines: 20 }
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: false
+  allowedCommands: []
+  focusPaths:
+    - src/core/types.ts
+    - src/core/task.ts
+    - src/core/task-decision-view.ts
+    - src/core/integration.ts
+    - src/cli/supervision.ts
+    - src/daemon
+    - src/mcp/server.ts
+    - tests
+acceptance:
+  criteria:
+    - Legacy Tasks remain readable and no absent review requirement is invented.
+    - Public packets omit private prompt, patch, log, absolute artifact paths, credentials, and unbounded output; reads launch nothing.
+    - Integrated business scope contains no Hub, storage lifecycle, routing, Worker adapter, generated dist, or unrelated change.
+    - No source file changes.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/task.test.ts tests/task-decision-view.test.ts tests/review-graph.test.ts tests/integration.test.ts tests/cli-supervision.test.ts tests/daemon.test.ts tests/mcp.test.ts
+    - git diff --check

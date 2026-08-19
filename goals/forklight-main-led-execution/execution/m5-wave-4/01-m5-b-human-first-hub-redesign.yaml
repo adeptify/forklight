@@ -1,0 +1,195 @@
+version: 2
+name: M5-B human-first ForkLight Hub redesign
+project: /Users/yijunwang/code/forklight
+taskClass: m5-human-first-hub-redesign
+taskFamily: forklight-product-graduation
+workerProfileId: grok-4-6-xhigh
+executionPreference: auto
+routingDecision:
+  taskFamily: forklight-product-graduation
+  shortlist:
+    - provider: xai
+      model: grok-4.6
+      runtime: grok-build
+      effort: xhigh
+      workerProfileId: grok-4-6-xhigh
+  selectedWorker:
+    provider: xai
+    model: grok-4.6
+    runtime: grok-build
+    effort: xhigh
+    workerProfileId: grok-4-6-xhigh
+  selectedBecause:
+    code: user-specified
+    note: 一骏明确授权优先使用 Grok CLI 4.6 Xhigh 原生 Goal；当前 Worker 健康且已有本会话成功运行证据。
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+reviewRequirement:
+  requiredJudges: 2
+  reason: Hub 信息架构、状态真实性、安全动作、双语内容和响应式体验同时变化；需要一个产品理解视角和一个交互/技术边界视角的独立只读 Judge。
+contract:
+  outcome: Replace the incumbent ForkLight Hub with one human-first GoalBoard-family execution and delivery workspace that opens on Goal truth, exposes one Decision Center, preserves all existing safe actions and continuity, and remains coherent on desktop and mobile.
+  presentation:
+    summary: 把旧的配置控制台彻底重做为 Goal 优先的执行工作台；先让人看懂结果、现状、决策和下一步，再按需展开技术细节。
+    language: zh-CN
+  context:
+    - The accepted and only Work Item specification is specs/m5-product-graduation/work-items/hub-redesign/spec.md. Read it fully before editing and do not create another spec or roadmap.
+    - Read PRODUCT.md and the repository AGENTS.md. GoalBoard is a read-only family reference at /Users/yijunwang/code/goalboard/PRODUCT.md and /Users/yijunwang/code/goalboard/DESIGN.md; if runtime read policy cannot open those absolute files, the accepted Spec contains the controlling distilled rules and work must continue without changing GoalBoard.
+    - The incumbent dark, teal, configuration-first sidebar and accumulated CSS layers are visual and structural anti-reference. Existing API calls, privacy projections, safe mutations and browser continuity helpers are functional truth to preserve.
+    - "Main audited the current backend: work-hierarchy, Goal detail, Task detail, History and existing mutations are enough. src/hub/server.ts, Core, Store, daemon projections, PRODUCT.md and the Goal SSOT are read-only."
+    - Before implementation, npm run build plus the six focused Hub test files passed 413/413. Existing layout-only assertions may be rewritten only when they assert the rejected shell; safety, privacy, lifecycle and mutation assertions may not be weakened.
+    - The product serves one local developer. Do not add multi-user, distributed, checksum, lock, lease, version-handshake or duplicate-consistency mechanisms.
+  inScope:
+    - Rewrite the static shell as a light compact GoalBoard-family product bar with Work, one Decision Center and quiet auxiliary System access.
+    - Recompose the default Work surface into a searchable, resizable Now/History Goal Tree and one continuous selected Goal execution file.
+    - "Present the selected Goal in the accepted order: desired result, plain current truth, decision needed, current phase and checkpoint, current Task and verification/retained work, blockers, delivery/History, folded technical evidence."
+    - Add one Decision Center browser composition grouped by Goal plus a bounded parentless-Task group, using canonical hierarchy cards and existing Task detail reads/actions only.
+    - Preserve selected Goal/Task, tree width/query, scroll, filters, disclosures and unsaved drafts across live refresh without focus theft.
+    - At 760px and below, provide an explicit single-pane tree, document and detail/decision flow with a visible Back action.
+    - Keep current Model, Worker, Main, Delivery, setup, diagnostics, Competition and value capabilities reachable as secondary System or contextual surfaces.
+    - Replace and consolidate the CSS needed by the delivered composition instead of appending a new reskin override tail.
+    - Create ForkLight DESIGN.md only after the built interface is coherent, documenting the actual visual and interaction system.
+    - Update only focused static UI tests whose old layout assertions conflict with the accepted replacement, while keeping all behavior and safety coverage.
+  outOfScope:
+    - Any server, Core, daemon, Store, schema, persistence, execution, verification, Judge, Main decision or Integration semantic change.
+    - GoalBoard edits, real cross-app data connection, team or organization UI, telemetry dashboard, model ranking, marketing claims or invented customer data.
+    - New dependencies, framework migration, decorative hero, gradients, glass, fake screenshots, broad animation, dark/teal sidebar preservation or an old-Hub reskin.
+    - Editing PRODUCT.md, the Goal SSOT, non-focused tests, credentials, Git configuration, commits, pushes, remotes or source-project files outside the isolated Workspace.
+    - Running the Impeccable detector early or repeatedly. Main will run the single detector after the Candidate is coherent.
+  executionSteps:
+    - Read the accepted Spec, PRODUCT.md, current index shell, Work renderer, navigation/refresh continuity code, related bilingual strings and the two writable focused tests. Inspect other Hub tests only as read-only acceptance contracts.
+    - Write a fresh top-of-index design contract comment of at most 150 words covering thesis, own-world, story, first viewport, form and finish; it must describe the delivered world rather than the rejected incumbent.
+    - "Replace the product shell and navigation first, keeping #fl-view, the contextual detail host, authentication and fetch boundaries working."
+    - Recompose Work around Goal Tree plus continuous Goal file, retaining canonical status inputs and existing safe action components without browser-side lifecycle inference.
+    - Add the single Decision Center over existing hierarchy/detail truth and link decision-required states to it without creating another data model or another mutation implementation.
+    - "Consolidate responsive and visual styles into the GoalBoard-family light system: #f6f7f9 field, white paper, #171a21 ink, #1677ff actions, semantic green/amber/violet/red, cool hairlines, 3-8px radii, Inter/SF/PingFang and line icons."
+    - Make every important state use fact, reason and next action. Keep raw ids, Runtime, Attempt, Token, cost and logs inside explicit technical disclosures. Page-visible copy must contain no em dash or en dash.
+    - Implement desktop resizing/search/Now-History and the 760px single-pane Back flow. Verify focus, loading, empty, error, disabled and reduced-motion states.
+    - Update the two focused writable test files only for the accepted composition. Do not delete or weaken privacy, safety, lifecycle, confirmation, continuity or action assertions.
+    - Run the accepted commands, inspect the scoped diff and write DESIGN.md from the actual result. Stop with a precise decision packet if a backend fact is genuinely missing; do not edit backend paths.
+  deliverables:
+    - A replacement Goal-first Hub across index.html, app.css, app.js and i18n.js with one Decision Center and coherent desktop/mobile navigation.
+    - ForkLight DESIGN.md describing the implemented family relationship, tokens, hierarchy, components, content rules, states and responsive behavior.
+    - Focused regression assertions for the new shell, Goal Tree, continuous Goal file, Decision Center, continuity and mobile Back flow.
+    - A final handoff stating the changed paths, human behavior, preserved actions/projections, exact tests, remaining visual QA needs and any evidence that must be inspected by Main.
+  modules:
+    - name: product shell and navigation
+      responsibility: Make Work, Decision Center and auxiliary System understandable without configuration-first peer tabs.
+      consumes: [authentication state, current page state, shared status]
+      produces: [compact product bar, primary routes, connection and utility access]
+      boundaries: [no auth or API semantic change, "one #fl-view", one contextual detail host]
+    - name: Goal Tree and continuous Goal file
+      responsibility: Turn canonical hierarchy truth into a searchable Now/History context rail and one selected Goal reading surface.
+      consumes: [work-hierarchy schema version 1, Goal selection, continuity state]
+      produces: [Goal context, phase checkpoint, Task truth, blockers, delivery and folded evidence]
+      boundaries: [no lifecycle inference, no new persistence, preserve selection and reading position]
+    - name: Decision Center
+      responsibility: Collect pending user decisions by Goal and open the existing safe decision/detail experience.
+      consumes: [waiting-user-decision cards, Goal ancestry, existing Task detail endpoint]
+      produces: [one grouped decision route with fact, reason, retained work, impact and confirmed actions]
+      boundaries: [no stored decision list, no duplicate mutation path, suggestion never equals execution]
+    - name: design system and responsive behavior
+      responsibility: Apply the GoalBoard-family light visual language and single-pane mobile navigation consistently.
+      consumes: [accepted palette, typography, spacing, semantic status, 760px breakpoint]
+      produces: [coherent desktop and mobile surfaces, visible focus, reduced motion, actual DESIGN.md]
+      boundaries: [no dark/teal incumbent shell, no gradients/glass, no decorative dashboard cards]
+  callChain:
+    - Authentication loads the shared status and Work page dependencies through the existing fetch map.
+    - work-hierarchy returns canonical Goal, Plan/phase and Task placements; browser presentation separates Now/History and resolves one selected Goal without changing those placements.
+    - The selected Goal renders as one continuous execution file; clicking a Task uses the existing task detail endpoint and safe action components.
+    - Decision Center filters the same hierarchy for decision-required Tasks, groups them by existing Goal ancestry and opens the same Task detail/action path.
+    - A confirmed mutation uses the existing endpoint, then refreshes canonical truth while restoring surviving Goal, Task, scroll, disclosure, filter and draft context.
+    - System routes continue to use the existing settings, provider, Worker, Main, Delivery, Competition and value endpoints as secondary surfaces.
+  scenarios:
+    - name: active Goal with no decision
+      given: One Goal has a current phase and running or verification-waiting Tasks.
+      when: The developer opens ForkLight.
+      then: The Goal Tree selects it and the first viewport explains the desired result, current truth and next checkpoint without leading with Runtime or configuration.
+    - name: decision required
+      given: One or more canonical Tasks are in waiting-user-decision across Goals or as parentless work.
+      when: The developer opens Decision Center.
+      then: Items are grouped by Goal, explain fact/reason/retained work/impact and reuse the existing confirmed action path without suggesting that an action already happened.
+    - name: blocked or partial result
+      given: Verification failed, a useful Candidate remains or a blocker needs action.
+      when: The Goal file renders that Task.
+      then: It clearly separates machine result, retained work, Judge opinion, Main state and the exact next action; technical identifiers stay folded.
+    - name: completed Goal and History
+      given: A Goal and delivered Tasks are terminal.
+      when: The developer switches the Goal Tree from Now to History.
+      then: The completed Goal remains searchable and readable without crowding current work or being mislabeled as active.
+    - name: live refresh during reading
+      given: The developer has selected a Goal, resized/searched the tree, scrolled the file, opened evidence and typed into a form.
+      when: Polling returns unchanged or changed canonical truth.
+      then: Unchanged truth keeps the DOM; changed truth restores all surviving context and never steals focus or loses the draft.
+    - name: narrow mobile flow
+      given: The Hub is 390px wide.
+      when: The developer moves from Goal Tree to Goal file to Task or decision detail.
+      then: Exactly one pane is primary at a time and a visible Back action restores the prior pane and reading context.
+    - name: system prerequisite blocks work
+      given: Provider, Worker, Main channel or task service readiness blocks current work.
+      when: The Goal file renders the blocker.
+      then: The exact reason and next action are visible in context, while the full configuration surface remains secondary but reachable.
+  risks:
+    - Reorganizing canonical status into a simpler document could accidentally invent lifecycle truth; keep the existing closed-code adapters as authority.
+    - A visual rewrite could hide or duplicate destructive and Main actions; reuse existing confirmed mutation components and keep one Decision Center.
+    - Replacing the large CSS surface by appended overrides would preserve contradictions and visual drift; consolidate rather than stacking another theme tail.
+    - Polling can destroy user context after a DOM rebuild; preserve the existing semantic continuity mechanism and extend it only for tree/pane state.
+    - Layout-only tests can overfit the rejected UI; rewrite only those assertions and retain behavior, privacy and safety coverage.
+    - The broad UI diff can tempt backend or framework expansion; stop if current routes genuinely lack a required fact.
+  changeBudget:
+    maxFiles: 7
+    maxDiffLines: 8000
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 60000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxWorkerValidationRepairs: 2
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, coverage]
+  generatedPaths: [dist/**, coverage/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - DESIGN.md
+    - src/hub/public/index.html
+    - src/hub/public/app.css
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - tests/hub-ui-assets.test.ts
+    - tests/hub-responsive-layout.test.ts
+acceptance:
+  criteria:
+    - The Hub defaults to a light Goal-first product shell with a searchable/resizable Now-History Goal Tree, one continuous Goal file, one Decision Center and quiet auxiliary System access; the old dark/teal configuration rail and peer-tab dashboard are gone.
+    - An active, decision-required, blocked/partial and completed Goal/Task each show desired result or result context, plain current fact, reason, retained work where applicable and the next meaningful action without raw internal vocabulary in primary copy.
+    - Decision Center is grouped by Goal plus bounded parentless work, derives from canonical hierarchy/detail truth and reuses existing confirmed actions without a second stored decision model or duplicate mutation path.
+    - Existing authentication, loading/error/empty states, setup and configuration routes, privacy projections, safe actions, confirmations and canonical lifecycle inputs continue to work and remain covered.
+    - Live refresh preserves selection, Goal Tree width/query, scroll, filters, open evidence and unsubmitted drafts without focus theft; 760px-and-below flow has one primary pane and an obvious Back action.
+    - GoalBoard-family palette, typography, hairlines, 3-8px radii, flat surfaces, focus, contrast and reduced motion are applied consistently; page-visible copy has no em dash or en dash and technical facts stay folded.
+    - DESIGN.md documents the actual implemented system; only the seven allowed Writer paths change, no backend or GoalBoard/SSOT path changes, and no commit or push occurs.
+    - Grok 4.6 Xhigh runs through native Goal in one ForkLight Task, ForkLight independently executes all accepted checks, two different-view read-only Judges review the exact Candidate and Main alone decides serial Integration.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/hub-ui-assets.test.ts tests/hub-responsive-layout.test.ts tests/hub-contract-quality.test.ts tests/hub-settings.test.ts tests/hub-operations.test.ts tests/hub-ops-mutations.test.ts
+    - node -e "const fs=require('fs'); const src=fs.readFileSync('src/hub/public/app.js','utf8'); new Function(src); const visible=[fs.readFileSync('src/hub/public/index.html','utf8'),src,fs.readFileSync('src/hub/public/i18n.js','utf8')].join('\\n'); if(/[—–]/.test(visible)) throw new Error('page-visible Hub source contains em/en dash');"
+    - git diff --check

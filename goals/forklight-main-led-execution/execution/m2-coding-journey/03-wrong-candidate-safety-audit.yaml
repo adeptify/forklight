@@ -1,0 +1,48 @@
+version: 2
+name: M2 audit wrong-Candidate and rollback safety
+project: /Users/yijunwang/code/forklight
+taskClass: m2-source-only-recovery-safety-audit
+taskFamily: forklight-integration-recovery
+workerProfileId: minimax-m3-cn
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 0
+  reason: Read-only safety audit changes no product file and has deterministic focused acceptance.
+contract:
+  outcome: Independently prove integrated recovery cannot continue or roll back when Candidate-final source, receipt, backup, or stage history is unproven.
+  presentation: { summary: 独立核对错误 Candidate、损坏备份和歧义历史都只会安全拒绝。, language: zh-CN }
+  context:
+    - Read the accepted Coding Work Item and integrated implementation. This is a different-view safety audit, not another Judge or implementation.
+  inScope: [Inspect source/backup/stage gates, no-apply rule, rollback proof, privacy projection, and focused refusal tests.]
+  outOfScope: [Edits, synthetic product changes, Store migration, build/activation recovery, Integration, Hub, docs, commit, push, or credentials.]
+  executionSteps: [Trace every mutation precondition, inspect mismatch tests, run approved commands, return pass or exact unsafe path.]
+  deliverables: [One bounded safety verdict with no source diff.]
+  modules:
+    - name: Recovery safety gate
+      responsibility: Refuse wrong or corrupt state before any continuation mutation.
+      consumes: [Integrated recovery checks and tests.]
+      produces: [Pass or exact blocker.]
+      boundaries: [No edits, broader threat model, or distributed mechanism.]
+  callChain: [Read durable context, prove exact local Candidate/source/backup truth, continue or refuse without replay.]
+  scenarios:
+    - name: Proof missing
+      given: Any required local proof is absent or conflicting.
+      when: Recovery runs.
+      then: It makes no source change and stores no fabricated terminal success.
+  risks: [Only concrete wrong-Integration and rollback corruption failures are in scope.]
+  changeBudget: { maxFiles: 1, maxDiffLines: 20 }
+advancedPolicy: { maxDurationMs: null, observedTokenCeiling: null, noProgressTimeoutMs: null, fileLimit: null, fileLimitMode: warn, changedLineLimit: null, changedLineLimitMode: warn, baseMaxAttempts: 1, maxExtraAttempts: 0, maxMainCorrections: 0, maxMainReverifications: 0, maxConcurrency: 1, completionMode: warn, changeBudgetMode: warn, maxAdaptationRounds: 0 }
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: false
+  allowedCommands: []
+  focusPaths: [src/core/integration.ts, src/daemon/coordinator.ts, tests/integration.test.ts, tests/daemon.test.ts]
+acceptance:
+  criteria: [Every unproven or unsupported recovery state refuses without replay, unsafe rollback, privacy leak, or source mutation.]
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/integration.test.ts tests/daemon.test.ts
+    - git diff --check

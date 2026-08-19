@@ -1,0 +1,184 @@
+version: 2
+name: M4-E Main-efficient reviewed delivery checkpoints
+project: /Users/yijunwang/code/forklight
+taskClass: m4-main-efficient-delivery
+taskFamily: worker-runtime
+workerProfileId: grok-4-6-xhigh
+executionPreference: auto
+routingDecision:
+  taskFamily: worker-runtime
+  shortlist:
+    - provider: xai
+      model: grok-4.6
+      runtime: grok-build
+      effort: xhigh
+      workerProfileId: grok-4-6-xhigh
+    - provider: openai
+      model: gpt-5.6-luna
+      runtime: codex-cli
+      effort: max
+      workerProfileId: codex-luna-max
+  selectedWorker:
+    provider: xai
+    model: grok-4.6
+    runtime: grok-build
+    effort: xhigh
+    workerProfileId: grok-4-6-xhigh
+  selectedBecause:
+    code: user-specified
+    note: 一骏 explicitly authorized the M4 recovery and prefers Grok CLI 4.6 Xhigh native Goal; current health is matched and the Profile is launchable.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+reviewRequirement:
+  requiredJudges: 2
+  reason: This changes the Main authority, review observation and safe Integration call chain; two different-view Judges must independently inspect exact binding, timeout durability and absence of automatic decisions.
+contract:
+  outcome: Main can supervise a normal ForkLight delivery with one resumable prepare call that stops at reviewed Candidate decision and one resumable decide call that safely integrates only an explicit exact-bound accept, without repeated model turns for deterministic waiting and plumbing.
+  presentation:
+    summary: 把执行、独立验证和 Judge 等待收拢到一次“准备好让我决定”，再把明确决定和安全交付收拢到第二次调用；ForkLight不替Main做决定。
+    language: zh-CN
+  context:
+    - Read AGENTS.md, specs/m4-e-main-efficient-delivery/spec.md, goals/forklight-main-led-execution/evidence/m4-e-main-observation-audit.md and src/core/main-decision-packet.ts completely before editing. They are the unique accepted boundary; do not create a second spec or roadmap.
+    - Reuse current Task, verification, Review Graph, Main review, Integration preflight/apply/wait, rollback and exchange-receipt truth. Do not add a persisted delivery entity or duplicate eligibility.
+    - The accepted M4-D pairs show repeated Main cache-read/context overhead. This Work Item changes public interaction shape; it does not alter model, quality depth, routing or pair arithmetic.
+    - ForkLight serves one local developer. Current Store state, exact Candidate/source binding and Main serial Integration are sufficient; add no lock, lease, checksum system, version handshake or distributed coordination.
+    - Observation timeout ends only the caller's wait. It must never cancel, fail, retry, resume or recreate the Worker, Judge graph or Integration operation.
+    - M5 is closed. Do not inspect or change Hub/UI.
+  inScope:
+    - Add one canonical privacy-safe MainDeliveryCheckpoint projection with exact Candidate identity, bounded optional diff, verification, all required Judge results, blockers, stop/workspace disposition and next action, without duplicate verbose objects.
+    - Add delivery prepare for exactly one new Task file or existing Task id, explicit ordered Reviewer Profiles, review reason, observation timeout, confirmation and optional diff byte bound.
+    - Prepare must submit at most one Task, observe existing execution, create or reuse exactly the required current-Revision Review Graph after verification passes, wait all Judges and stop before Main decision.
+    - Add delivery decide for exact Task/Revision/full digest, explicit accept/revise/reject, reason, timeout and confirmation.
+    - Decide revise/reject records only the decision. Decide accept records exact Main accept, runs one fresh preflight and one Integration, observes it to terminal and returns the compact checkpoint.
+    - Make exact re-entry after timeout or transport loss reuse the durable Task, ordered Judge set, Main review, receipt and Integration operation; reject changed identity, order, decision or reason.
+    - Expose one behavior/schema through Daemon, CLI JSON/human and MCP and capture one redacted top-level exchange per prepare/decide call.
+    - Preserve every existing granular public command and record shape for backward compatibility.
+  outOfScope:
+    - Main Token calibration, main-token-pairs.json, routing/model changes, Competition, fallback, automatic correction, handoff, Judge repair/replacement or third Judge.
+    - Automatic Main acceptance, automatic Integration without confirmed exact accept, weaker source/review/rollback/build/activation gates or hidden failure.
+    - New Goal, Plan, Task, Work Item or delivery persistence entity; locks, leases, checksums/content addressing or distributed workflow.
+    - Hub/UI, storage reclaim, Provider credentials, Git remote, commit, push, reset or any path outside the approved focus set.
+  executionSteps:
+    - Trace only current Task wait, MainDecisionPacket, Review Graph create/status, Main review and Integration preflight/apply/wait composition points.
+    - Define the canonical bounded checkpoint and shared prepare/decide service without reimplementing existing authority or eligibility.
+    - Implement the Core/Daemon/CLI/MCP vertical slice and exact resume/timeout behavior inside the approved paths.
+    - Add focused success, failure, timeout, idempotency, stale identity, Judge mismatch, privacy/size, exchange-boundary and backward-compatibility tests.
+    - Run every acceptance command, inspect the exact diff and stop when the accepted boundary passes.
+  deliverables:
+    - One exact Candidate implementing the two public Main decision-boundary checkpoints.
+    - Canonical CLI human/JSON and MCP behavior with durable timeout/re-entry evidence.
+    - Focused tests proving two top-level calls can complete a happy-path reviewed delivery without automatic Main judgment.
+    - A concise handoff naming schema, commands/tools, state reuse, timeout behavior, changed paths, tests and remaining fresh-pair gate.
+  modules:
+    - name: Main delivery checkpoint
+      responsibility: Project only the Candidate, verification, Judge and disposition evidence Main needs for the next decision.
+      consumes: [Existing Task and Attempt state, Candidate Revision, verification, Review Graph, Main review and Integration records.]
+      produces: [One bounded canonical checkpoint for CLI and MCP.]
+      boundaries: [No raw logs, prompts, private history, successful command stdout, full event stream or duplicated decision/integration object.]
+    - name: Prepare to Main decision
+      responsibility: Compose submission or existing-Task observation with exact required Review Graph creation and wait.
+      consumes: [Task file or id, ordered Reviewer Profiles, reason, observation timeout, explicit confirm.]
+      produces: [Reviewed Candidate checkpoint or truthful failure/timeout checkpoint.]
+      boundaries: [No Main decision, correction, retry, fallback, integration or Task deadline.]
+    - name: Exact Main decision delivery
+      responsibility: Bind Main's explicit decision and integrate only an accepted exact Candidate through existing safe gates.
+      consumes: [Task, exact Revision/full digest, decision, reason, timeout, explicit confirm.]
+      produces: [Decision-only checkpoint or terminal Integration checkpoint.]
+      boundaries: [No invented decision, duplicate receipt/operation, weakened preflight or hidden rollback.]
+  callChain:
+    - Main calls delivery prepare once with a Task file, Reviewer Profiles and observation timeout.
+    - ForkLight submits/observes the Task, runs existing verification, creates or reuses the exact confirmed Review Graph and returns one decision-ready checkpoint.
+    - Main inspects the bounded Candidate and Judge evidence and calls delivery decide with exact identity and explicit decision.
+    - ForkLight records that decision; only accept enters current preflight/apply/wait and returns durable terminal truth.
+  scenarios:
+    - name: Happy-path two-call delivery
+      given: A valid Task produces an independently verified Candidate and every required Judge returns usable terminal evidence.
+      when: Main uses prepare then exact decide accept.
+      then: One Task, one graph, one Main accept, one receipt and one Integration complete; no intermediate Main plumbing call is required.
+    - name: Observation timeout and re-entry
+      given: Worker, Judge or Integration remains active beyond the caller's timeout.
+      when: Prepare or decide returns and the exact call is later re-entered.
+      then: Underlying work continues; re-entry observes the same durable identities without cancellation, retry or duplicate mutation.
+    - name: Review or identity blocker
+      given: Verification fails, Judge output is unusable, Reviewer order changes, Candidate identity is stale or source preflight rejects.
+      when: The checkpoint operation evaluates current truth.
+      then: It returns a bounded blocker and performs no compensating repair, Main accept or unsafe Integration.
+    - name: Main revise or reject
+      given: Main does not accept the reviewed exact Candidate.
+      when: Decide records revise or reject.
+      then: The decision is durable and no Integration, correction, retry or handoff starts automatically.
+  risks:
+    - Composition could accidentally become automatic acceptance; require explicit decision plus exact identity and test zero Integration before accept.
+    - Client timeout could be mistaken for Task failure; separate observation outcome from durable work status and test re-entry.
+    - Compact output could hide a Judge blocker; include every required Judge's usable disposition/summary/findings and typed blockers.
+    - Re-entry could duplicate side effects; reuse current exact durable records and fail on changed inputs instead of adding locks.
+  changeBudget:
+    maxFiles: 20
+    maxDiffLines: 6000
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 60000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxWorkerValidationRepairs: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test, .forklight-boundary-capture, .forklight-receipt-retry, plans]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/main-delivery.ts
+    - src/core/main-decision-packet.ts
+    - src/core/types.ts
+    - src/daemon/coordinator.ts
+    - src/daemon/protocol.ts
+    - src/daemon/server.ts
+    - src/daemon/client.ts
+    - src/cli.ts
+    - src/cli/supervision.ts
+    - src/cli/exchange-receipts.ts
+    - src/mcp/server.ts
+    - src/mcp/exchange-receipts.ts
+    - tests/main-delivery.test.ts
+    - tests/cli-supervision.test.ts
+    - tests/cli-exchange-receipts.test.ts
+    - tests/daemon.test.ts
+    - tests/daemon-cli.test.ts
+    - tests/mcp.test.ts
+    - README.md
+    - docs/operations.md
+acceptance:
+  criteria:
+    - One prepare call can submit one Task, observe Worker and independent verification, create or reuse exactly the confirmed required Judge set, wait to terminal review and return a compact checkpoint without Main decision or Integration.
+    - One decide accept call exact-binds Main review, runs one fresh preflight and one Integration, waits to terminal and returns compact final truth; revise/reject never integrate.
+    - Observation timeout or client loss never cancels, fails, resumes, retries or recreates work; exact re-entry reuses one Task, Review Graph, Main review, receipt and Integration operation.
+    - Invalid or stale Candidate identity, wrong or reordered Reviewer set, review/schema blocker, source drift and failed Integration stay visible and fail closed without automatic repair or loop.
+    - Daemon, CLI JSON/human and MCP share one bounded privacy-safe schema; large logs/events/success stdout do not enlarge it and optional diff obeys the explicit byte bound.
+    - Each top-level prepare/decide call records one redacted Main exchange boundary; internal deterministic steps do not appear as separate Main interactions.
+    - Existing granular commands and durable Task/Review/Main/Integration records remain backward compatible; no new persistence entity or coordination mechanism exists.
+    - No Hub/UI, calibration, routing, storage reclaim, credential, commit, push, reset or unrelated path change exists.
+    - One Grok 4.6 Xhigh native Goal, ForkLight independent verification, two different-view Judges and Main serial safe Integration complete the quality chain.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/main-delivery.test.ts tests/cli-supervision.test.ts tests/cli-exchange-receipts.test.ts tests/review-graph.test.ts tests/integration.test.ts tests/daemon.test.ts tests/daemon-cli.test.ts tests/mcp.test.ts
+    - git diff --check

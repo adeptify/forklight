@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "name": "M2 non-Coding Main-led delivery journey",
+  "objective": "Deliver one concise local Main-led ForkLight runbook through a meaningfully launched and intentionally restarted Grok 4.6 Xhigh persistent Session, independent verification, one Judge, serial Main Integration, and three zero-change integrated-source audits.",
+  "planFile": "./plan.json",
+  "policy": {
+    "maxDurationMs": null,
+    "noProgressTimeoutMs": null,
+    "maxCorrectionRounds": 1,
+    "maxReviewRounds": 2,
+    "maxNoNewEvidenceCycles": 2
+  },
+  "milestones": [
+    { "itemId": "main-led-runbook", "gate": "integration" },
+    { "itemId": "integrated-primary-flow-audit", "gate": "machine" },
+    { "itemId": "cli-link-accuracy-audit", "gate": "machine" },
+    { "itemId": "scope-recovery-boundary-audit", "gate": "machine" }
+  ]
+}

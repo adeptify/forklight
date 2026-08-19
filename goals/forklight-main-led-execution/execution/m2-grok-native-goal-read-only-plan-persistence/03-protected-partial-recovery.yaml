@@ -1,0 +1,85 @@
+version: 2
+name: M2 adopt protected read-only plan-persistence partial
+project: /Users/yijunwang/code/forklight
+taskClass: m2-grok-native-goal-read-only-plan-persistence-recovery
+taskFamily: forklight-runtime-recovery
+workerProfileId: grok-4-6-xhigh
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 2
+  reason: Core Runtime tool and permission policy can either block every read-only native Goal or silently allow product Workspace edits, so two independent views are required.
+contract:
+  outcome: Adopt the exact protected two-path partial from failed Task d3c41fff-7bad-4af9-99fd-6e1c95657b9c as a verified Candidate without re-researching or widening the native Goal permission design.
+  presentation: { summary: 复用已完成的两文件成果，正常走完验收与集成。, language: zh-CN }
+  context:
+    - Read the unique accepted Work Item spec and retained-candidate.diff completely; inspect only the two product paths required to adopt its exact hunks.
+    - Current source byte-matches the failed Task baseline at both paths. retained-candidate.test.mjs --source passed, and --candidate passed against the protected Workspace.
+    - The retained partial changes exactly src/workers/grok.ts and tests/worker-runtime.test.ts. Do not redesign, re-research or add another behavior.
+    - Grok 4.6 Xhigh authentication was restored and a direct read-only smoke returned AUTH_OK.
+    - This is a new representable recovery Task because the failed Task durably froze both maxExtraAttempts and maxAdaptationRounds at zero. Do not mutate or relabel the old Task.
+    - One Attempt only. There is no validation repair, correction, reverify, adaptation, retry, fallback or replacement.
+  inScope: [Exact adoption of retained-candidate.diff, native Goal always registers Task-local plan mutators, native read-only argv denies exact Workspace writes and edits, existing focused tests from the retained partial.]
+  outOfScope: [Fresh design or research, failed Task resume or relabel, background-control removal, Bash enablement, other Runtime behavior, public config or schema, Store, protocol, storage lifecycle, Integration internals, docs, Hub/UI, commit, push, reset, or reclaim.]
+  executionSteps:
+    - Read specs/m2-a-grok-execution-truth/work-items/grok-native-goal-read-only-plan-persistence/spec.md and the retained Candidate diff completely.
+    - Use permitted file-edit tools to adopt the exact retained hunks into the two product paths; do not use shell or reconstruct a different solution.
+    - Inspect the resulting two paths against the retained diff and preserve all existing native controls plus non-native behavior.
+    - Return the exact two-path handoff; ForkLight independently runs every approved command.
+  deliverables: [Exact retained two-path Candidate, focused independent behavior proof, concise handoff explaining Task-local plan writes versus Workspace edit denial.]
+  modules:
+    - name: Retained Candidate adoption
+      responsibility: Reuse the protected source-base-compatible patch without another implementation cycle.
+      consumes: [retained-candidate.diff, current matching source base, accepted Work Item spec.]
+      produces: [Exact two-path Workspace delta.]
+      boundaries: [No new hunk, path, redesign, wrapper or state mutation.]
+    - name: Grok native tool and deny projection
+      responsibility: Keep native Planner plan dependencies registered while enforcing the Task edit contract at the Workspace boundary.
+      consumes: [execution mode, allowEdits, Task-local Grok home, Workspace path, Session id.]
+      produces: [Native tool allowlist and exact conditional permission-deny argv.]
+      boundaries: [No new permission system, state field, timer, retry or background-control change.]
+    - name: Runtime argv regression tests
+      responsibility: Prove native read-only safety, native editable continuity and non-native read-only non-expansion.
+      consumes: [grokNativeAllowTools, grokNativeDenyArgs, buildGrokCliArgs.]
+      produces: [Focused deterministic exact-pair assertions.]
+      boundaries: [No live Provider call or broad test rewrite.]
+  callChain: [ForkLight snapshots the matching source and retained patch, Grok native Goal adopts exact hunks, ForkLight proves reverse applicability and behavior, two Judges inspect one Revision, Main serially integrates, activated live audit proves read-only plan persistence.]
+  scenarios:
+    - name: Exact partial is adopted
+      given: Current source matches the retained baseline and the two-path patch is present in the Task snapshot.
+      when: The Worker adopts the retained hunks.
+      then: Candidate reverse-checks against the exact patch and changes no other path.
+    - name: Read-only native Goal remains safe
+      given: Native argv has allowEdits false.
+      when: ForkLight builds the Grok invocation.
+      then: Plan mutators are registered, exact Workspace Write/Edit denials exist, Task-local plan is not broadly denied, and existing protected-path plus Bash denials remain.
+    - name: Other execution branches remain stable
+      given: Native editable and persistent-session read-only invocations.
+      when: ForkLight builds their argv.
+      then: Editable native has no Workspace-wide denial and non-native read-only still omits mutators and denies whole GROK_HOME.
+  risks:
+    - Source drift would invalidate exact reuse; the preflight forward check and Candidate reverse check fail closed.
+    - Reimplementation could introduce extra same-file changes; retained diff, focused verification and Main actual-diff review reject them.
+  changeBudget: { maxFiles: 2, maxDiffLines: 160 }
+advancedPolicy: { maxDurationMs: null, observedTokenCeiling: null, noProgressTimeoutMs: null, fileLimit: null, fileLimitMode: warn, changedLineLimit: null, changedLineLimitMode: warn, baseMaxAttempts: 1, maxExtraAttempts: 0, maxMainCorrections: 0, maxMainReverifications: 0, maxWorkerValidationRepairs: 0, maxConcurrency: 1, completionMode: warn, changeBudgetMode: warn, maxAdaptationRounds: 0 }
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - goals/forklight-main-led-execution/execution/m2-grok-native-goal-read-only-plan-persistence/retained-candidate.diff
+    - src/workers/grok.ts
+    - tests/worker-runtime.test.ts
+acceptance:
+  criteria:
+    - Candidate reverse-applies the exact retained two-path patch and changes no other business path.
+    - Both native allowEdits branches register search_replace and write exactly once alongside all existing native registrations.
+    - Native read-only argv adds exact Workspace Write/Edit deny pairs without broadly denying Task-local Grok home and preserves credential, configuration, state, MCP and Bash denials.
+    - Native editable argv has no Workspace-wide Write/Edit denial; persistent-session read-only still omits mutators and retains whole-GROK_HOME denial.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/worker-runtime.test.ts
+    - node goals/forklight-main-led-execution/execution/m2-grok-native-goal-read-only-plan-persistence/retained-candidate.test.mjs --candidate
+    - git diff --check

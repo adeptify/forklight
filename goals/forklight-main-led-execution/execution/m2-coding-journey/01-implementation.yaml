@@ -1,0 +1,86 @@
+version: 2
+name: M2 recover source-only Integration after daemon restart
+project: /Users/yijunwang/code/forklight
+taskClass: m2-source-only-integration-recovery
+taskFamily: forklight-integration-recovery
+workerProfileId: default
+deliveryProfileId: forklight-self-upgrade
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 2
+  reason: Integration restart recovery can mutate or roll back source, so wrong-Candidate, exactly-once, and compatibility risks require two independent views.
+contract:
+  outcome: Safely continue the original source-only Integration operation after a daemon restart when source-applied truth, Candidate-final source, and rollback backup are all proven, without replaying apply or claiming build/activation recovery.
+  presentation: { summary: 在可证明安全的 source-only 边界内，让同一 Integration operation 在 Daemon 重启后续跑。, language: zh-CN }
+  context:
+    - Read specs/m2-delivery-journeys/spec.md and specs/m2-delivery-journeys/work-items/coding-source-only-integration-recovery/spec.md completely before editing.
+    - Current recoverIntegrationOperations only reconstructs identity and records outcome-unknown. applyIntegration has durable stages but no continuation path.
+    - Grok 4.6 Xhigh is blocked by known missing xAI authentication. DeepSeek Pro has a current explicit verified probe; use it honestly as single-run and preserve its same Session identity across restart.
+    - Main will intentionally restart the daemon once only after a useful partial edit or materially narrower failing test exists. Continue the same Task and Session; do not create another Task or wait for chat context.
+    - ForkLight serves one local developer. Add only the exact Candidate/source/backup checks needed to prevent wrong Integration or durable data damage.
+  inScope:
+    - Recover only an original incomplete operation with exactly one durable source-applied passed stage, a consumed receipt, no result, and no build/activation/activation-check commands.
+    - Prove live affected paths equal the reviewed Candidate final state and deterministic backups equal receipt pre-apply evidence before continuing.
+    - Reuse existing isolated acceptance verification, concurrent-change detection, rollback policy, stage/result persistence, activeIntegrations ownership, and Goal reconciliation.
+    - Add focused recovery, refusal, idempotency, restart, compatibility, and privacy tests.
+  outOfScope:
+    - Recovery or replay of patch apply, build, activation, or activation-check commands; a new operation, receipt, CLI/MCP method, Store table, migration, general manifest, or manual source repair.
+    - Goal/Task/Review/Storage/Provider/Runtime policy, Hub/UI, docs, other repositories, commit, push, credentials, locks, leases, distributed coordination, or version handshake.
+  executionSteps:
+    - Trace applyIntegration stage persistence, recovery reconstruction, status/wait/history, backup layout, and existing verification helpers.
+    - Extract or add the smallest internal continuation seam while keeping ordinary apply behavior unchanged.
+    - Register one eligible recovery owner before background work and refuse every ambiguous or unsupported state without mutation.
+    - Run every acceptance command and inspect actual diff, error paths, legacy reads, and no-replay behavior.
+  deliverables:
+    - One source-compatible Candidate only in accepted source/test paths.
+    - Focused evidence for same-operation success, verification failure rollback, unsafe-state refusal, and no second terminal result.
+  modules:
+    - name: Integration continuation core
+      responsibility: Continue after an already-proven source-applied stage through isolated verification and one terminal result.
+      consumes: [Canonical Task and receipt, original operation, durable stages, Candidate workspace, live source, backup, Integration settings.]
+      produces: [Remaining stage evidence and one ordinary terminal result, or a bounded refusal.]
+      boundaries: [Never git apply, replay build/activation, create another operation, or infer unproven source truth.]
+    - name: Daemon recovery ownership
+      responsibility: Classify incomplete operations and start at most one eligible continuation in activeIntegrations.
+      consumes: [Durable operation events and existing result truth at daemon recovery.]
+      produces: [Running/completed original operation or outcome-unknown diagnosis.]
+      boundaries: [No Store schema, new user command, second owner, Task recreation, or observer-driven lifecycle.]
+  callChain:
+    - Daemon startup invokes coordinator recovery and reconstructs original operation IDs.
+    - Eligible source-only operation acquires one activeIntegrations owner and calls the continuation core.
+    - Continuation proves Candidate-final source and backup, runs isolated acceptance, rechecks live paths, and persists existing stages/result.
+    - Existing integration status/wait/history and Goal reconciliation project the same operation truth.
+  scenarios:
+    - name: Safe same-operation continuation
+      given: Source-applied passed is durable, source and backup are exact, receipt is consumed, and delivery declares no build or activation.
+      when: A new daemon recovers.
+      then: It never reapplies the patch and completes the original operation exactly once.
+    - name: Unsafe or unsupported history
+      given: Candidate/source/backup mismatch, ambiguous stages, unconsumed receipt, or build/activation work exists.
+      when: Recovery classifies the operation.
+      then: Source is untouched, no result is fabricated, and bounded outcome-unknown evidence explains the refusal.
+    - name: Existing paths do not regress
+      given: A terminal operation, live in-memory apply, observer disconnect, or activation handoff.
+      when: Status, wait, restart, or completion occurs.
+      then: Current behavior, legacy readability, privacy, and one-use authority remain unchanged.
+  risks: [A naive retry can apply twice or roll back unrelated edits; all continuation is gated by exact Candidate-final and backup truth. Build and activation replay is intentionally unsupported.]
+  changeBudget: { maxFiles: 7, maxDiffLines: 900 }
+advancedPolicy: { maxDurationMs: null, observedTokenCeiling: null, noProgressTimeoutMs: null, workerStopGraceMs: 60000, fileLimit: null, fileLimitMode: warn, changedLineLimit: null, changedLineLimitMode: warn, baseMaxAttempts: 2, maxExtraAttempts: 0, maxMainCorrections: 1, maxMainReverifications: 1, maxConcurrency: 1, completionMode: warn, changeBudgetMode: warn, maxAdaptationRounds: 0 }
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths: [src/core/integration.ts, src/core/integration-operation.ts, src/daemon/coordinator.ts, src/core/types.ts, tests/integration.test.ts, tests/integration-operation.test.ts, tests/daemon.test.ts]
+acceptance:
+  criteria:
+    - The original eligible source-only operation resumes once after daemon reconstruction and reaches one terminal result without patch replay.
+    - Candidate/source/backup mismatch and all build/activation cases refuse without source mutation or fabricated success.
+    - Existing apply, rollback, activation handoff, status/wait/history, legacy-read, privacy, and Goal behavior remain source-compatible.
+    - Candidate stays in allowed paths, excludes generated output, and adds no Store schema or coordination machinery.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/integration.test.ts tests/integration-operation.test.ts tests/daemon.test.ts
+    - git diff --check

@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "name": "M2 exact non-Coding Candidate recovery",
+  "objective": "Materialize the already verified three-path documentation Candidate unchanged in one correctly admitted Grok 4.6 Xhigh persistent Session, independently verify it, obtain one fresh exact-Revision Judge opinion, integrate only after Main accept, then complete the original three serial zero-change audits.",
+  "planFile": "./plan.json",
+  "policy": {
+    "maxDurationMs": null,
+    "noProgressTimeoutMs": null,
+    "maxCorrectionRounds": 0,
+    "maxReviewRounds": 1,
+    "maxNoNewEvidenceCycles": 2
+  },
+  "milestones": [
+    { "itemId": "exact-candidate-materialization", "gate": "integration" },
+    { "itemId": "integrated-primary-flow-audit", "gate": "machine" },
+    { "itemId": "cli-link-accuracy-audit", "gate": "machine" },
+    { "itemId": "scope-recovery-boundary-audit", "gate": "machine" }
+  ]
+}

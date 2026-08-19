@@ -1,0 +1,10 @@
+{
+  "verificationEventSequence": 108,
+  "reasonCode": "contradictory-acceptance",
+  "replacements": [
+    {
+      "originalCommand": "node dist/src/cli.js health --json | node -e 'let data=\"\"; process.stdin.setEncoding(\"utf8\"); process.stdin.on(\"data\", chunk => data += chunk); process.stdin.on(\"end\", () => { const value = JSON.parse(data); if (value.identityStatus !== \"matched\") process.exit(1); });'",
+      "replacementCommand": "node dist/src/cli.js health --json | node -e 'let data=\"\"; process.stdin.setEncoding(\"utf8\"); process.stdin.on(\"data\", chunk => data += chunk); process.stdin.on(\"end\", () => { const value = JSON.parse(data); if (value.identityStatus !== \"daemon-unavailable\" || typeof value.clientBuildIdentity?.buildId !== \"string\") process.exit(1); });'"
+    }
+  ]
+}

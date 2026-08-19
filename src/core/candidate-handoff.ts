@@ -33,7 +33,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
-import type { StateStore } from "../state/store.js";
+import { CANDIDATE_HANDOFF_CORRUPTION_ERROR, type StateStore } from "../state/store.js";
 import { prepareWorkspace } from "../workspace/copy.js";
 import { parseAffectedPathsFromWorkspaceDiff } from "../workspace/patch.js";
 import {
@@ -53,6 +53,10 @@ import {
   applyResolvedNetworkPolicy,
   resolveWorkerSelection,
 } from "./worker-profiles.js";
+import {
+  executionCapabilitiesForRuntime,
+  resolveExecutionMode,
+} from "./execution-mode.js";
 import { defaultExecutableForRuntime } from "./runtime-names.js";
 import type { ForkLightSettings } from "./settings.js";
 import { isoTimestamp as timestamp } from "./time.js";
@@ -187,11 +191,38 @@ function normalizeReason(reason: unknown): string {
   return trimmed;
 }
 
+function requireProjectedHandoffOrigin(
+  record: CandidateHandoffRecord,
+): CandidateHandoffOrigin {
+  const origin = record.origin as CandidateHandoffOrigin | undefined;
+  if (origin?.kind === "competition") {
+    if (
+      typeof origin.competitionId === "string"
+      && origin.competitionId.length > 0
+      && typeof origin.sourceCandidateId === "string"
+      && origin.sourceCandidateId.length > 0
+    ) {
+      return origin;
+    }
+  } else if (origin?.kind === "goal-task") {
+    if (
+      typeof origin.goalId === "string"
+      && origin.goalId.length > 0
+      && typeof origin.itemId === "string"
+      && origin.itemId.length > 0
+    ) {
+      return origin;
+    }
+  }
+  throw new Error(CANDIDATE_HANDOFF_CORRUPTION_ERROR);
+}
+
 /** Privacy-safe projection of a durable handoff record. */
 export function projectCandidateHandoff(
   record: CandidateHandoffRecord,
   successorTaskStatus?: TaskRecord["status"],
 ): CandidateHandoffView {
+  const origin = requireProjectedHandoffOrigin(record);
   const nextAction: CandidateHandoffNextAction = record.status === "failed"
     ? record.nextAction
     : successorTaskStatus === "succeeded"
@@ -199,19 +230,19 @@ export function projectCandidateHandoff(
       : successorTaskStatus === "failed" || successorTaskStatus === "interrupted"
         ? "inspect-failure"
         : record.nextAction;
-  const originFields = record.origin.kind === "competition"
+  const originFields = origin.kind === "competition"
     ? {
-        competitionId: record.origin.competitionId,
-        sourceCandidateId: record.origin.sourceCandidateId,
+        competitionId: origin.competitionId,
+        sourceCandidateId: origin.sourceCandidateId,
       }
     : {
-        goalId: record.origin.goalId,
-        itemId: record.origin.itemId,
+        goalId: origin.goalId,
+        itemId: origin.itemId,
       };
   return {
     id: record.id,
     status: record.status,
-    originKind: record.origin.kind,
+    originKind: origin.kind,
     ...originFields,
     sourceTaskId: record.sourceTaskId,
     sourceCandidateRevisionId: record.sourceCandidateRevisionId,
@@ -285,10 +316,10 @@ export function buildHandoffInstruction(
 }
 
 /**
- * Clone the source TaskSpec while replacing only Worker/Profile/Provider/runtime
- * and freezing advanced policy from the destination Profile (never source-Task
- * advancedPolicyOverride). Deliver every reusable path and every bounded gap
- * into the Worker-facing contract without a shared truncation window.
+ * Clone the source TaskSpec while replacing only identity-bound Worker fields
+ * and freezing destination-owned execution truth, network policy, and advanced
+ * policy (never source-Task overrides). Deliver every reusable path and every
+ * bounded gap into the Worker-facing contract without a shared truncation window.
  */
 export function buildHandoffSuccessorSpec(
   sourceSpec: TaskSpec,
@@ -428,6 +459,16 @@ export function buildHandoffSuccessorSpec(
       ],
     };
   }
+  // Destination selection is the sole authority for successor execution truth.
+  // Profile omission freezes explicit legacy single-run; absence remains a
+  // historical-Task shape only. Mode uses the existing canonical helper.
+  const destinationExecution = resolveExecutionMode(
+    selection.executionPreference,
+    executionCapabilitiesForRuntime(selection.runtime),
+  );
+  cloned.executionPreference = destinationExecution.preference;
+  cloned.executionMode = destinationExecution.mode;
+
   // Freeze the destination Profile's network policy. Legacy destination omission
   // deletes the source Task's frozen policy so the successor inherits the Daemon
   // environment instead of routing through the source Worker's route.

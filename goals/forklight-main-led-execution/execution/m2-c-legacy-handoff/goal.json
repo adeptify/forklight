@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "name": "M2-C legacy handoff read compatibility",
+  "objective": "Make the existing authentic pre-origin Competition handoff readable through the shared StateStore handoff boundary so storage audit and preview work without Store rewrite, then safely integrate the independently verified and reviewed Candidate before Main reruns the real-home read-only commands.",
+  "planFile": "./plan.json",
+  "policy": {
+    "maxDurationMs": null,
+    "noProgressTimeoutMs": null,
+    "maxCorrectionRounds": 1,
+    "maxReviewRounds": 2,
+    "maxNoNewEvidenceCycles": 2
+  },
+  "milestones": [
+    { "itemId": "legacy-handoff-compat", "gate": "integration" },
+    { "itemId": "durable-read-audit", "gate": "machine" },
+    { "itemId": "lifecycle-chain-audit", "gate": "machine" },
+    { "itemId": "mutation-boundary-audit", "gate": "machine" }
+  ]
+}

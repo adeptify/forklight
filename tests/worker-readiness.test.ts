@@ -100,6 +100,7 @@ test("Worker readiness keeps local launch and Provider verification separate", (
       runtime: "ready",
       connection: "verified",
       nativeGoal: "unsupported",
+      persistentSession: "unsupported",
     },
   });
   assert.equal(result[1]!.state, "launchable");
@@ -358,13 +359,32 @@ test("auto Codex Worker resolves native-goal and projects the resolved mode", ()
   assert.equal(result.checks.nativeGoal, "ready");
 });
 
-test("auto unsupported Runtime resolves single-run and explains it", () => {
-  // A Grok Worker with auto preference has no proven native Goal contract.
+test("auto Grok Worker resolves native-goal", () => {
   const result = resolveWorkerReadiness(input())[1]!;
   assert.equal(result.workerId, "grok-worker");
   assert.equal(result.executionPreference, "auto");
-  assert.equal(result.resolvedExecutionMode, "single-run");
-  assert.equal(result.checks.nativeGoal, "unsupported");
+  assert.equal(result.resolvedExecutionMode, "native-goal");
+  assert.equal(result.checks.nativeGoal, "ready");
+  assert.equal(result.checks.persistentSession, "ready");
+});
+
+test("forced native-goal on Grok stays launchable", () => {
+  const forced = input();
+  forced.workerProfiles = {
+    defaultProfileId: "forced-grok-native",
+    profiles: [{
+      id: "forced-grok-native",
+      label: "Forced Grok native Goal",
+      runtime: "grok-build",
+      modelConfigId: "xai-model",
+      executionPreference: "native-goal",
+    }],
+  };
+  const result = resolveWorkerReadiness(forced)[0]!;
+  assert.equal(result.canLaunch, true);
+  assert.equal(result.executionPreference, "native-goal");
+  assert.equal(result.resolvedExecutionMode, "native-goal");
+  assert.equal(result.checks.nativeGoal, "ready");
 });
 
 test("forced native-goal on an unsupported Runtime fails closed", () => {
@@ -374,8 +394,8 @@ test("forced native-goal on an unsupported Runtime fails closed", () => {
     profiles: [{
       id: "forced",
       label: "Forced native Goal",
-      runtime: "grok-build",
-      modelConfigId: "xai-model",
+      runtime: "claude-code",
+      modelConfigId: "deepseek-model",
       executionPreference: "native-goal",
     }],
   };
@@ -392,4 +412,46 @@ test("legacy profile without a preference stays single-run", () => {
   const result = resolveWorkerReadiness(input())[0]!;
   assert.equal(result.executionPreference, "single-run");
   assert.equal(result.resolvedExecutionMode, "single-run");
+});
+
+test("forced persistent-session on an unsupported Runtime fails closed", () => {
+  const forced = input();
+  forced.workerProfiles = {
+    defaultProfileId: "forced",
+    profiles: [{
+      id: "forced",
+      label: "Forced persistent Session",
+      runtime: "claude-code",
+      modelConfigId: "deepseek-model",
+      executionPreference: "persistent-session",
+    }],
+  };
+  const result = resolveWorkerReadiness(forced)[0]!;
+  assert.equal(result.state, "blocked");
+  assert.equal(result.canLaunch, false);
+  assert.equal(result.reason, "persistent-session-unsupported");
+  assert.equal(result.nextAction, "choose-execution-mode");
+  assert.equal(result.resolvedExecutionMode, "persistent-session");
+  assert.equal(result.checks.persistentSession, "unsupported");
+});
+
+test("forced persistent-session on Grok stays launchable", () => {
+  const forced = input();
+  forced.workerProfiles = {
+    defaultProfileId: "forced-grok",
+    profiles: [{
+      id: "forced-grok",
+      label: "Forced Grok Session",
+      runtime: "grok-build",
+      modelConfigId: "xai-model",
+      executionPreference: "persistent-session",
+    }],
+  };
+  const result = resolveWorkerReadiness(forced)[0]!;
+  assert.equal(result.state, "launchable");
+  assert.equal(result.canLaunch, true);
+  assert.equal(result.executionPreference, "persistent-session");
+  assert.equal(result.resolvedExecutionMode, "persistent-session");
+  assert.equal(result.checks.nativeGoal, "ready");
+  assert.equal(result.checks.persistentSession, "ready");
 });

@@ -12,10 +12,13 @@ import {
   normalizeOutcomeIntakeCreate,
   normalizeOutcomeIntakePropose,
 } from "../src/core/outcome-intake.js";
+import { projectCandidateHandoff } from "../src/core/candidate-handoff.js";
+import { resolveEffectiveMilestoneLineage } from "../src/core/goal.js";
 import { buildTaskRecord } from "../src/core/runner.js";
 import { parseTaskSpec } from "../src/core/task.js";
 import { createRedactedExchangeMeasurement } from "../src/core/token-efficiency.js";
 import type {
+  CandidateHandoffRecord,
   DependencyRecord,
   GoalMilestoneRecord,
   GoalPlanAssociation,
@@ -24,7 +27,13 @@ import type {
   PlanRecord,
   TaskRecord,
 } from "../src/core/types.js";
-import { StateStore } from "../src/state/store.js";
+import {
+  backupStoreDatabase,
+  CANDIDATE_HANDOFF_CORRUPTION_ERROR,
+  checkDatabaseFileIntegrity,
+  StateStore,
+  STORE_UNREADABLE_ERROR,
+} from "../src/state/store.js";
 
 function queuedTask(id: string, timestamp: string): TaskRecord {
   const spec = parseTaskSpec(
@@ -83,6 +92,18 @@ test("a resumed task clears stale terminal fields when it starts and succeeds", 
   assert.equal(succeeded.status, "succeeded");
   assert.equal(succeeded.error, undefined);
   store.close();
+});
+
+test("store integrity exposes SQLite quick_check and foreign-key violations", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-store-integrity-"));
+  const store = new StateStore(home);
+  try {
+    const integrity = store.checkStoreIntegrity();
+    assert.equal(integrity.quickCheck, "ok");
+    assert.equal(integrity.foreignKeyViolationCount, 0);
+  } finally {
+    store.close();
+  }
 });
 
 test("plan graph round trip preserves explicit dependency direction", async () => {
@@ -2390,4 +2411,725 @@ test("createOutcomeIntakeConfirmation rejects multi-phase registration graph mis
   assert.equal(intake.revision, 2);
   assert.equal(intake.confirmation, undefined);
   store.close();
+});
+
+const HANDOFF_TS = "2026-08-14T00:00:00.000Z";
+
+function currentHandoffRecord(
+  id: string,
+  origin: CandidateHandoffRecord["origin"],
+  sourceTaskId: string,
+  successorTaskId: string,
+): CandidateHandoffRecord {
+  return {
+    schemaVersion: 1,
+    id,
+    status: "prepared",
+    origin,
+    sourceTaskId,
+    sourceCandidateRevisionId: `rev-${id}`,
+    sourcePatchDigest: "a".repeat(64),
+    gapContractDigest: "b".repeat(64),
+    reusablePathCount: 1,
+    remainingGapCount: 1,
+    reusablePaths: ["src/app.ts"],
+    remainingGaps: [{
+      description: "finish remaining gap",
+      acceptanceExpectation: "tests pass",
+    }],
+    destinationWorkerProfileId: "grok-builder",
+    destinationIdentity: {
+      provider: "xai",
+      model: "grok-4.6",
+      runtime: "grok-build",
+      effort: "xhigh",
+    },
+    successorTaskId,
+    reason: "Continue remaining gaps",
+    createdAt: HANDOFF_TS,
+    updatedAt: HANDOFF_TS,
+    preparedAt: HANDOFF_TS,
+    nextAction: "wait-for-successor",
+  };
+}
+
+function authenticLegacyCompetitionJson(record: CandidateHandoffRecord): string {
+  if (record.origin.kind !== "competition") {
+    throw new Error("legacy fixture requires competition identity");
+  }
+  const { origin, ...rest } = record;
+  return JSON.stringify({
+    ...rest,
+    competitionId: origin.competitionId,
+    sourceCandidateId: origin.sourceCandidateId,
+  });
+}
+
+function insertRawHandoffJson(
+  databasePath: string,
+  record: CandidateHandoffRecord,
+  recordJson: string,
+  competitionId: string,
+): void {
+  const db = new DatabaseSync(databasePath);
+  try {
+    db.prepare(
+      `INSERT INTO candidate_handoffs
+       (id, source_revision_id, source_task_id, successor_task_id, competition_id,
+        status, record_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      record.id,
+      record.sourceCandidateRevisionId,
+      record.sourceTaskId,
+      record.successorTaskId,
+      competitionId,
+      record.status,
+      recordJson,
+      record.createdAt,
+      record.updatedAt,
+    );
+  } finally {
+    db.close();
+  }
+}
+
+function readRawHandoffJson(databasePath: string, id: string): string {
+  const db = new DatabaseSync(databasePath);
+  try {
+    const row = db.prepare(
+      `SELECT record_json FROM candidate_handoffs WHERE id = ?`,
+    ).get(id) as { record_json: string } | undefined;
+    if (row === undefined) throw new Error(`missing handoff ${id}`);
+    return row.record_json;
+  } finally {
+    db.close();
+  }
+}
+
+test("authentic pre-origin Competition handoff is readable without rewriting Store", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-handoff-legacy-"));
+  const store = new StateStore(home);
+  try {
+    const legacySource = queuedTask("legacy-src", HANDOFF_TS);
+    const legacySuccessor = queuedTask("legacy-succ", HANDOFF_TS);
+    const currentCompSource = queuedTask("cur-comp-src", HANDOFF_TS);
+    const currentCompSuccessor = queuedTask("cur-comp-succ", HANDOFF_TS);
+    const goalSource = queuedTask("goal-src", HANDOFF_TS);
+    const goalSuccessor = queuedTask("goal-succ", HANDOFF_TS);
+    for (const task of [legacySource, legacySuccessor, currentCompSource, goalSource]) {
+      store.createTask(task);
+    }
+
+    const currentCompetition = currentHandoffRecord(
+      "current-comp-handoff",
+      { kind: "competition", competitionId: "comp-current", sourceCandidateId: "cand-current" },
+      currentCompSource.id,
+      currentCompSuccessor.id,
+    );
+    store.createCandidateHandoff({
+      record: currentCompetition,
+      task: currentCompSuccessor,
+      authorizationEvent: { summary: "current competition handoff" },
+    });
+    const currentGoal = currentHandoffRecord(
+      "current-goal-handoff",
+      { kind: "goal-task", goalId: "goal-1", itemId: "item-1" },
+      goalSource.id,
+      goalSuccessor.id,
+    );
+    store.createCandidateHandoff({
+      record: currentGoal,
+      task: goalSuccessor,
+      authorizationEvent: { summary: "current goal-task handoff" },
+    });
+
+    const legacy = currentHandoffRecord(
+      "legacy-comp-handoff",
+      { kind: "competition", competitionId: "comp-legacy", sourceCandidateId: "cand-legacy" },
+      legacySource.id,
+      legacySuccessor.id,
+    );
+    const legacyJson = authenticLegacyCompetitionJson(legacy);
+    insertRawHandoffJson(store.databasePath, legacy, legacyJson, "comp-legacy");
+
+    const eventCounts = {
+      legacySource: store.listEvents(legacySource.id).length,
+      legacySuccessor: store.listEvents(legacySuccessor.id).length,
+      currentCompSource: store.listEvents(currentCompSource.id).length,
+      goalSource: store.listEvents(goalSource.id).length,
+    };
+    const taskCount = store.listTasks().length;
+    const currentCompJson = readRawHandoffJson(store.databasePath, currentCompetition.id);
+    const currentGoalJson = readRawHandoffJson(store.databasePath, currentGoal.id);
+
+    const byId = store.getCandidateHandoff(legacy.id);
+    const byRevision = store.getCandidateHandoffBySourceRevisionId(legacy.sourceCandidateRevisionId);
+    const bySuccessor = store.getCandidateHandoffBySuccessorTaskId(legacy.successorTaskId);
+    const bySource = store.listCandidateHandoffsBySourceTaskId(legacy.sourceTaskId);
+    const byCompetition = store.listCandidateHandoffsByCompetitionId("comp-legacy");
+    const listed = store.listCandidateHandoffs();
+    assert.ok(byRevision);
+    assert.ok(bySuccessor);
+    const fromSource = bySource[0];
+    const fromCompetition = byCompetition[0];
+    assert.ok(fromSource);
+    assert.ok(fromCompetition);
+
+    for (const record of [byId, byRevision, bySuccessor, fromSource, fromCompetition]) {
+      assert.equal(record.origin.kind, "competition");
+      if (record.origin.kind === "competition") {
+        assert.equal(record.origin.competitionId, "comp-legacy");
+        assert.equal(record.origin.sourceCandidateId, "cand-legacy");
+      }
+    }
+    assert.equal(bySource.length, 1);
+    assert.equal(byCompetition.length, 1);
+    assert.equal(listed.length, 3);
+
+    const currentCompRead = store.getCandidateHandoff(currentCompetition.id);
+    assert.equal(currentCompRead.origin.kind, "competition");
+    if (currentCompRead.origin.kind === "competition") {
+      assert.equal(currentCompRead.origin.competitionId, "comp-current");
+      assert.equal(currentCompRead.origin.sourceCandidateId, "cand-current");
+    }
+
+    const currentGoalRead = store.getCandidateHandoff(currentGoal.id);
+    assert.equal(currentGoalRead.origin.kind, "goal-task");
+    if (currentGoalRead.origin.kind === "goal-task") {
+      assert.equal(currentGoalRead.origin.goalId, "goal-1");
+      assert.equal(currentGoalRead.origin.itemId, "item-1");
+    }
+    assert.equal(store.listCandidateHandoffsByCompetitionId("").length, 1);
+    assert.equal(store.listCandidateHandoffsByCompetitionId("")[0]?.id, currentGoal.id);
+
+    assert.equal(readRawHandoffJson(store.databasePath, legacy.id), legacyJson);
+    assert.equal("origin" in JSON.parse(legacyJson), false);
+    assert.equal(JSON.parse(legacyJson).competitionId, "comp-legacy");
+    assert.equal(readRawHandoffJson(store.databasePath, currentCompetition.id), currentCompJson);
+    assert.equal(readRawHandoffJson(store.databasePath, currentGoal.id), currentGoalJson);
+    assert.equal(JSON.parse(currentCompJson).origin.kind, "competition");
+    assert.equal(JSON.parse(currentGoalJson).origin.kind, "goal-task");
+    assert.equal(store.listEvents(legacySource.id).length, eventCounts.legacySource);
+    assert.equal(store.listEvents(legacySuccessor.id).length, eventCounts.legacySuccessor);
+    assert.equal(store.listEvents(currentCompSource.id).length, eventCounts.currentCompSource);
+    assert.equal(store.listEvents(goalSource.id).length, eventCounts.goalSource);
+    assert.equal(store.listTasks().length, taskCount);
+  } finally {
+    store.close();
+  }
+});
+
+test("unknown-origin handoff stays collectable; semantic projection fails closed", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-handoff-corrupt-"));
+  const store = new StateStore(home);
+  try {
+    const source = queuedTask("corrupt-src", HANDOFF_TS);
+    const successor = queuedTask("corrupt-succ", HANDOFF_TS);
+    store.createTask(source);
+    store.createTask(successor);
+    const secret = "SECRET-HANDOFF-BODY-sk-not-a-real-key";
+    const shaped = currentHandoffRecord(
+      "corrupt-handoff",
+      { kind: "goal-task", goalId: "must-not-guess", itemId: "must-not-guess" },
+      source.id,
+      successor.id,
+    );
+    const corruptJson = JSON.stringify({ ...shaped, reason: secret }, (key, value) =>
+      key === "origin" ? undefined : value,
+    );
+    insertRawHandoffJson(store.databasePath, shaped, corruptJson, "");
+    const eventsBefore = store.listEvents(source.id).length + store.listEvents(successor.id).length;
+
+    const byId = store.getCandidateHandoff(shaped.id);
+    const byRevision = store.getCandidateHandoffBySourceRevisionId(shaped.sourceCandidateRevisionId);
+    const bySuccessor = store.getCandidateHandoffBySuccessorTaskId(successor.id);
+    const bySource = store.listCandidateHandoffsBySourceTaskId(source.id);
+    const listed = store.listCandidateHandoffs();
+    assert.equal(byId.origin, undefined);
+    assert.equal(byRevision?.origin, undefined);
+    assert.equal(bySuccessor?.origin, undefined);
+    assert.equal(bySource.length, 1);
+    assert.equal(listed.length, 1);
+    assert.equal(store.getGoalByTaskId(successor.id), undefined);
+    const lineage = resolveEffectiveMilestoneLineage(store, {
+      goalId: "must-not-guess",
+      itemId: "must-not-guess",
+      taskId: source.id,
+      gate: "machine",
+      itemIndex: 0,
+      satisfied: false,
+      reasonCode: "waiting-machine",
+      reason: "waiting",
+      updatedAt: HANDOFF_TS,
+    });
+    assert.equal(lineage.effectiveTaskId, source.id);
+    assert.equal(lineage.handoff, undefined);
+
+    assert.throws(
+      () => projectCandidateHandoff(byId),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.equal(error.message, CANDIDATE_HANDOFF_CORRUPTION_ERROR);
+        assert.ok(!error.message.includes(secret));
+        assert.ok(!error.message.includes("must-not-guess"));
+        return true;
+      },
+    );
+
+    const invalidOrigin = currentHandoffRecord(
+      "invalid-origin-handoff",
+      { kind: "competition", competitionId: "comp-x", sourceCandidateId: "cand-x" },
+      queuedTask("invalid-src", HANDOFF_TS).id,
+      queuedTask("invalid-succ", HANDOFF_TS).id,
+    );
+    store.createTask(queuedTask("invalid-src", HANDOFF_TS));
+    store.createTask(queuedTask("invalid-succ", HANDOFF_TS));
+    insertRawHandoffJson(
+      store.databasePath,
+      invalidOrigin,
+      JSON.stringify({
+        ...invalidOrigin,
+        origin: { kind: "mystery" },
+        reason: secret,
+        competitionId: "comp-x",
+        sourceCandidateId: "cand-x",
+      }),
+      "comp-x",
+    );
+    const mystery = store.getCandidateHandoff(invalidOrigin.id);
+    assert.equal((mystery.origin as { kind?: string } | undefined)?.kind, "mystery");
+    assert.throws(
+      () => projectCandidateHandoff(mystery),
+      { name: "Error", message: CANDIDATE_HANDOFF_CORRUPTION_ERROR },
+    );
+
+    assert.equal(readRawHandoffJson(store.databasePath, shaped.id), corruptJson);
+    assert.equal(
+      store.listEvents(source.id).length + store.listEvents(successor.id).length,
+      eventsBefore,
+    );
+  } finally {
+    store.close();
+  }
+});
+
+test("createReviewResultRepairExecution is append-only and one-shot", async () => {
+  const { mkdir, readFile, writeFile } = await import("node:fs/promises");
+  const { captureCandidateRevision } = await import("../src/core/candidate-revision.js");
+  const { taskPaths } = await import("../src/core/config.js");
+  const { createReviewGraph, repairReviewResult, reconcileAllReviewGraphs } = await import("../src/core/review-graph.js");
+  const { SettingsService } = await import("../src/core/settings.js");
+  const { prepareWorkspace } = await import("../src/workspace/copy.js");
+  const { createPathPolicy } = await import("../src/workspace/path-policy.js");
+  const { writeWorkspacePatchReport } = await import("../src/workspace/patch.js");
+
+  const home = await mkdtemp(path.join(tmpdir(), "fl-store-repair-"));
+  const sourceDir = path.join(home, "source");
+  await mkdir(path.join(sourceDir, "src"), { recursive: true });
+  await writeFile(path.join(sourceDir, "readme.md"), "# hello\n\nOriginal.\n");
+  await writeFile(path.join(sourceDir, "src/app.ts"), "export const n = 1;\n");
+  const store = new StateStore(home);
+  const settings = new SettingsService(store);
+  const taskId = "candidate-store-repair";
+  const paths = taskPaths(home, taskId);
+  const spec = {
+    version: 1 as const,
+    name: "Store repair fixture",
+    project: sourceDir,
+    goal: "Ship a small change",
+    constraints: [],
+    provider: {
+      name: "deepseek" as const,
+      model: "deepseek-v4-flash",
+      keychainService: "forklight.deepseek.api-key",
+    },
+    runtime: {
+      name: "claude-code" as const,
+      executable: "claude",
+      effort: "low" as const,
+      maxBudgetUsd: 0.1,
+    },
+    workspace: { exclude: [".git", "node_modules"] },
+    worker: { allowEdits: true, allowedCommands: [], focusPaths: ["src", "readme.md"] },
+    acceptance: { commands: ["true"] },
+  };
+  await prepareWorkspace(spec, paths);
+  await mkdir(path.join(paths.workspace, "src"), { recursive: true });
+  await writeFile(path.join(paths.workspace, "readme.md"), "# hello\n\nChanged.\n");
+  await writeFile(path.join(paths.workspace, "src/app.ts"), "export const n = 2;\n");
+  await writeWorkspacePatchReport(paths, createPathPolicy(spec));
+  const now = new Date().toISOString();
+  store.createTask({
+    id: taskId,
+    name: spec.name,
+    status: "succeeded",
+    sourcePath: sourceDir,
+    taskFile: "forklight://test/store-repair",
+    spec,
+    paths,
+    sessionId: "session-store-repair",
+    currentAttemptId: "attempt-store-repair",
+    createdAt: now,
+    updatedAt: now,
+  });
+  store.createAttempt({
+    id: "attempt-store-repair",
+    taskId,
+    ordinal: 1,
+    status: "succeeded",
+    sessionId: "session-store-repair",
+    rawLogPath: path.join(paths.logs, "attempt-1.jsonl"),
+    startedAt: now,
+    finishedAt: now,
+    exitCode: 0,
+  });
+  const verEvent = store.addEvent(taskId, "attempt-store-repair", "verification.completed", "passed", {
+    passed: true,
+    behaviorPassed: true,
+    policyPassed: true,
+    sourceCompatible: true,
+    commands: [{ command: "true", exitCode: 0, stdout: "", stderr: "", durationMs: 1, timedOut: false }],
+    diffPath: paths.diff,
+    sourceUnchanged: true,
+  });
+  const revision = await captureCandidateRevision(
+    store,
+    store.getTask(taskId),
+    store.getAttempt("attempt-store-repair"),
+    verEvent.sequence,
+    true,
+    ["readme.md", "src/app.ts"],
+    2,
+    4,
+  );
+  const profiles = settings.get().workerProfiles.profiles;
+  const profileA = settings.get().workerProfiles.defaultProfileId;
+  const profileB = profiles.find((profile) => profile.id !== profileA)!.id;
+  const created = await createReviewGraph(store, settings.get(), {
+    candidateTaskId: taskId,
+    reviewerWorkerProfileIds: [profileA, profileB],
+    reason: "Store one-shot repair",
+    confirm: true,
+  });
+  const [usable, failed] = store.listReviewAssignments(created.graph.id);
+  const usableJson = JSON.stringify({
+    schemaVersion: 1,
+    reviewedRevisionId: revision.id,
+    proposedDisposition: "accept",
+    summary: "Usable first opinion for store repair fixture",
+    findings: [],
+  });
+  const overlimit = JSON.stringify({
+    schemaVersion: 1,
+    reviewedRevisionId: revision.id,
+    proposedDisposition: "accept",
+    summary: "s".repeat(507),
+    findings: [],
+  });
+  const finish = (reviewerTaskId: string, resultText: string) => {
+    const task = store.getTask(reviewerTaskId);
+    store.createAttempt({
+      id: `att-${reviewerTaskId}`,
+      taskId: reviewerTaskId,
+      ordinal: 1,
+      status: "succeeded",
+      sessionId: task.sessionId,
+      rawLogPath: path.join(task.paths.logs, "attempt-1.jsonl"),
+      startedAt: now,
+      finishedAt: now,
+      exitCode: 0,
+      resultText,
+    });
+    store.setTaskStatus(reviewerTaskId, "succeeded", {
+      finishedAt: now,
+      currentAttemptId: `att-${reviewerTaskId}`,
+    });
+  };
+  finish(usable!.reviewerTaskId, usableJson);
+  finish(failed!.reviewerTaskId, overlimit);
+  reconcileAllReviewGraphs(store);
+  const snapshot = store.getReviewAssignment(failed!.id);
+  const rawBefore = store.listAttempts(failed!.reviewerTaskId).at(-1)?.resultText;
+  assert.ok(snapshot.privatePacketPath);
+  const originalPacketBytes = await readFile(snapshot.privatePacketPath);
+  const repaired = await repairReviewResult(store, settings.get(), {
+    candidateTaskId: taskId,
+    assignmentId: failed!.id,
+    reason: "Persist one repair",
+    confirm: true,
+  });
+  const after = store.getReviewAssignment(failed!.id);
+  assert.equal(after.status, snapshot.status);
+  assert.equal(after.failureCode, snapshot.failureCode);
+  assert.equal(after.reviewerTaskId, snapshot.reviewerTaskId);
+  assert.equal(store.listAttempts(failed!.reviewerTaskId).at(-1)?.resultText, rawBefore);
+  assert.equal(after.resultRepair?.taskId, repaired.repairTaskId);
+  assert.equal(store.getReviewAssignmentByRepairTaskId(repaired.repairTaskId)?.id, failed!.id);
+  assert.equal(store.listReviewAssignments(created.graph.id).length, 2);
+  await assert.rejects(
+    () => repairReviewResult(store, settings.get(), {
+      candidateTaskId: taskId,
+      assignmentId: failed!.id,
+      reason: "Second persist must fail",
+      confirm: true,
+    }),
+    /already consumed|one-shot/i,
+  );
+  assert.equal(
+    store.listTasks().filter((task) => task.taskFile.includes("result-repair")).length,
+    1,
+  );
+  const copiedPacket = await readFile(
+    path.join(
+      path.dirname(store.databasePath),
+      "review-projects",
+      created.graph.id,
+      failed!.id,
+      "result-repair",
+      "REVIEW_PACKET.json",
+    ),
+  );
+  assert.deepEqual(copiedPacket, originalPacketBytes);
+  store.close();
+});
+
+// --- Complete Main usage samples (M4-A) ---
+
+function validMainUsageSample(overrides?: Record<string, unknown>): Record<string, unknown> {
+  return {
+    sampleId: "mus-001", forklightTaskId: "task-mu", comparisonId: "cmp-store-1",
+    role: "direct-main", taskClass: "edit-task", taskFamily: "forklight-storage-lifecycle",
+    directCodexProfileId: "profA", inputTokens: 3000, outputTokens: 500,
+    cacheReadInputTokens: 1000, cacheCreationInputTokens: 0, grossTokens: 4500,
+    source: "codex-terminal-result", runRef: "codex-run:store-a",
+    capturedAt: TS, schemaVersion: 1, ...overrides,
+  };
+}
+
+function createTaskWithFamily(
+  store: StateStore, id: string, taskClass: string, taskFamily: string, profileId: string, ts: string,
+): void {
+  const home = store.databasePath.replace(/\/forklight\.sqlite$/, "");
+  const spec = parseTaskSpec({
+    version: 1, name: id, project: "/tmp/source", goal: "Main usage store task",
+    taskClass, taskFamily, directCodexProfileId: profileId, acceptance: { commands: ["true"] },
+  }, "/tmp");
+  store.createTask(buildTaskRecord({
+    spec, taskFile: `/tmp/${id}.yaml`, home, id, sessionId: `session-${id}`, createdAt: ts,
+  }));
+}
+
+test("main usage sample save, identity, uniqueness, and rollback", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-mus-"));
+  const store = new StateStore(home);
+  createTaskWithFamily(store, "task-mu", "edit-task", "forklight-storage-lifecycle", "profA", TS);
+
+  store.saveMainUsageSample(validMainUsageSample());
+  const saved = store.getMainUsageSample("mus-001");
+  assert.equal(saved.role, "direct-main");
+  assert.equal(saved.grossTokens, 4500);
+  assert.ok(Object.isFrozen(saved));
+  assert.equal(store.countMainUsageSamples(), 1);
+
+  createTaskWithFamily(store, "task-other", "other-class", "other-family", "profB", TS);
+  assert.throws(
+    () => store.saveMainUsageSample(validMainUsageSample({
+      sampleId: "mus-002", forklightTaskId: "task-other", comparisonId: "cmp-store-1",
+      role: "delegated-main", taskClass: "other-class", taskFamily: "other-family",
+      directCodexProfileId: "profB", runRef: "codex-run:store-b",
+    })),
+    { name: "Error", message: "Sample identity does not match declared Task identity" },
+  );
+  assert.equal(store.countMainUsageSamples(), 1);
+  assert.deepEqual(store.getMainUsageSample("mus-001"), saved);
+
+  store.saveMainUsageSample(validMainUsageSample({
+    sampleId: "mus-002", role: "delegated-main", runRef: "codex-run:store-b",
+  }));
+  assert.equal(store.listMainUsageSamples("task-mu", "cmp-store-1").length, 2);
+
+  const original = JSON.stringify(store.getMainUsageSample("mus-001"));
+  assert.throws(
+    () => store.saveMainUsageSample(validMainUsageSample({
+      sampleId: "mus-001", role: "direct-main", runRef: "codex-run:store-c", comparisonId: "cmp-store-2",
+    })),
+    /UNIQUE/,
+  );
+  assert.throws(
+    () => store.saveMainUsageSample(validMainUsageSample({
+      sampleId: "mus-003", role: "direct-main", runRef: "codex-run:store-d",
+    })),
+    /UNIQUE/,
+  );
+  assert.throws(
+    () => store.saveMainUsageSample(validMainUsageSample({
+      sampleId: "mus-004", comparisonId: "cmp-store-2", role: "direct-main", runRef: "codex-run:store-a",
+    })),
+    /UNIQUE/,
+  );
+  assert.equal(JSON.stringify(store.getMainUsageSample("mus-001")), original);
+  assert.equal(store.countMainUsageSamples(), 2);
+
+  const noFamily = buildTaskRecord({
+    spec: parseTaskSpec({
+      version: 1, name: "no-fam", project: "/tmp", goal: "T",
+      taskClass: "edit-task", directCodexProfileId: "profA", acceptance: { commands: ["true"] },
+    }, "/tmp"),
+    taskFile: "/tmp/nf.yaml", home, id: "no-fam", sessionId: "s-nf", createdAt: TS,
+  });
+  store.createTask(noFamily);
+  assert.throws(
+    () => store.saveMainUsageSample(validMainUsageSample({
+      sampleId: "mus-nf", forklightTaskId: "no-fam", comparisonId: "cmp-nf", runRef: "codex-run:nf",
+    })),
+    { name: "Error", message: "Sample identity does not match declared Task identity" },
+  );
+  assert.throws(
+    () => store.saveMainUsageSample(validMainUsageSample({
+      sampleId: "mus-nt", forklightTaskId: "no-task", comparisonId: "cmp-nt", runRef: "codex-run:nt",
+    })),
+    { name: "Error", message: "Sample references unknown Task" },
+  );
+  assert.equal(store.countMainUsageSamples(), 2);
+  store.close();
+});
+
+// --- Main Token pair assessments (M4-B) ---
+
+function validMainPairAssessment(overrides?: Record<string, unknown>): Record<string, unknown> {
+  return {
+    assessmentId: "mpa-001",
+    forklightTaskId: "task-mu",
+    comparisonId: "cmp-pair-store",
+    taskClass: "edit-task",
+    taskFamily: "forklight-storage-lifecycle",
+    directCodexProfileId: "profA",
+    decision: "accepted",
+    sameScope: true,
+    sameAcceptance: true,
+    delegatedQualityNotLower: true,
+    directVerificationRef: { referenceId: "dvref1" },
+    delegatedIntegrationOperationId: "intop1",
+    directSampleId: "mus-001",
+    delegatedSampleId: "mus-002",
+    reviewer: "main-codex",
+    assessedAt: TS,
+    schemaVersion: 1,
+    ...overrides,
+  };
+}
+
+test("main pair assessment uniqueness and failed-insert rollback", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-mpa-"));
+  const store = new StateStore(home);
+  createTaskWithFamily(store, "task-mu", "edit-task", "forklight-storage-lifecycle", "profA", TS);
+  store.saveMainUsageSample(validMainUsageSample({
+    sampleId: "mus-001", comparisonId: "cmp-pair-store", role: "direct-main", runRef: "codex-run:pair-a",
+  }));
+  store.saveMainUsageSample(validMainUsageSample({
+    sampleId: "mus-002", comparisonId: "cmp-pair-store", role: "delegated-main", runRef: "codex-run:pair-b",
+  }));
+
+  store.saveMainPairAssessment(validMainPairAssessment());
+  const saved = store.getMainPairAssessment("mpa-001");
+  assert.equal(saved.decision, "accepted");
+  assert.ok(Object.isFrozen(saved));
+  assert.equal(store.countMainPairAssessments(), 1);
+  assert.equal(store.getMainPairAssessmentByComparison("cmp-pair-store")?.assessmentId, "mpa-001");
+
+  const original = JSON.stringify(store.getMainPairAssessment("mpa-001"));
+  assert.throws(
+    () => store.saveMainPairAssessment(validMainPairAssessment({
+      assessmentId: "mpa-002", comparisonId: "cmp-pair-store",
+      delegatedIntegrationOperationId: "intop2",
+    })),
+    /UNIQUE/,
+  );
+  assert.throws(
+    () => store.saveMainPairAssessment(validMainPairAssessment({
+      assessmentId: "mpa-001", comparisonId: "cmp-pair-other",
+      delegatedIntegrationOperationId: "intop3",
+    })),
+    /UNIQUE/,
+  );
+  assert.equal(JSON.stringify(store.getMainPairAssessment("mpa-001")), original);
+  assert.equal(store.countMainPairAssessments(), 1);
+
+  assert.throws(
+    () => store.saveMainPairAssessment(validMainPairAssessment({
+      assessmentId: "mpa-nt", forklightTaskId: "no-task", comparisonId: "cmp-pair-none",
+    })),
+    { name: "Error", message: "Assessment references unknown Task" },
+  );
+  assert.equal(store.countMainPairAssessments(), 1);
+  assert.equal(JSON.stringify(store.getMainPairAssessment("mpa-001")), original);
+
+  store.saveMainPairAssessment({
+    assessmentId: "mpa-rej",
+    forklightTaskId: "task-mu",
+    comparisonId: "cmp-pair-rej",
+    taskClass: "edit-task",
+    taskFamily: "forklight-storage-lifecycle",
+    directCodexProfileId: "profA",
+    decision: "rejected",
+    rejectionReason: "scope-mismatch",
+    reviewer: "main-codex",
+    assessedAt: TS,
+    schemaVersion: 1,
+  });
+  const rejected = store.getMainPairAssessmentByComparison("cmp-pair-rej");
+  assert.equal(rejected?.decision, "rejected");
+  assert.equal(rejected?.rejectionReason, "scope-mismatch");
+  assert.equal("sameScope" in (rejected ?? {}), false);
+  assert.equal(store.countMainPairAssessments(), 2);
+  store.close();
+});
+
+test("legacy pair evidence includes matching publication-only records", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-mpa-pub-"));
+  const store = new StateStore(home);
+  createTaskWithFamily(store, "task-pub", "edit-task", "forklight-storage-lifecycle", "profA", TS);
+  createTaskWithFamily(store, "task-other", "edit-task", "forklight-storage-lifecycle", "profB", TS);
+  assert.equal(store.hasLegacyMainPairEvidence("task-pub"), false);
+  assert.equal(store.hasLegacyMainPairEvidence("task-other"), false);
+
+  store.saveDirectCodexProfilePublication(profilePublicationInput({
+    taskClass: "edit-task", profileId: "profA", version: 1,
+  }));
+  assert.equal(store.hasLegacyMainPairEvidence("task-pub"), true);
+  assert.equal(store.hasLegacyMainPairEvidence("task-other"), false);
+  assert.equal(store.countMainUsageSamples(), 0);
+  store.close();
+});
+
+test("online backup copies Store integrity without inventing a second check", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-store-online-backup-"));
+  const store = new StateStore(home);
+  store.createTask(queuedTask("backup-task", "2026-08-19T00:00:00.000Z"));
+  const live = store.checkStoreIntegrity();
+  assert.equal(live.quickCheck, "ok");
+  assert.equal(live.foreignKeyViolationCount, 0);
+  const sourcePath = store.databasePath;
+  store.close();
+
+  const dest = path.join(home, "online-copy.sqlite");
+  await backupStoreDatabase(sourcePath, dest);
+  const copied = checkDatabaseFileIntegrity(dest);
+  assert.deepEqual(copied, live);
+
+  const copiedDb = new DatabaseSync(dest, { readOnly: true });
+  try {
+    const row = copiedDb.prepare("SELECT id FROM tasks WHERE id = ?").get("backup-task") as
+      | { id: string }
+      | undefined;
+    assert.equal(row?.id, "backup-task");
+  } finally {
+    copiedDb.close();
+  }
+
+  assert.throws(
+    () => checkDatabaseFileIntegrity(path.join(home, "missing.sqlite")),
+    { message: STORE_UNREADABLE_ERROR },
+  );
 });

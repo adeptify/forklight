@@ -1,0 +1,102 @@
+version: 2
+name: M2-A audit public and legacy compatibility
+project: /Users/yijunwang/code/forklight
+taskClass: m2-grok-46-compatibility-audit
+taskFamily: forklight-runtime-recovery
+workerProfileId: local-grok-builder
+provider:
+  name: xai
+  model: grok-4.6
+  keychainService: forklight.xai.api-key
+runtime:
+  name: grok-build
+  executable: grok
+  effort: xhigh
+  maxBudgetUsd: null
+contract:
+  outcome: Independently audit that Task preview, health/readiness, stored legacy records, and Grok start/resume evidence expose one compatible execution story after M2-A Integration without modifying source.
+  presentation:
+    summary: 从公开读面与旧记录兼容性再审一遍执行模式，不用更多补丁制造一致性。
+    language: zh-CN
+  context:
+    - M2-A implementation and post-Integration source audit must already be machine-green.
+    - This is a second bounded read-only angle, not another implementation or Judge vote.
+  inScope:
+    - Inspect preview, readiness/health, legacy fallback, and content-free Grok event projections.
+    - Check focused tests prove supported and unsupported paths rather than only successful parsing.
+  outOfScope:
+    - No edits, new tests, Hub, Provider probes, retries, settings mutation, Integration, commit, or push.
+  executionSteps:
+    - Read the public projection and legacy compatibility paths.
+    - Trace one new Grok Task, one omitted legacy record, and one forced unsupported mode through focused tests.
+    - Report the first concrete mismatch or a bounded pass.
+  deliverables:
+    - A read-only compatibility audit result.
+  modules:
+    - name: Public and legacy compatibility audit
+      responsibility: Check that all read surfaces preserve one canonical execution truth across new and legacy records.
+      consumes:
+        - Preview, readiness, health, Task parsing, adapter events, and focused regressions.
+      produces:
+        - Bounded compatibility evidence or a named acceptance gap.
+      boundaries:
+        - No new resolver, duplicate validation, or source mutation.
+  callChain:
+    - Goal admits this Task after the integrated-source audit succeeds.
+    - Grok reads the isolated updated source without edits.
+    - ForkLight runs preview, readiness, health, and runtime tests.
+    - Machine evidence unlocks the final M2-A scope audit.
+  scenarios:
+    - name: New and legacy records
+      given: New Grok and omitted legacy Task shapes.
+      when: Public projections resolve them.
+      then: New Grok says persistent-session while omitted legacy says single-run.
+    - name: Unsupported forced mode
+      given: A Runtime without the requested capability.
+      when: Admission and readiness run.
+      then: They fail closed and do not silently fall back.
+  risks:
+    - Rechecking unchanged evidence can become ceremony; this Task stops after the named focused surfaces and adds no tests or code.
+  changeBudget:
+    maxFiles: 1
+    maxDiffLines: 20
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude: [.git, node_modules, dist, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: false
+  allowedCommands: []
+  focusPaths:
+    - src/core/task-preview.ts
+    - src/core/worker-readiness.ts
+    - src/cli/health-readiness.ts
+    - src/workers/grok.ts
+    - tests/task-preview.test.ts
+    - tests/worker-readiness.test.ts
+    - tests/cli-health.test.ts
+acceptance:
+  criteria:
+    - Preview, readiness, health, and Grok evidence agree for new, legacy, and unsupported execution paths.
+    - No source file changes.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/task-preview.test.ts tests/worker-readiness.test.ts tests/cli-health.test.ts tests/worker-runtime.test.ts
+    - git diff --check

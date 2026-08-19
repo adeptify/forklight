@@ -1,0 +1,136 @@
+version: 2
+name: M3-A make routing advice executable and readiness-aware
+project: /Users/yijunwang/code/forklight
+taskClass: m3-executable-routing-advice
+taskFamily: forklight-routing-decision
+workerProfileId: grok-4-6-xhigh
+executionPreference: auto
+routingDecision:
+  taskFamily: forklight-routing-decision
+  shortlist:
+    - provider: xai
+      model: grok-4.6
+      runtime: grok-build
+      effort: xhigh
+      workerProfileId: grok-4-6-xhigh
+    - provider: deepseek
+      model: deepseek-v4-pro[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: default
+  selectedWorker:
+    provider: xai
+    model: grok-4.6
+    runtime: grok-build
+    effort: xhigh
+    workerProfileId: grok-4-6-xhigh
+  selectedBecause:
+    code: user-specified
+    note: Natural history cannot determine a winner for this new exact class and family. Main follows the user's Grok-first preference after a current Grok 4.6 Xhigh smoke, without claiming historical superiority.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+reviewRequirement:
+  requiredJudges: 2
+  reason: Routing advice can select the wrong Worker or overstate historical confidence, so two independent views must inspect evidence truth and current readiness separation.
+contract:
+  outcome: Return one canonical read-only routing answer that either names a complete currently executable Runtime/model/effort/Profile/execution recommendation with confidence and readiness, or gives a stable cannot-determine or historical-best-not-launchable result without silently switching Workers.
+  presentation: { summary: 路由建议一次说清历史证据、完整执行身份和当前能否启动；证据不够就明确无法判断。, language: zh-CN }
+  context:
+    - Read specs/m3-a-executable-routing-advice/spec.md completely before editing; it is the unique accepted Work Item specification.
+    - Inspect only the eight focus paths plus existing read-only execution-mode and Worker-readiness definitions needed to understand inputs. Do not scan unrelated repository history or Hub/UI.
+    - Existing exact/family scoring, failure attribution, evidence-ready subsets and Competition intent semantics pass their focused baseline; preserve them.
+    - Current natural evidence recommends DeepSeek Pro for forklight-storage-lifecycle but returns no recommendation for worker-runtime, hub-product-comprehension and an unseen family. Do not create Tasks or samples to change those results.
+    - Grok 4.6 Xhigh passed a current direct smoke. This Task records scope none and user-specified Grok selection honestly; do not claim the routing system recommended Grok.
+    - ForkLight serves one local developer. Add no lock, lease, checksum, advisory hash, handshake, migration or distributed coordination.
+  inScope:
+    - Extend the canonical routing response with a stable overall result and complete Profile-backed executable identity.
+    - Resolve current execution mode and bounded readiness for saved Profile candidates using existing authoritative logic.
+    - Keep historical recommendation and current launchability separate, including a historical winner that is not launchable.
+    - Render the same truth through CLI JSON/human output, Daemon and MCP; update stale routing CLI help.
+    - Add focused regression coverage for recommended, cannot-determine, non-launchable winner, legacy candidates, privacy and no automatic Competition.
+  outOfScope:
+    - Task routingDecision schema or admission, durable manual override, mode-aware historical grouping, Competition candidate cloning, Judge policy, Review Graph, Store, Provider Runtime, Integration, storage lifecycle, Hub/UI, commit, push or reset.
+    - Provider probes, automatic Worker switch, Competition, retry, fallback, synthetic benchmark or global model ranking.
+  executionSteps:
+    - Trace model routing response construction, Profile-bound coordinator input, existing execution/readiness resolvers and CLI/MCP projections.
+    - Define the smallest backward-compatible canonical result that keeps evidence score and readiness independent.
+    - Implement only inside the eight focus paths and add focused response/surface tests.
+    - Run every approved command, self-review the exact diff and stop rather than widening into M3-B or M3-C.
+  deliverables:
+    - One bounded Candidate in the eight allowed paths.
+    - Stable recommended, cannot-determine and historical-best-not-launchable output with complete Profile-backed execution facts.
+    - Focused proof of legacy compatibility, privacy, historical/readiness separation and Competition non-automation.
+  modules:
+    - name: Executable advisory core
+      responsibility: Preserve evidence scoring while expressing one stable overall routing result and full recommended Worker identity.
+      consumes: [Exact/family routing evidence, resolved Profile candidates, routing policy, explicit Competition intent.]
+      produces: [Historical recommendation or cannot-determine facts with bounded reasons and confidence.]
+      boundaries: [No current-readiness substitution, automatic Worker choice, Store write or Task creation.]
+    - name: Current execution and readiness projection
+      responsibility: Attach the saved Profile's resolved execution mode and privacy-safe current launch status without changing historical scores.
+      consumes: [Worker Profile, Runtime capabilities, Provider/readiness truth, historical advisory.]
+      produces: [Execution mode, readiness state, canLaunch and next action for Profile-bound candidates and recommendation.]
+      boundaries: [No Provider probe, endpoint, credential, raw diagnostic or fabricated legacy fact.]
+    - name: CLI and MCP explanation
+      responsibility: Render the canonical result consistently for humans and structured clients.
+      consumes: [Canonical routing advisory.]
+      produces: [Matching CLI JSON/human and MCP structured output.]
+      boundaries: [No client-side rescoring, Hub/UI or automatic execution.]
+  callChain:
+    - Main supplies exact taskClass, optional explicit family and saved Worker Profiles.
+    - Statistics and model routing produce historical recommendation or cannot-determine without mutation.
+    - Coordinator resolves current Profile execution/readiness and keeps it separate from historical scores.
+    - Daemon returns one canonical advisory; CLI and MCP explain the same result; Main still decides.
+  scenarios:
+    - name: Recommended Profile is launchable
+      given: Comparable history has a clear winner and the saved Profile can currently launch.
+      when: Main requests routing advice.
+      then: The response names full provider/model/Runtime/effort/Profile/execution identity, confidence, readiness and executable next action.
+    - name: Historical winner is unavailable
+      given: Comparable history has a clear winner but current readiness cannot launch it.
+      when: Advice is returned.
+      then: Historical evidence remains visible, overall result says historical-best-not-launchable, and no second candidate is silently substituted.
+    - name: Evidence cannot decide
+      given: Samples, distinct identities, active factors or score gap are insufficient.
+      when: Main requests advice with Competition intent none.
+      then: Result is cannot-determine with stable reasons and Competition remains false.
+    - name: Legacy candidates remain honest
+      given: Caller supplies explicit provider/model candidates without saved Profile identity.
+      when: Advice is calculated.
+      then: Existing scoring works and no Profile, execution mode or readiness is invented.
+  risks:
+    - Readiness could accidentally rewrite the historical winner; tests must keep the two facts independent.
+    - A richer response could leak Provider diagnostics or credentials; reuse the bounded readiness projection only.
+    - Adding fields can drift CLI and MCP; one canonical response and cross-surface assertions are required.
+  changeBudget: { maxFiles: 8, maxDiffLines: 1200 }
+advancedPolicy: { maxDurationMs: null, observedTokenCeiling: null, noProgressTimeoutMs: null, workerStopGraceMs: 60000, fileLimit: null, fileLimitMode: warn, changedLineLimit: null, changedLineLimitMode: warn, baseMaxAttempts: 1, maxExtraAttempts: 0, maxMainCorrections: 1, maxMainReverifications: 1, maxWorkerValidationRepairs: 1, maxConcurrency: 1, completionMode: warn, changeBudgetMode: warn, maxAdaptationRounds: 0 }
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test, .forklight-boundary-capture, .forklight-receipt-retry, plans]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/model-routing.ts
+    - src/daemon/coordinator.ts
+    - src/cli.ts
+    - src/cli/routing-output.ts
+    - src/mcp/server.ts
+    - tests/model-routing.test.ts
+    - tests/daemon-cli.test.ts
+    - tests/mcp.test.ts
+acceptance:
+  criteria:
+    - Profile-backed recommended output includes complete Runtime/model/effort/Profile/execution/readiness truth; historical score never changes because of readiness.
+    - Cannot-determine and historical-best-not-launchable are stable, privacy-safe and never start or substitute work.
+    - Legacy candidate behavior, exact/family evidence, failure isolation and explicit Competition intent remain compatible.
+    - Candidate changes only the eight focus paths and contains no Hub/UI, Store, Task schema or Provider Runtime change.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/model-routing.test.ts tests/worker-readiness.test.ts tests/daemon-cli.test.ts tests/mcp.test.ts
+    - git diff --check

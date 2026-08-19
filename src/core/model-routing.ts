@@ -7,7 +7,17 @@ import {
   type FailureCategory,
   type RoutingEvidence,
 } from "./statistics.js";
-import type { FrozenWorkerIdentity } from "./types.js";
+import type {
+  ExecutionPreference,
+  FrozenWorkerIdentity,
+  ResolvedExecutionMode,
+} from "./types.js";
+import type {
+  WorkerReadinessNextAction,
+  WorkerReadinessReason,
+  WorkerReadinessState,
+} from "./worker-readiness.js";
+import type { StrategyPolicyProjection } from "./strategy-advice.js";
 
 export type FailureImpact = "model-quality" | "non-model" | "ambiguous";
 
@@ -172,6 +182,14 @@ export interface RoutingCandidateResult {
    *  candidates omit these; never fabricated. */
   workerProfileId?: string;
   workerLabel?: string;
+  /** Current Profile execution/readiness. Omitted for legacy candidates and
+   *  before the coordinator attaches a saved-Profile projection. */
+  executionPreference?: ExecutionPreference;
+  resolvedExecutionMode?: ResolvedExecutionMode;
+  readinessState?: WorkerReadinessState;
+  readinessReason?: WorkerReadinessReason;
+  canLaunch?: boolean;
+  nextAction?: WorkerReadinessNextAction;
   /** Historical failure never permanently removes a candidate. */
   eligible: true;
   /** Legacy exact-class evidence. Always present; may be zero-history for
@@ -213,11 +231,50 @@ export interface RoutingRecommendation {
    *  never reattached by array index. Legacy recommendations omit these. */
   workerProfileId?: string;
   workerLabel?: string;
+  /** Runtime/effort from the winning candidate identity when supplied.
+   *  Legacy provider/model-only recommendations omit these. */
+  runtime?: string;
+  effort?: string;
+  /** Current Profile execution/readiness. Present only after a saved Profile
+   *  is bound and the coordinator attaches the bounded projection. */
+  executionPreference?: ExecutionPreference;
+  resolvedExecutionMode?: ResolvedExecutionMode;
+  readinessState?: WorkerReadinessState;
+  readinessReason?: WorkerReadinessReason;
+  canLaunch?: boolean;
+  nextAction?: WorkerReadinessNextAction;
 }
 
 /** Knowledge state: recommendation when evidence supports a clear best;
  *  unknown when evidence cannot separate candidates. */
 export type RoutingKnowledge = "recommendation" | "unknown";
+
+/** Executable-facing result. Historical `knowledge` stays independent. */
+export type RoutingOverallResult =
+  | "recommended"
+  | "cannot-determine"
+  | "historical-best-not-launchable";
+
+/** Stable machine-readable reasons when the overall result is cannot-determine. */
+export type RoutingCannotDetermineReason =
+  | "insufficient-relevant-samples"
+  | "single-comparable-identity"
+  | "no-active-factors"
+  | "score-gap-too-small"
+  | "positive-factor-unavailable"
+  | "profile-identity-unavailable";
+
+/** Privacy-safe current execution/readiness for one saved Profile.
+ *  Never includes endpoints, credentials, paths, prompts, or diagnostics. */
+export interface RoutingReadinessProjection {
+  workerProfileId: string;
+  executionPreference: ExecutionPreference;
+  resolvedExecutionMode: ResolvedExecutionMode;
+  state: WorkerReadinessState;
+  reason: WorkerReadinessReason;
+  canLaunch: boolean;
+  nextAction: WorkerReadinessNextAction;
+}
 
 /** Competition advice derived from intent + triggers + settings, not uncertainty. */
 export interface CompetitionAdvisory {
@@ -241,6 +298,11 @@ export interface RoutingAdvisoryResponse {
   evidenceScope: EvidenceScope;
   /** Knowledge state: recommendation or unknown. */
   knowledge: RoutingKnowledge;
+  /** Executable-facing result derived from historical knowledge plus current
+   *  Profile readiness. Never substitutes a runner-up. */
+  overallResult: RoutingOverallResult;
+  /** Present when overallResult is cannot-determine; otherwise empty. */
+  cannotDetermineReasons: RoutingCannotDetermineReason[];
   candidates: RoutingCandidateResult[];
   recommendation?: RoutingRecommendation;
   /** Competition advice separated from evidence uncertainty. */
@@ -269,6 +331,10 @@ export interface RoutingAdvisoryResponse {
    *  `"all-candidates"` when every requested candidate was compared;
    *  `"evidence-ready-subset"` when the recommendation only covers the cohort. */
   recommendationCoverage: "all-candidates" | "evidence-ready-subset" | null;
+  /** Additive mode-aware strategy and explicit-policy explanation.
+   *  Present on the canonical Daemon/CLI/MCP surface; omitted by legacy
+   *  provideRoutingAdvice callers that only score Worker identities. */
+  strategyPolicy?: StrategyPolicyProjection;
 }
 
 interface FactorPlan {
@@ -756,6 +822,137 @@ function evaluateCompetitionAdvice(
   };
 }
 
+const CANNOT_DETERMINE_REASON_ORDER: readonly RoutingCannotDetermineReason[] = [
+  "insufficient-relevant-samples",
+  "single-comparable-identity",
+  "no-active-factors",
+  "score-gap-too-small",
+  "positive-factor-unavailable",
+  "profile-identity-unavailable",
+];
+
+function uniqueOrderedReasons(
+  reasons: Iterable<RoutingCannotDetermineReason>,
+): RoutingCannotDetermineReason[] {
+  const present = new Set(reasons);
+  return CANNOT_DETERMINE_REASON_ORDER.filter((reason) => present.has(reason));
+}
+
+function readyIdentityCount(
+  scopeEvidence: RoutingEvidence[],
+  candidates: Array<{ provider: string; model: string; runtime?: string; effort?: string }>,
+  minSamples: number,
+): number {
+  const identities = new Set<string>();
+  for (let i = 0; i < scopeEvidence.length; i++) {
+    if (scopeEvidence[i]!.relevantSampleCount >= minSamples) {
+      identities.add(routingIdentityKey(candidates[i]!));
+    }
+  }
+  return identities.size;
+}
+
+function stripAttachedReadiness<T extends RoutingCandidateResult | RoutingRecommendation>(
+  value: T,
+): T {
+  const {
+    executionPreference: _executionPreference,
+    resolvedExecutionMode: _resolvedExecutionMode,
+    readinessState: _readinessState,
+    readinessReason: _readinessReason,
+    canLaunch: _canLaunch,
+    nextAction: _nextAction,
+    ...rest
+  } = value;
+  return rest as T;
+}
+
+function withReadiness<T extends RoutingCandidateResult | RoutingRecommendation>(
+  value: T,
+  readiness: RoutingReadinessProjection,
+): T {
+  return {
+    ...value,
+    executionPreference: readiness.executionPreference,
+    resolvedExecutionMode: readiness.resolvedExecutionMode,
+    readinessState: readiness.state,
+    readinessReason: readiness.reason,
+    canLaunch: readiness.canLaunch,
+    nextAction: readiness.nextAction,
+  };
+}
+
+function finalizeOverallResult(
+  knowledge: RoutingKnowledge,
+  recommendation: RoutingRecommendation | undefined,
+  evidenceReasons: readonly RoutingCannotDetermineReason[],
+): {
+  overallResult: RoutingOverallResult;
+  cannotDetermineReasons: RoutingCannotDetermineReason[];
+} {
+  if (knowledge === "unknown" || recommendation === undefined) {
+    return {
+      overallResult: "cannot-determine",
+      cannotDetermineReasons: uniqueOrderedReasons(evidenceReasons),
+    };
+  }
+  if (recommendation.workerProfileId !== undefined && recommendation.canLaunch === true) {
+    return { overallResult: "recommended", cannotDetermineReasons: [] };
+  }
+  if (recommendation.workerProfileId !== undefined && recommendation.canLaunch === false) {
+    return {
+      overallResult: "historical-best-not-launchable",
+      cannotDetermineReasons: [],
+    };
+  }
+  const reasons = [...evidenceReasons];
+  if (recommendation.workerProfileId === undefined) {
+    reasons.push("profile-identity-unavailable");
+  }
+  return {
+    overallResult: "cannot-determine",
+    cannotDetermineReasons: uniqueOrderedReasons(reasons),
+  };
+}
+
+/** Attach current Profile execution/readiness without rescoring or substituting
+ *  a runner-up. Legacy candidates stay free of invented execution facts. */
+export function attachExecutableRoutingAdvice(
+  advisory: RoutingAdvisoryResponse,
+  readinessByProfileId: ReadonlyMap<string, RoutingReadinessProjection> = new Map(),
+): RoutingAdvisoryResponse {
+  const candidates = advisory.candidates.map((candidate) => {
+    const historical = stripAttachedReadiness(candidate);
+    const profileId = historical.workerProfileId;
+    if (profileId === undefined) return historical;
+    const readiness = readinessByProfileId.get(profileId);
+    return readiness === undefined ? historical : withReadiness(historical, readiness);
+  });
+
+  let recommendation = advisory.recommendation === undefined
+    ? undefined
+    : stripAttachedReadiness(advisory.recommendation);
+  if (recommendation !== undefined && recommendation.workerProfileId !== undefined) {
+    const readiness = readinessByProfileId.get(recommendation.workerProfileId);
+    if (readiness !== undefined) {
+      recommendation = withReadiness(recommendation, readiness);
+    }
+  }
+
+  const finalized = finalizeOverallResult(
+    advisory.knowledge,
+    recommendation,
+    advisory.cannotDetermineReasons,
+  );
+  const { recommendation: _ignored, ...rest } = advisory;
+  return {
+    ...rest,
+    ...finalized,
+    candidates,
+    ...(recommendation === undefined ? {} : { recommendation }),
+  };
+}
+
 export function provideRoutingAdvice(input: ProvideRoutingAdviceInput): RoutingAdvisoryResponse {
   if (input.candidates.length < 2) {
     throw new Error("Routing advice requires at least two provider/model candidates");
@@ -978,6 +1175,8 @@ export function provideRoutingAdvice(input: ProvideRoutingAdviceInput): RoutingA
         confidence: Math.max(0, Math.min(1, gapRatio)),
         reasoning: `clear-score-gap:${gapRatio.toFixed(4)};relevant-samples:${top.comparisonEvidence.relevantSampleCount};equivalent-profiles:${topIdentityProfiles.length}`,
         coverage: recommendationCoverage,
+        ...(top.runtime !== undefined ? { runtime: top.runtime } : {}),
+        ...(top.effort !== undefined ? { effort: top.effort } : {}),
         // Recommend a concrete Profile only when the evidence distinguishes a
         // single Profile for this executable identity. If multiple Profiles
         // share it, recommend the identity without arbitrarily naming one.
@@ -1008,11 +1207,42 @@ export function provideRoutingAdvice(input: ProvideRoutingAdviceInput): RoutingA
     competitionTriggersEnabled: [...input.policy.competitionTriggersEnabled],
   };
 
-  return {
+  const evidenceReasons: RoutingCannotDetermineReason[] = [];
+  if (knowledge === "unknown") {
+    const exactReady = readyIdentityCount(
+      evidence, input.candidates, input.policy.minRelevantSamples,
+    );
+    const familyReady = familyEvidence === undefined
+      ? 0
+      : readyIdentityCount(
+        familyEvidence, input.candidates, input.policy.familyMinRelevantSamples,
+      );
+    if (evidenceScope === "none") {
+      if (exactReady === 1 || (exactReady < 2 && familyReady === 1)) {
+        evidenceReasons.push("single-comparable-identity");
+      } else {
+        evidenceReasons.push("insufficient-relevant-samples");
+      }
+    }
+    if (activeWeight === 0 && evidenceScope !== "none") {
+      evidenceReasons.push("no-active-factors");
+    }
+    if (insufficientGap && evidenceScope !== "none") {
+      evidenceReasons.push("score-gap-too-small");
+    }
+    if (input.policy.missingEvidenceMode === "strict" && positiveUnavailable
+      && evidenceScope !== "none") {
+      evidenceReasons.push("positive-factor-unavailable");
+    }
+  }
+
+  return attachExecutableRoutingAdvice({
     taskClass: input.taskClass,
     ...(input.taskFamily !== undefined ? { taskFamily: input.taskFamily } : {}),
     evidenceScope,
     knowledge,
+    overallResult: "cannot-determine",
+    cannotDetermineReasons: uniqueOrderedReasons(evidenceReasons),
     candidates: results,
     ...(recommendation === undefined ? {} : { recommendation }),
     competition,
@@ -1025,5 +1255,5 @@ export function provideRoutingAdvice(input: ProvideRoutingAdviceInput): RoutingA
     totalCandidateCount: evidence.length,
     excludedCandidateCount: evidence.length - cohortIndices.size,
     recommendationCoverage: canonicalRecommendationCoverage,
-  };
+  });
 }

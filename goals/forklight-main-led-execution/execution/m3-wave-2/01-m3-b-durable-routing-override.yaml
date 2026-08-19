@@ -1,0 +1,153 @@
+version: 2
+name: M3-B freeze advisory relationship and manual override truth
+project: /Users/yijunwang/code/forklight
+taskClass: m3-durable-routing-override
+taskFamily: forklight-routing-decision
+workerProfileId: grok-4-6-xhigh
+executionPreference: auto
+routingDecision:
+  taskFamily: forklight-routing-decision
+  shortlist:
+    - provider: xai
+      model: grok-4.6
+      runtime: grok-build
+      effort: xhigh
+      workerProfileId: grok-4-6-xhigh
+    - provider: deepseek
+      model: deepseek-v4-pro[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: default
+    - provider: openai
+      model: gpt-5.6-luna
+      runtime: codex-cli
+      effort: max
+      workerProfileId: codex-luna-max
+  selectedWorker:
+    provider: xai
+    model: grok-4.6
+    runtime: grok-build
+    effort: xhigh
+    workerProfileId: grok-4-6-xhigh
+  selectedBecause:
+    code: user-specified
+    note: Current exact and family history cannot determine a winner. Main follows the user's explicit Grok 4.6 Xhigh preference without claiming a recommendation.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+reviewRequirement:
+  requiredJudges: 2
+  reason: Durable routing choice changes Task admission and public decision truth, so two independent views must inspect compatibility, coherence, and privacy before Integration.
+contract:
+  outcome: Before execution, one Task durably records whether Main followed a routing recommendation, manually overrode it, or selected after ForkLight could not determine; preview, CLI, Daemon and MCP later explain the frozen relationship without rescoring history or exposing Main's private note.
+  presentation: { summary: 把“系统建议了什么、Main最后为何这样选”冻结进同一Task决定；以后查看时无需重算历史，也不会泄露私密备注。, language: zh-CN }
+  context:
+    - Read specs/m3-b-durable-routing-override/spec.md completely before editing; it is the unique accepted Work Item specification.
+    - M3-A exact Revision c1538142-703e-4994-9869-745cde9739da is integrated and activated. Reuse its overallResult, recommendation identity, confidence, resolved execution mode, readiness state, canLaunch, nextAction, and cannotDetermineReasons vocabulary rather than inventing a parallel advisory type.
+    - Current routing for this exact class and family over Grok 4.6 Xhigh, DeepSeek Pro, and Codex Luna Max is cannot-determine with insufficient-relevant-samples. All three are launchable; Competition intent is none. Main selected Grok only because the user explicitly prefers it.
+    - Existing RoutingDecisionSnapshot, selected Worker binding, Task preview routing explanation, CLI validation, Daemon validation/submission, and MCP input schemas are the only call chain in scope.
+    - ForkLight serves one local developer. The Task file and current Store state are sufficient; add no checksum, content hash, lock, lease, version handshake, migration, backfill, or distributed-consistency layer.
+  inScope:
+    - Extend the existing RoutingDecisionSnapshot backward-compatibly with one frozen advisory result and one closed selection relationship.
+    - Represent followed-recommendation, manual-override, and Main selection after cannot-determine with coherent optional recommended identity and confidence.
+    - Freeze only bounded selected execution/readiness facts required by the accepted Spec, using M3-A vocabulary and no Provider diagnostics.
+    - Reject contradictory new shapes before persistence while keeping all legacy Task files and Store records readable without invented fields.
+    - Extend the existing privacy-safe routing explanation and the current Task validation/preview CLI, Daemon, and MCP surfaces consistently.
+    - Add focused tests for the three valid modes, invalid coherence, legacy compatibility, selected Task identity binding, cross-surface agreement, and privacy.
+  outOfScope:
+    - New Store entity/table, migration, rewrite, backfill, advisory hash, checksum, lock, lease, handshake, history rescore, Provider probe, Worker switch, automatic submission, Competition, Judge creation, retry, correction, Integration, execution-strategy learning, Hub/UI, commit, push, or reset.
+    - Changes outside the fourteen focus paths or changes to historical scoring/readiness computation delivered by M3-A.
+  executionSteps:
+    - Trace the existing RoutingDecisionSnapshot parser, post-resolution identity checks, safe explanation projection, Task preview, Daemon validation/submit, CLI render, and MCP schema.
+    - Design the smallest optional nested snapshot that reuses M3-A closed result vocabulary and preserves byte-compatible legacy reads.
+    - Implement structural and semantic coherence validation before persistence, including shortlist membership and selected Task identity.
+    - Project only closed public facts; explicitly prove selectedBecause.note, settingsDigest, and raw sample-map keys stay absent.
+    - Run all accepted commands, inspect the exact diff against this Spec, and stop rather than entering M3-C or adding coordination machinery.
+  deliverables:
+    - One Candidate limited to the fourteen focus paths.
+    - Backward-compatible durable followed, override, and cannot-determine selection truth inside RoutingDecisionSnapshot.
+    - One canonical privacy-safe explanation shared by Task preview, CLI, Daemon, and MCP.
+    - Focused valid/invalid/legacy/privacy evidence and a clear handoff of any bounded compatibility risk.
+  modules:
+    - name: Durable routing-decision schema
+      responsibility: Freeze advisory outcome, optional recommendation/confidence, final selection relationship, and bounded execution/readiness truth inside the existing Task snapshot.
+      consumes: [M3-A advisory result, Main-selected shortlisted Worker, resolved Task identity.]
+      produces: [One immutable backward-compatible RoutingDecisionSnapshot.]
+      boundaries: [No second entity, Store migration, rescore, hash, lock, or handshake.]
+    - name: Admission coherence
+      responsibility: Reject contradictory new shapes and preserve existing selected Worker to Task identity authority before persistence.
+      consumes: [Parsed routing decision, shortlist, resolved Task provider/model/Runtime/effort/Profile.]
+      produces: [Accepted coherent Task or privacy-safe structural error.]
+      boundaries: [No mutable-history validation, Provider call, fallback, or Worker substitution.]
+    - name: Safe decision explanation
+      responsibility: Explain frozen advisory and Main relationship through existing preview and clients without exposing private fields.
+      consumes: [Parsed Task routing decision and resolved public Worker label.]
+      produces: [Matching CLI, Daemon, and MCP safe projection.]
+      boundaries: [No selectedBecause.note, settingsDigest, raw sample keys, endpoints, credentials, paths, or diagnostics.]
+  callChain:
+    - Main reads the M3-A advisory and writes one routingDecision into the Task Contract.
+    - Task parsing validates optional new fields and existing final Worker identity before any Task persistence.
+    - Task preview derives one detached frozen safe explanation from the stored snapshot without rescoring.
+    - Daemon validation/submit, CLI and MCP carry or render the same canonical facts; the Worker then runs under the already-resolved Task identity.
+  scenarios:
+    - name: Follow a recommendation
+      given: The advisory is recommended with one shortlisted Worker and confidence.
+      when: Main selects that same Worker and records followed-recommendation.
+      then: The Task stores and safely displays the same recommendation, selection, confidence, execution mode, and readiness.
+    - name: Override a recommendation
+      given: The advisory recommends one shortlisted Worker.
+      when: Main selects a different shortlisted Worker with manual-override and a bounded private reason.
+      then: Both recommendation and final selection remain durable, confidence is preserved, and the private note is never projected.
+    - name: Select after insufficient evidence
+      given: The advisory is cannot-determine with bounded reasons.
+      when: Main selects one shortlisted Worker.
+      then: The Task records Main selection after cannot-determine without recommendation or confidence and without implying model superiority.
+    - name: Contradictory shape
+      given: A recommendation lies outside the shortlist, an override selects the recommendation, confidence lacks a recommendation, or final Task identity differs.
+      when: The Task is validated or submitted.
+      then: Admission fails before Task, event, Attempt, Workspace, or Provider mutation.
+    - name: Legacy decision
+      given: An existing Task has the old routingDecision shape or no routingDecision.
+      when: It is read or previewed.
+      then: Existing explanation remains readable and no advisory relationship is invented.
+  risks:
+    - Duplicating M3-A vocabulary could drift; import or alias existing closed types where practical and assert cross-surface values.
+    - Optional fields can admit contradictions; centralize coherence validation in Task parsing before persistence.
+    - Richer preview can leak private author text or raw identity keys; keep the existing closed projection boundary and focused negative assertions.
+  changeBudget: { maxFiles: 14, maxDiffLines: 1800 }
+advancedPolicy: { maxDurationMs: null, observedTokenCeiling: null, noProgressTimeoutMs: null, workerStopGraceMs: 60000, fileLimit: null, fileLimitMode: warn, changedLineLimit: null, changedLineLimitMode: warn, baseMaxAttempts: 1, maxExtraAttempts: 0, maxMainCorrections: 1, maxMainReverifications: 1, maxWorkerValidationRepairs: 1, maxConcurrency: 1, completionMode: warn, changeBudgetMode: warn, maxAdaptationRounds: 0 }
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test, .forklight-boundary-capture, .forklight-receipt-retry, plans]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/types.ts
+    - src/core/task.ts
+    - src/core/routing-explanation.ts
+    - src/core/task-preview.ts
+    - src/daemon/coordinator.ts
+    - src/daemon/server.ts
+    - src/cli.ts
+    - src/mcp/server.ts
+    - tests/task.test.ts
+    - tests/routing-explanation.test.ts
+    - tests/task-preview.test.ts
+    - tests/daemon.test.ts
+    - tests/daemon-cli.test.ts
+    - tests/mcp.test.ts
+acceptance:
+  criteria:
+    - Followed recommendation, manual override, and selection after cannot-determine persist and project exactly as the accepted Spec requires.
+    - Contradictory advisory/selection/shortlist/confidence/Task identity shapes fail before persistence while legacy Tasks remain readable without invented facts.
+    - CLI validate/preview, Daemon, MCP, and Core use one privacy-safe explanation and expose no private note, settings digest, or raw evidence keys.
+    - Candidate changes only the fourteen focus paths and adds no Store entity, migration, coordination mechanism, automatic work, M3-C policy, or Hub/UI.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/task.test.ts tests/task-preview.test.ts tests/daemon.test.ts tests/daemon-cli.test.ts tests/mcp.test.ts
+    - git diff --check

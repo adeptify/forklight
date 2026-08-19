@@ -1,0 +1,54 @@
+version: 2
+name: M2 re-audit integrated source-only recovery call chain
+project: /Users/yijunwang/code/forklight
+taskClass: m2-source-only-recovery-integrated-audit-recovery
+taskFamily: forklight-integration-recovery
+workerProfileId: default
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 0
+  reason: Read-only zero-change audit has deterministic independent acceptance and follows an already reviewed Integration.
+contract:
+  outcome: Verify the activated source-only recovery call chain and full focused machine surface with no edits.
+  presentation: { summary: 用支持 checkpoint 的 Runtime 重新完成已合入恢复链只读审计。, language: zh-CN }
+  context:
+    - Read specs/m2-delivery-journeys/work-items/coding-source-only-integration-recovery/spec.md and specs/m2-delivery-journeys/work-items/coding-integrated-audit-recovery/spec.md completely.
+    - Exact Candidate digest a862bfe4 was safely integrated by operation 15bd69bc; inspect activated source only.
+    - Use ForkLight checkpoint MCP for the approved commands. Do not edit or mark blocked merely because build/test tools create generated files inside the isolated checkpoint Workspace.
+  inScope: [Trace eligibility, one-owner continuation, source and backup proof, verification, rollback, and one terminal original operation; run approved commands.]
+  outOfScope: [Edits, correction, Integration, new tests, build/activation replay, Store schema, Hub, docs, commit, push, credentials, or coordination machinery.]
+  executionSteps: [Inspect integrated source and tests, invoke every approved command through checkpoint MCP, report pass or one exact blocker.]
+  deliverables: [One bounded zero-diff integrated-source verdict.]
+  modules:
+    - name: Integrated recovery audit
+      responsibility: Confirm activated code implements the accepted same-operation source-only continuation.
+      consumes: [Integrated source, accepted spec, focused tests.]
+      produces: [Pass or exact blocker with zero diff.]
+      boundaries: [No edit, redesign, replay, or expanded recovery.]
+  callChain: [Reconstruct durable operation, acquire one owner, prove source and backup, verify in isolation, persist original terminal result.]
+  scenarios:
+    - name: Integrated acceptance
+      given: Exact reviewed Candidate is activated.
+      when: Source, tests, and commands are inspected.
+      then: Accepted success and refusal behavior passes with zero diff.
+    - name: Unsupported or unproven recovery
+      given: Candidate source, backup, receipt, stage history, or delivery boundary is not proven.
+      when: Integrated recovery classifies the operation.
+      then: It refuses without patch replay, source mutation, unsafe rollback, or fabricated terminal success.
+  risks: [A direct read-only shell cannot create verifier artifacts; use the supported checkpoint execution boundary.]
+  changeBudget: { maxFiles: 1, maxDiffLines: 20 }
+advancedPolicy: { maxDurationMs: null, observedTokenCeiling: null, noProgressTimeoutMs: null, fileLimit: null, fileLimitMode: warn, changedLineLimit: null, changedLineLimitMode: warn, baseMaxAttempts: 1, maxExtraAttempts: 0, maxMainCorrections: 0, maxMainReverifications: 0, maxConcurrency: 1, completionMode: warn, changeBudgetMode: warn, maxAdaptationRounds: 0 }
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: false
+  allowedCommands: []
+  focusPaths: [src/core/integration.ts, src/daemon/coordinator.ts, tests/integration.test.ts, tests/integration-operation.test.ts, tests/daemon.test.ts]
+acceptance:
+  criteria: [Integrated exact Candidate matches the accepted call chain and full focused surface with zero source change.]
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/integration.test.ts tests/integration-operation.test.ts tests/daemon.test.ts
+    - git diff --check

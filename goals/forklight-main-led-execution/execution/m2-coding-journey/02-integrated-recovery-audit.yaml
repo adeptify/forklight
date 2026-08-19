@@ -1,0 +1,49 @@
+version: 2
+name: M2 audit integrated source-only recovery path
+project: /Users/yijunwang/code/forklight
+taskClass: m2-source-only-recovery-integrated-audit
+taskFamily: forklight-integration-recovery
+workerProfileId: codex-luna-low
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 0
+  reason: Read-only deterministic post-Integration audit changes no product file and repeats the accepted machine verification.
+contract:
+  outcome: Verify activated source matches the accepted source-only recovery contract and passes its focused commands with no edits.
+  presentation: { summary: 合入后只读核对同一 Integration operation 的安全续跑与拒绝边界。, language: zh-CN }
+  context:
+    - Starts only after the implementation Candidate passed ForkLight verification, two Judges, Main accept, safe Integration, build, and activation.
+    - Read the accepted Coding Work Item spec completely. Audit integrated source; do not create an alternative design.
+  inScope: [Trace the integrated recovery call chain, inspect exact changed paths and tests, run approved commands, return pass or one exact blocker.]
+  outOfScope: [Edits, correction, Integration, new Task, real source mutation outside tests, Hub, docs, Store migration, commit, push, or credentials.]
+  executionSteps: [Inspect integrated code and scoped diff, verify eligible and refusal paths, run all acceptance commands, report bounded evidence.]
+  deliverables: [One read-only integrated-source verdict.]
+  modules:
+    - name: Integrated recovery audit
+      responsibility: Confirm same-operation continuation and refusal behavior in activated source.
+      consumes: [Accepted spec, integrated source, focused tests.]
+      produces: [Pass or exact blocker.]
+      boundaries: [No edits, source mutation, redesign, or expanded recovery.]
+  callChain: [Recover durable context, acquire one owner, prove source and backup, verify, persist original operation result.]
+  scenarios:
+    - name: Integrated acceptance
+      given: The exact Candidate has been activated.
+      when: Its call chain and tests are inspected and run.
+      then: Behavior matches the accepted source-only boundary with no unreviewed path.
+  risks: [Do not mistake test pass for authority to expand into build or activation replay.]
+  changeBudget: { maxFiles: 1, maxDiffLines: 20 }
+advancedPolicy: { maxDurationMs: null, observedTokenCeiling: null, noProgressTimeoutMs: null, fileLimit: null, fileLimitMode: warn, changedLineLimit: null, changedLineLimitMode: warn, baseMaxAttempts: 1, maxExtraAttempts: 0, maxMainCorrections: 0, maxMainReverifications: 0, maxConcurrency: 1, completionMode: warn, changeBudgetMode: warn, maxAdaptationRounds: 0 }
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: false
+  allowedCommands: []
+  focusPaths: [src/core/integration.ts, src/core/integration-operation.ts, src/daemon/coordinator.ts, src/core/types.ts, tests/integration.test.ts, tests/integration-operation.test.ts, tests/daemon.test.ts]
+acceptance:
+  criteria: [Integrated source matches the accepted recovery and refusal contract without source changes.]
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/integration.test.ts tests/integration-operation.test.ts tests/daemon.test.ts
+    - git diff --check

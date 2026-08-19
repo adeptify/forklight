@@ -11,11 +11,13 @@ import {
   computeStatistics,
   deriveRoutingEvidence,
   failureImpactForCategory,
+  frozenStrategyExecutionMode,
   normalizeBudgetEnvelope,
   projectCompactProviderModelSummaries,
   projectCompactProviderModelSummary,
   resolveCurrentMainDecision,
   StatisticsService,
+  strategyIdentityKey,
   verificationFrom,
   type ClassifiedDecision,
   type DecisionReadinessBucket,
@@ -2938,4 +2940,132 @@ test("classifyDecisionReadiness: four outcomes are exhaustive for well-formed in
     seen.add(bucket);
   }
   assert.equal(seen.size, 4, "exactly four mutually exclusive readiness buckets exist");
+});
+
+function modeTask(
+  id: string,
+  status: TaskRecord["status"],
+  taskClass: string,
+  executionMode: "single-run" | "persistent-session" | "native-goal" | undefined,
+  extras: {
+    taskFamily?: string;
+    error?: string;
+    reviewer?: boolean;
+    effort?: string;
+  } = {},
+): TaskRecord {
+  const record = task(id, status, "deepseek", "v4", extras.error);
+  const spec = record.spec as unknown as Record<string, unknown>;
+  spec.taskClass = taskClass;
+  if (extras.taskFamily !== undefined) spec.taskFamily = extras.taskFamily;
+  spec.runtime = { name: "claude-code", effort: extras.effort ?? "high" };
+  if (executionMode !== undefined) spec.executionMode = executionMode;
+  if (extras.reviewer === true) {
+    record.taskFile = `${REVIEW_GRAPH_TASK_FILE_PREFIX}g1/${id}`;
+  }
+  return record;
+}
+
+test("mode-aware evidence keeps the same Worker under different frozen modes separate", () => {
+  const single = modeTask("mode-single", "succeeded", "coding:mode", "single-run");
+  const native = modeTask("mode-native", "succeeded", "coding:mode", "native-goal");
+  const extraNative = modeTask("mode-native-2", "succeeded", "coding:mode", "native-goal");
+  const history = [single, native, extraNative].map((record) => ({
+    task: record,
+    attempts: [attempt(record.id, 1, "succeeded")],
+    events: [],
+    verification: passedVerification,
+  }));
+  const map = deriveRoutingEvidence({
+    taskClass: "coding:mode",
+    identityMode: "full-worker-mode",
+    history,
+  });
+  const singleKey = strategyIdentityKey("deepseek", "v4", "claude-code", "high", "single-run");
+  const nativeKey = strategyIdentityKey("deepseek", "v4", "claude-code", "high", "native-goal");
+  assert.equal(map.size, 2);
+  assert.equal(map.get(singleKey)?.terminalTaskCount, 1);
+  assert.equal(map.get(singleKey)?.relevantSampleCount, 1);
+  assert.equal(map.get(singleKey)?.executionMode, "single-run");
+  assert.equal(map.get(nativeKey)?.terminalTaskCount, 2);
+  assert.equal(map.get(nativeKey)?.relevantSampleCount, 2);
+  assert.equal(map.get(nativeKey)?.executionMode, "native-goal");
+  assert.equal(
+    map.get(strategyIdentityKey("deepseek", "v4", "claude-code", "high", "persistent-session")),
+    undefined,
+  );
+
+  const home = mkdtempSync(path.join(tmpdir(), "forklight-mode-lookup-"));
+  const store = new StateStore(home);
+  try {
+    for (const item of history) {
+      store.createTask(item.task);
+      store.createAttempt(item.attempts[0]!);
+    }
+    const fromService = new StatisticsService(store).modeAwareRoutingEvidence("coding:mode");
+    assert.equal(fromService.get(singleKey)?.terminalTaskCount, 1);
+    assert.equal(fromService.get(nativeKey)?.terminalTaskCount, 2);
+    assert.equal(store.listTasks().length, 3);
+  } finally {
+    store.close();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("missing frozen execution mode is legacy-unknown and is never inferred as single-run", () => {
+  assert.equal(frozenStrategyExecutionMode({}), "legacy-unknown");
+  assert.equal(frozenStrategyExecutionMode({ executionMode: "auto" }), "legacy-unknown");
+  const unknown = modeTask("mode-legacy", "succeeded", "coding:unknown-mode", undefined);
+  const single = modeTask("mode-known", "succeeded", "coding:unknown-mode", "single-run");
+  const map = deriveRoutingEvidence({
+    taskClass: "coding:unknown-mode",
+    identityMode: "full-worker-mode",
+    history: [
+      { task: unknown, attempts: [attempt(unknown.id, 1, "succeeded")], events: [], verification: passedVerification },
+      { task: single, attempts: [attempt(single.id, 1, "succeeded")], events: [], verification: passedVerification },
+    ],
+  });
+  const unknownKey = strategyIdentityKey("deepseek", "v4", "claude-code", "high", "legacy-unknown");
+  const singleKey = strategyIdentityKey("deepseek", "v4", "claude-code", "high", "single-run");
+  assert.equal(map.get(unknownKey)?.terminalTaskCount, 1);
+  assert.equal(map.get(unknownKey)?.executionMode, "legacy-unknown");
+  assert.equal(map.get(singleKey)?.terminalTaskCount, 1);
+  assert.equal(map.get(singleKey)?.executionMode, "single-run");
+});
+
+test("mode-aware grouping excludes non-model failures and keeps ambiguous visible", () => {
+  const ok = modeTask("mode-ok", "succeeded", "coding:mode-fail", "single-run");
+  const credential = modeTask(
+    "mode-cred", "failed", "coding:mode-fail", "single-run", { error: "HTTP 401: Invalid API key" },
+  );
+  const ambiguous = modeTask(
+    "mode-amb", "failed", "coding:mode-fail", "native-goal", { error: "no progress" },
+  );
+  const reviewer = modeTask("mode-reviewer", "succeeded", "coding:mode-fail", "persistent-session", {
+    reviewer: true,
+  });
+  const map = deriveRoutingEvidence({
+    taskClass: "coding:mode-fail",
+    identityMode: "full-worker-mode",
+    history: [
+      { task: ok, attempts: [attempt(ok.id, 1, "succeeded")], events: [], verification: passedVerification },
+      { task: credential, attempts: [attempt(credential.id, 1, "failed")], events: [] },
+      { task: ambiguous, attempts: [attempt(ambiguous.id, 1, "failed")], events: [] },
+      { task: reviewer, attempts: [attempt(reviewer.id, 1, "succeeded")], events: [], verification: passedVerification },
+    ],
+  });
+  const single = map.get(strategyIdentityKey("deepseek", "v4", "claude-code", "high", "single-run"))!;
+  const native = map.get(strategyIdentityKey("deepseek", "v4", "claude-code", "high", "native-goal"))!;
+  assert.equal(single.terminalTaskCount, 2);
+  assert.equal(single.relevantSampleCount, 1);
+  assert.equal(single.modelQualityFailureCount, 0);
+  assert.equal(single.ignoredNonModelTaskCount, 1);
+  assert.equal(native.ambiguousFailureCount, 1);
+  assert.equal(native.modelQualityFailureCount, 0);
+  assert.equal(native.relevantSampleCount, 0);
+  assert.equal(
+    map.get(strategyIdentityKey("deepseek", "v4", "claude-code", "high", "persistent-session")),
+    undefined,
+    "reviewer Tasks are not ordinary strategy samples",
+  );
 });

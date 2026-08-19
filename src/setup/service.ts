@@ -8,12 +8,21 @@ import {
   providerVariantLabel,
   providerVariants,
   hasLocalCodexSignIn,
+  hasLocalGrokSignIn,
   resolveProvider as resolveRuntimeProvider,
+  type ProviderName,
   type ResolvedProviderConfig,
 } from "../core/providers.js";
 import type { SettingsService } from "../core/settings.js";
+import {
+  executionPatchFromProfile,
+  isWorkerProfileId,
+  materializeWorkerModel,
+  setDefaultWorkerProfile,
+} from "../core/worker-profiles.js";
 import type {
   ResolvedSetupProvider,
+  SetupAuthMode,
   SetupBootstrap,
   SetupKeychainStore,
   SetupPrerequisite,
@@ -21,11 +30,23 @@ import type {
   SetupProviderOption,
   SetupProviderSelection,
   SetupSystemInspector,
+  SetupWorkerOption,
+  SetupWorkerSelection,
 } from "./types.js";
 
 type SetupSettings = Pick<SettingsService, "get" | "update">;
 
 const MODEL_PATTERN = /^[A-Za-z0-9._+:/\[\]-]{1,128}$/;
+
+function compatibleRuntimeForProvider(
+  provider: ProviderName,
+): "grok-build" | "codex-cli" {
+  if (provider === "xai") return "grok-build";
+  if (provider === "openai") return "codex-cli";
+  throw new Error(
+    "Local sign-in is only available for xAI and OpenAI. No settings were changed.",
+  );
+}
 
 export function createSystemInspector(): SetupSystemInspector {
   return {
@@ -41,6 +62,7 @@ export function createSystemInspector(): SetupSystemInspector {
       }
     },
     hasLocalCodexSignIn,
+    hasLocalGrokSignIn,
   };
 }
 
@@ -81,16 +103,15 @@ export class SetupService {
 
   describeProviders(): SetupProviderOption[] {
     const effective = this.settings.get();
-    const account = this.system.account();
     return providerNames().map((name) => {
       const definition = providerDefinition(name, effective.providerDefaults);
+      const auth = this.providerAuth(name);
       return {
         name,
         label: providerLabel(name),
         variantLabel: providerVariantLabel(name),
-        configured: name === "openai"
-          ? (this.system.hasLocalCodexSignIn?.() ?? false)
-          : this.keychain.has(definition.defaultKeychainService, account),
+        configured: auth.configured,
+        authMode: auth.authMode,
         defaultModel: definition.defaultModel,
         defaultEndpoint: definition.defaultEndpoint,
         variants: providerVariants(name, effective.providerDefaults),
@@ -100,17 +121,14 @@ export class SetupService {
 
   currentProvider(): ResolvedSetupProvider | null {
     const effective = this.settings.get();
-    const account = this.system.account();
     const ordered = [
       effective.execution.defaultProvider,
       ...providerNames().filter((name) => name !== effective.execution.defaultProvider),
     ];
     for (const name of ordered) {
+      const auth = this.providerAuth(name);
+      if (!auth.configured) continue;
       const definition = providerDefinition(name, effective.providerDefaults);
-      const configured = name === "openai"
-        ? (this.system.hasLocalCodexSignIn?.() ?? false)
-        : this.keychain.has(definition.defaultKeychainService, account);
-      if (!configured) continue;
       const variant = providerVariants(name, effective.providerDefaults)
         .find((candidate) => candidate.endpoint === definition.defaultEndpoint);
       return {
@@ -124,6 +142,99 @@ export class SetupService {
       };
     }
     return null;
+  }
+
+  defaultVariantId(provider: ProviderName): string {
+    const variants = providerVariants(provider, this.settings.get().providerDefaults);
+    return variants.find((item) => item.recommended)?.id ?? variants[0]?.id ?? "default";
+  }
+
+  /** Decide local sign-in vs API-key storage without reading a secret. */
+  resolveProviderSetup(selection: SetupProviderSelection): {
+    resolved: ResolvedSetupProvider;
+    mode: "local-sign-in" | "api-key";
+  } {
+    const resolved = this.resolveProvider(selection);
+    if (resolved.provider === "openai") {
+      if (!(this.system.hasLocalCodexSignIn?.() ?? false)) {
+        throw new Error(
+          "Codex is not signed in locally. Sign in with the Codex CLI, then run this command again. ForkLight does not store an OpenAI API key.",
+        );
+      }
+      return { resolved, mode: "local-sign-in" };
+    }
+    if (resolved.provider === "xai" && (this.system.hasLocalGrokSignIn?.() ?? false)) {
+      return { resolved, mode: "local-sign-in" };
+    }
+    return { resolved, mode: "api-key" };
+  }
+
+  selectSignedInProvider(selection: SetupProviderSelection): SetupProviderCommit {
+    const { resolved, mode } = this.resolveProviderSetup(selection);
+    if (mode !== "local-sign-in") {
+      throw new Error(
+        "This provider needs an API key on stdin after --confirm. Local sign-in is not available.",
+      );
+    }
+    this.writeProviderSettings(resolved, compatibleRuntimeForProvider(resolved.provider));
+    return { ...resolved, stored: false, settingsUpdated: true, authMode: "local-sign-in" };
+  }
+
+  listWorkers(): SetupWorkerOption[] {
+    const effective = this.settings.get();
+    return effective.workerProfiles.profiles.map((profile) => {
+      const model = materializeWorkerModel(
+        profile,
+        effective.modelCatalog,
+        effective.providerDefaults,
+      );
+      return {
+        id: profile.id,
+        label: profile.label,
+        runtime: profile.runtime,
+        provider: model.provider,
+        model: model.model,
+        selected: profile.id === effective.workerProfiles.defaultProfileId,
+      };
+    });
+  }
+
+  selectWorker(id: string): SetupWorkerSelection {
+    if (!isWorkerProfileId(id)) {
+      throw new Error(
+        "That Worker id is not valid. No settings were changed. Run `forklight setup worker list` and choose an existing id.",
+      );
+    }
+    const current = this.settings.get();
+    const profile = current.workerProfiles.profiles.find((item) => item.id === id);
+    if (profile === undefined) {
+      throw new Error(
+        "That Worker is not in the current settings. No settings were changed. Run `forklight setup worker list` and choose an existing id.",
+      );
+    }
+    const workerProfiles = setDefaultWorkerProfile(current.workerProfiles, id);
+    const patch = executionPatchFromProfile(
+      profile,
+      current.modelCatalog,
+      current.providerDefaults,
+    );
+    this.settings.update({
+      workerProfiles,
+      execution: patch.execution,
+      providerDefaults: patch.providerDefaults,
+    });
+    const model = materializeWorkerModel(
+      profile,
+      current.modelCatalog,
+      current.providerDefaults,
+    );
+    return {
+      id: profile.id,
+      label: profile.label,
+      runtime: profile.runtime,
+      provider: model.provider,
+      model: model.model,
+    };
   }
 
   bootstrap(): SetupBootstrap {
@@ -192,16 +303,7 @@ export class SetupService {
     }
 
     try {
-      this.settings.update({
-        execution: { defaultProvider: resolved.provider },
-        providerDefaults: {
-          [resolved.provider]: {
-            defaultModel: resolved.model,
-            defaultEndpoint: resolved.endpoint,
-            defaultKeychainService: resolved.keychainService,
-          },
-        },
-      });
+      this.writeProviderSettings(resolved);
     } catch {
       try {
         if (previous === undefined) this.keychain.delete(resolved.keychainService, account);
@@ -212,7 +314,40 @@ export class SetupService {
       throw new Error("Settings could not be saved. The previous Keychain state was restored.");
     }
 
-    return { ...resolved, stored: true, settingsUpdated: true };
+    return { ...resolved, stored: true, settingsUpdated: true, authMode: "api-key" };
+  }
+
+  private providerAuth(name: ProviderName): { configured: boolean; authMode: SetupAuthMode } {
+    const definition = providerDefinition(name, this.settings.get().providerDefaults);
+    const account = this.system.account();
+    if (name === "openai") {
+      const ready = this.system.hasLocalCodexSignIn?.() ?? false;
+      return { configured: ready, authMode: ready ? "local-sign-in" : "none" };
+    }
+    const keyReady = this.keychain.has(definition.defaultKeychainService, account);
+    const grokReady = name === "xai" && (this.system.hasLocalGrokSignIn?.() ?? false);
+    if (keyReady) return { configured: true, authMode: "api-key" };
+    if (grokReady) return { configured: true, authMode: "local-sign-in" };
+    return { configured: false, authMode: "none" };
+  }
+
+  private writeProviderSettings(
+    resolved: ResolvedSetupProvider,
+    defaultRuntime?: "grok-build" | "codex-cli",
+  ): void {
+    this.settings.update({
+      execution: {
+        defaultProvider: resolved.provider,
+        ...(defaultRuntime === undefined ? {} : { defaultRuntime }),
+      },
+      providerDefaults: {
+        [resolved.provider]: {
+          defaultModel: resolved.model,
+          defaultEndpoint: resolved.endpoint,
+          defaultKeychainService: resolved.keychainService,
+        },
+      },
+    });
   }
 
   private commandCheck(command: string, label: string, fix: string): SetupPrerequisite {

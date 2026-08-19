@@ -1,0 +1,87 @@
+version: 2
+name: M2-C audit legacy compatibility mutation boundary
+project: /Users/yijunwang/code/forklight
+taskClass: m2-storage-legacy-handoff-boundary-audit
+taskFamily: forklight-storage-lifecycle
+workerProfileId: grok-4-6-xhigh
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 0
+  reason: Read-only final boundary audit changes no files and checks deterministic no-migration and privacy constraints.
+contract:
+  outcome: Verify the integrated compatibility fix is in-memory read normalization only, adds no Store migration or coordination mechanism, preserves bounded privacy-safe errors, and leaves real-home audit/preview ready for Main.
+  presentation: { summary: 最终只读核对无迁移、无协调扩张、错误隐私与真实预览就绪。, language: zh-CN }
+  context:
+    - Starts only after the lifecycle-chain audit passes.
+    - Main, not this Worker, will run the real ForkLight Home commands after the Goal completes.
+  inScope:
+    - Inspect the scoped diff, durable read/write separation, error privacy, generated/output boundary, and accepted tests.
+  outOfScope:
+    - No edits, real-home access, reclaim, retain, migration, deletion, process signal, Integration, Judge, Hub, commit, or push.
+  executionSteps:
+    - Confirm the integrated diff stays inside the accepted Store/handoff/test paths.
+    - Confirm reads normalize only in memory, writes remain current-format, and malformed content is never echoed.
+    - Confirm no locks, leases, hashes, handshakes, schema versioning, or duplicate consistency system was added.
+    - Run the full focused Work Item commands and return pass or one exact blocker for Main's real read-only check.
+  deliverables: [A final no-migration/privacy/scope readiness verdict.]
+  modules:
+    - name: Integrated compatibility boundary
+      responsibility: Confirm the smallest durable-read fix and its real-preview readiness.
+      consumes: [Integrated scoped diff, current writes, errors, and focused suites.]
+      produces: [Pass or one exact scope/privacy/mutation blocker.]
+      boundaries: [No real data, cleanup, new protocol, or generated Candidate content.]
+  callChain:
+    - Prior audits establish semantic and lifecycle correctness.
+    - This final Task verifies mutation/privacy/scope boundaries.
+    - Goal completion returns authority to Main for real storage audit and preview only.
+  scenarios:
+    - name: Minimal boundary holds
+      given: Integrated compatibility behavior and focused tests pass.
+      when: Read/write, privacy, and diff boundaries are inspected.
+      then: No durable row is migrated, no coordination system exists, and Main can safely run real read-only commands.
+  risks: [A passing temporary test does not itself authorize real reclaim; Main must inspect the real preview separately.]
+  changeBudget: { maxFiles: 1, maxDiffLines: 20 }
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: false
+  allowedCommands: []
+  focusPaths:
+    - src/state/store.ts
+    - src/core/candidate-handoff.ts
+    - src/core/goal.ts
+    - src/core/types.ts
+    - src/core/main-decision-packet.ts
+    - src/core/storage-lifecycle.ts
+    - tests/store.test.ts
+    - tests/competition.test.ts
+    - tests/task-decision-view.test.ts
+    - tests/storage-lifecycle.test.ts
+    - tests/work-hierarchy.test.ts
+    - tests/goal.test.ts
+acceptance:
+  criteria:
+    - Integrated behavior is in-memory read compatibility only, preserves current writes, and adds no coordination or migration mechanism.
+    - Error output is bounded and content-free, accepted focused tests pass, and no source file changes occur.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/store.test.ts tests/competition.test.ts tests/task-decision-view.test.ts tests/storage-lifecycle.test.ts tests/work-hierarchy.test.ts tests/goal.test.ts
+    - git diff --check

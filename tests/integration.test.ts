@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -12,16 +13,26 @@ import { captureCandidateRevision } from "../src/core/candidate-revision.js";
 import { reverifyCandidate } from "../src/core/candidate-reverification.js";
 import { taskPaths } from "../src/core/config.js";
 import {
-  preflightIntegration,
   applyIntegration,
+  classifySourceOnlyRecovery,
+  continueSourceOnlyIntegration,
+  preflightIntegration,
+  SOURCE_ONLY_RECOVERY_REFUSALS,
 } from "../src/core/integration.js";
 import { recordMainReview } from "../src/core/main-review.js";
 import {
   createReviewGraph,
+  evaluateReviewRequirementForTask,
+  getReviewGraphStatus,
+  reconcileAllReviewGraphs,
   reconcileReviewAssignment,
+  reconcileReviewResultRepair,
+  repairReviewResult,
   REVIEWER_TASK_NOT_INTEGRATABLE,
   PENDING_REVIEW_BLOCKS_INTEGRATION,
   STALE_MAIN_ACCEPT_AFTER_REVIEW,
+  REQUIRED_REVIEW_GRAPH_MISSING,
+  REQUIRED_REVIEW_GRAPH_UNDERSIZED,
 } from "../src/core/review-graph.js";
 import { SettingsService, type IntegrationSettings } from "../src/core/settings.js";
 import type {
@@ -1987,6 +1998,783 @@ test("reviewer Task is permanently non-integratable and pending review blocks Ca
     });
     const fresh = await preflightIntegration(store, task.id, INTEGRATION_DEFAULTS);
     assert.equal(fresh.rejectionReasons.length, 0);
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+function stampReviewRequirement(
+  store: StateStore,
+  taskId: string,
+  requiredJudges: 0 | 1 | 2,
+  reason: string,
+): void {
+  const current = store.getTask(taskId);
+  store.updateTask(taskId, {
+    spec: {
+      ...current.spec,
+      reviewRequirement: { requiredJudges, reason },
+    },
+  });
+}
+
+test("preflight blocks a missing required Review Graph and does not create a Judge", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "fl-int-req-missing-"));
+  const store = new StateStore(root);
+  try {
+    const { task } = await buildSucceededTask(store, ["true"], true);
+    stampReviewRequirement(store, task.id, 1, "Ordinary meaningful delivery");
+    const receipt = await preflightIntegration(store, task.id, INTEGRATION_DEFAULTS);
+    assert.ok(receipt.rejectionReasons.some((reason) => reason.includes(REQUIRED_REVIEW_GRAPH_MISSING)));
+    assert.equal(store.getReviewGraphByCandidateTaskId(task.id), undefined);
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("preflight blocks an undersized required two-Judge graph", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "fl-int-req-under-"));
+  const store = new StateStore(root);
+  const settings = new SettingsService(store);
+  try {
+    const { task } = await buildSucceededTask(store, ["true"], true);
+    stampReviewRequirement(store, task.id, 2, "High-risk Integration authority");
+    const events = store.listEvents(task.id);
+    const verification = events.find((event) => event.type === "verification.completed")!;
+    const attempt = store.getAttempt(task.currentAttemptId!);
+    await captureCandidateRevision(
+      store,
+      store.getTask(task.id),
+      attempt,
+      verification.sequence,
+      true,
+      ["readme.md"],
+      1,
+      2,
+    );
+    recordMainReview(store, task.id, {
+      decision: "accept",
+      reason: "Accept before creating one of two required judges",
+      confirm: true,
+    });
+    await createReviewGraph(store, settings.get(), {
+      candidateTaskId: task.id,
+      reviewerWorkerProfileId: settings.get().workerProfiles.defaultProfileId,
+      reason: "Only one judge so far",
+      confirm: true,
+    });
+    const receipt = await preflightIntegration(store, task.id, INTEGRATION_DEFAULTS);
+    assert.ok(
+      receipt.rejectionReasons.some((reason) =>
+        reason.includes(REQUIRED_REVIEW_GRAPH_UNDERSIZED) || reason.includes(PENDING_REVIEW_BLOCKS_INTEGRATION),
+      ),
+    );
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("required two-Judge gate counts a summary-only repair and still needs a fresh Main accept", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "fl-int-repair-gate-"));
+  const store = new StateStore(root);
+  const settings = new SettingsService(store);
+  try {
+    const { task } = await buildSucceededTask(store, ["true"], true);
+    stampReviewRequirement(store, task.id, 2, "Need two independent opinions");
+    const events = store.listEvents(task.id);
+    const verification = events.find((event) => event.type === "verification.completed")!;
+    const attempt = store.getAttempt(task.currentAttemptId!);
+    const revision = await captureCandidateRevision(
+      store,
+      store.getTask(task.id),
+      attempt,
+      verification.sequence,
+      true,
+      ["readme.md"],
+      1,
+      2,
+    );
+    recordMainReview(store, task.id, {
+      decision: "accept",
+      reason: "Accept before two-judge repair fixture",
+      confirm: true,
+    });
+    const profileA = settings.get().workerProfiles.defaultProfileId;
+    const profileB = settings.get().workerProfiles.profiles.find((profile) => profile.id !== profileA)!.id;
+    const created = await createReviewGraph(store, settings.get(), {
+      candidateTaskId: task.id,
+      reviewerWorkerProfileIds: [profileA, profileB],
+      reason: "Required two judges",
+      confirm: true,
+    });
+    const [usable, failed] = store.listReviewAssignments(created.graph.id);
+    const now = new Date().toISOString();
+    const finish = (reviewerTaskId: string, resultText: string) => {
+      const reviewer = store.getTask(reviewerTaskId);
+      store.createAttempt({
+        id: `att-${reviewerTaskId}`,
+        taskId: reviewerTaskId,
+        ordinal: 1,
+        status: "succeeded",
+        sessionId: reviewer.sessionId,
+        rawLogPath: path.join(reviewer.paths.logs, "attempt-1.jsonl"),
+        startedAt: now,
+        finishedAt: now,
+        exitCode: 0,
+        resultText,
+      });
+      store.setTaskStatus(reviewerTaskId, "succeeded", {
+        finishedAt: now,
+        currentAttemptId: `att-${reviewerTaskId}`,
+      });
+    };
+    finish(usable!.reviewerTaskId, JSON.stringify({
+      schemaVersion: 1,
+      reviewedRevisionId: revision.id,
+      proposedDisposition: "accept",
+      summary: "Usable first opinion",
+      findings: [],
+    }));
+    finish(failed!.reviewerTaskId, JSON.stringify({
+      schemaVersion: 1,
+      reviewedRevisionId: revision.id,
+      proposedDisposition: "accept",
+      summary: "s".repeat(507),
+      findings: [],
+    }));
+    reconcileAllReviewGraphs(store);
+    const before = evaluateReviewRequirementForTask(store, task.id);
+    assert.equal(before.usableTerminal, 1);
+    assert.equal(before.assigned, 2);
+    assert.ok(before.blocksIntegration);
+
+    const repaired = await repairReviewResult(store, settings.get(), {
+      candidateTaskId: task.id,
+      assignmentId: failed!.id,
+      reason: "Shorten only summary",
+      confirm: true,
+    });
+    finish(repaired.repairTaskId, JSON.stringify({
+      schemaVersion: 1,
+      reviewedRevisionId: revision.id,
+      proposedDisposition: "accept",
+      summary: "Shortened same opinion",
+      findings: [],
+    }));
+    reconcileReviewResultRepair(store, failed!.id);
+    const status = getReviewGraphStatus(store, task.id)!;
+    assert.equal(status.aggregation.usable, 2);
+    assert.equal(status.assignments.length, 2);
+    assert.equal(status.requiresFreshMainReview, true);
+    const gate = evaluateReviewRequirementForTask(store, task.id);
+    assert.equal(gate.usableTerminal, 2);
+    assert.equal(gate.assigned, 2);
+    const blocked = await preflightIntegration(store, task.id, INTEGRATION_DEFAULTS);
+    assert.ok(blocked.rejectionReasons.some((reason) =>
+      reason.includes(STALE_MAIN_ACCEPT_AFTER_REVIEW) || reason.includes("fresh Main"),
+    ));
+    recordMainReview(store, task.id, {
+      decision: "accept",
+      reason: "Fresh Main accept after repaired second opinion",
+      confirm: true,
+    });
+    const allowed = await preflightIntegration(store, task.id, INTEGRATION_DEFAULTS);
+    assert.equal(allowed.rejectionReasons.length, 0);
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("explicit skip and legacy Tasks still preflight without a Review Graph", async () => {
+  const skipRoot = await mkdtemp(path.join(tmpdir(), "fl-int-req-skip-"));
+  const legacyRoot = await mkdtemp(path.join(tmpdir(), "fl-int-req-legacy-"));
+  const skipStore = new StateStore(skipRoot);
+  const legacyStore = new StateStore(legacyRoot);
+  try {
+    const { task: skipTask } = await buildSucceededTask(skipStore, ["true"], true);
+    stampReviewRequirement(skipStore, skipTask.id, 0, "Mechanical deterministic check");
+    const skipReceipt = await preflightIntegration(skipStore, skipTask.id, INTEGRATION_DEFAULTS);
+    assert.equal(skipReceipt.rejectionReasons.length, 0);
+
+    const { task: legacyTask } = await buildSucceededTask(legacyStore, ["true"], true);
+    assert.equal(legacyStore.getTask(legacyTask.id).spec.reviewRequirement, undefined);
+    const legacyReceipt = await preflightIntegration(legacyStore, legacyTask.id, INTEGRATION_DEFAULTS);
+    assert.equal(legacyReceipt.rejectionReasons.length, 0);
+  } finally {
+    skipStore.close();
+    legacyStore.close();
+    await rm(skipRoot, { recursive: true, force: true });
+    await rm(legacyRoot, { recursive: true, force: true });
+  }
+});
+
+// --- Source-only Integration recovery continuation ---
+
+/** Seed a Task that crashed after the reviewed patch was applied and the
+ *  `source-applied: passed` stage was durably recorded, but before any result
+ *  was stored. Live source equals the Candidate workspace, the deterministic
+ *  backup equals the receipt pre-apply bytes, and the receipt is consumed. */
+async function buildCrashedSourceOnlyTask(
+  store: StateStore,
+  acceptanceCommands: string[],
+  options: { consume?: boolean; delivery?: DeliverySpec } = {},
+): Promise<{
+  task: TaskRecord;
+  sourceDir: string;
+  receiptId: string;
+  operationId: string;
+  originalReadme: string;
+}> {
+  const { task, sourceDir } = await buildSucceededTask(
+    store, acceptanceCommands, true, options.delivery,
+  );
+  const originalReadme = await readFile(path.join(sourceDir, "readme.md"), "utf8");
+  const receipt = await preflightIntegration(store, task.id, INTEGRATION_DEFAULTS);
+  assert.equal(receipt.rejectionReasons.length, 0);
+
+  if (options.consume !== false) store.consumeIntegrationReceipt(receipt.id);
+
+  // The reviewed patch is already present in live source.
+  const candidateReadme = await readFile(path.join(task.paths.workspace, "readme.md"), "utf8");
+  await writeFile(path.join(sourceDir, "readme.md"), candidateReadme);
+
+  // Deterministic backup captures the exact pre-apply source bytes.
+  const backupDir = path.join(task.paths.root, "integration", receipt.id, "backup");
+  await mkdir(backupDir, { recursive: true });
+  await writeFile(path.join(backupDir, "readme.md"), originalReadme);
+
+  const operationId = randomUUID();
+  store.addEvent(
+    task.id, undefined, "integration.operation.started",
+    "Integration operation started",
+    { operationId, taskId: task.id, receiptId: receipt.id },
+  );
+  store.addEvent(
+    task.id, undefined, "integration.stage.completed",
+    "source-applied: passed",
+    { operationId, receiptId: receipt.id, evidence: { stage: "source-applied", status: "passed" } },
+  );
+
+  return {
+    task: store.getTask(task.id),
+    sourceDir,
+    receiptId: receipt.id,
+    operationId,
+    originalReadme,
+  };
+}
+
+test("source-only recovery continues the original operation once without patch replay", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "fl-int-recover-"));
+  const store = new StateStore(root);
+  try {
+    const { task, sourceDir, receiptId, operationId, originalReadme } =
+      await buildCrashedSourceOnlyTask(store, ["true"]);
+
+    const outcome = await continueSourceOnlyIntegration(
+      store, task.id, receiptId, operationId, INTEGRATION_DEFAULTS,
+    );
+    assert.equal(outcome.status, "applied");
+    assert.deepEqual(
+      outcome.stages?.map(({ stage, status }) => [stage, status]),
+      [
+        ["source-applied", "passed"],
+        ["source-verified", "passed"],
+        ["artifact-built", "not-applicable"],
+        ["runtime-activated", "not-applicable"],
+      ],
+    );
+
+    const results = store.listIntegrationResults(task.id).filter((r) => r.id === operationId);
+    assert.equal(results.length, 1);
+    assert.equal(results[0]!.status, "applied");
+
+    // No replay: the already-applied source is unchanged, and a second apply of
+    // the same patch would have failed the dry-run rather than succeed.
+    const live = await readFile(path.join(sourceDir, "readme.md"), "utf8");
+    assert.match(live, /changed text/);
+    assert.notEqual(live, originalReadme);
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("source-only recovery rolls back on verification failure using the proven backup", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "fl-int-recover-rb-"));
+  const store = new StateStore(root);
+  try {
+    const { task, sourceDir, receiptId, operationId, originalReadme } =
+      await buildCrashedSourceOnlyTask(store, ["false"]);
+
+    const outcome = await continueSourceOnlyIntegration(
+      store, task.id, receiptId, operationId, INTEGRATION_DEFAULTS,
+    );
+    assert.equal(outcome.status, "rolled-back");
+    assert.ok(outcome.error?.includes("verification failed"));
+    assert.equal(
+      outcome.stages?.find((stage) => stage.stage === "source-verified")?.status,
+      "failed",
+    );
+
+    // The proven backup restored the exact pre-apply source.
+    assert.equal(await readFile(path.join(sourceDir, "readme.md"), "utf8"), originalReadme);
+    assert.equal(store.listIntegrationResults(task.id).filter((r) => r.id === operationId).length, 1);
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("source-only recovery refuses candidate-final mismatch without source mutation", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "fl-int-recover-mm-"));
+  const store = new StateStore(root);
+  try {
+    const { task, sourceDir, receiptId, operationId } =
+      await buildCrashedSourceOnlyTask(store, ["true"]);
+    const tampered = "# diverged from the reviewed Candidate\n";
+    await writeFile(path.join(sourceDir, "readme.md"), tampered);
+
+    const outcome = await continueSourceOnlyIntegration(
+      store, task.id, receiptId, operationId, INTEGRATION_DEFAULTS,
+    );
+    assert.equal(outcome.status, "outcome-unknown");
+    assert.equal(outcome.reason, SOURCE_ONLY_RECOVERY_REFUSALS.candidateFinalMismatch);
+
+    // No result was fabricated and source was left exactly as found.
+    assert.equal(store.listIntegrationResults(task.id).filter((r) => r.id === operationId).length, 0);
+    assert.equal(await readFile(path.join(sourceDir, "readme.md"), "utf8"), tampered);
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("source-only recovery refuses a corrupt or missing backup without mutation", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "fl-int-recover-bk-"));
+  const store = new StateStore(root);
+  try {
+    const { task, sourceDir, receiptId, operationId } =
+      await buildCrashedSourceOnlyTask(store, ["true"]);
+    await rm(path.join(task.paths.root, "integration", receiptId, "backup", "readme.md"), {
+      force: true,
+    });
+
+    const outcome = await continueSourceOnlyIntegration(
+      store, task.id, receiptId, operationId, INTEGRATION_DEFAULTS,
+    );
+    assert.equal(outcome.status, "outcome-unknown");
+    assert.equal(outcome.reason, SOURCE_ONLY_RECOVERY_REFUSALS.backupMismatch);
+
+    assert.equal(store.listIntegrationResults(task.id).filter((r) => r.id === operationId).length, 0);
+    assert.match(await readFile(path.join(sourceDir, "readme.md"), "utf8"), /changed text/);
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("source-only recovery produces no second terminal result after completion", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "fl-int-recover-once-"));
+  const store = new StateStore(root);
+  try {
+    const { task, receiptId, operationId } =
+      await buildCrashedSourceOnlyTask(store, ["true"]);
+
+    const first = await continueSourceOnlyIntegration(
+      store, task.id, receiptId, operationId, INTEGRATION_DEFAULTS,
+    );
+    assert.equal(first.status, "applied");
+
+    const second = await continueSourceOnlyIntegration(
+      store, task.id, receiptId, operationId, INTEGRATION_DEFAULTS,
+    );
+    assert.equal(second.status, "outcome-unknown");
+    assert.equal(second.reason, SOURCE_ONLY_RECOVERY_REFUSALS.resultAlreadyExists);
+    assert.equal(store.listIntegrationResults(task.id).filter((r) => r.id === operationId).length, 1);
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("source-only recovery classifies unconsumed, delivery, and ambiguous histories as refusals", async () => {
+  // Unconsumed receipt.
+  {
+    const root = await mkdtemp(path.join(tmpdir(), "fl-int-recover-cls-"));
+    const store = new StateStore(root);
+    try {
+      const { task, receiptId, operationId } =
+        await buildCrashedSourceOnlyTask(store, ["true"], { consume: false });
+      const decision = classifySourceOnlyRecovery(store, task.id, receiptId, operationId);
+      assert.equal(decision.eligible, false);
+      assert.equal(decision.reason, SOURCE_ONLY_RECOVERY_REFUSALS.receiptNotConsumed);
+    } finally {
+      store.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+
+  // Declared build work.
+  {
+    const root = await mkdtemp(path.join(tmpdir(), "fl-int-recover-cls-"));
+    const store = new StateStore(root);
+    try {
+      const { task, receiptId, operationId } = await buildCrashedSourceOnlyTask(
+        store, ["true"],
+        { delivery: { buildCommands: ["make"], activationCommands: [], activationCheckCommands: [] } },
+      );
+      const decision = classifySourceOnlyRecovery(store, task.id, receiptId, operationId);
+      assert.equal(decision.eligible, false);
+      assert.equal(decision.reason, SOURCE_ONLY_RECOVERY_REFUSALS.deliveryDeclaresBuildOrActivation);
+    } finally {
+      store.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+
+  // Ambiguous later stage evidence.
+  {
+    const root = await mkdtemp(path.join(tmpdir(), "fl-int-recover-cls-"));
+    const store = new StateStore(root);
+    try {
+      const { task, receiptId, operationId } =
+        await buildCrashedSourceOnlyTask(store, ["true"]);
+      store.addEvent(
+        task.id, undefined, "integration.stage.completed",
+        "source-verified: passed",
+        { operationId, receiptId, evidence: { stage: "source-verified", status: "passed" } },
+      );
+      const decision = classifySourceOnlyRecovery(store, task.id, receiptId, operationId);
+      assert.equal(decision.eligible, false);
+      assert.equal(decision.reason, SOURCE_ONLY_RECOVERY_REFUSALS.stageHistoryAmbiguous);
+    } finally {
+      store.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+
+  // Missing source-applied evidence.
+  {
+    const root = await mkdtemp(path.join(tmpdir(), "fl-int-recover-cls-"));
+    const store = new StateStore(root);
+    try {
+      const { task, receiptId } = await buildCrashedSourceOnlyTask(store, ["true"]);
+      const bareOperationId = randomUUID();
+      store.addEvent(
+        task.id, undefined, "integration.operation.started",
+        "Integration operation started",
+        { operationId: bareOperationId, taskId: task.id, receiptId },
+      );
+      const decision = classifySourceOnlyRecovery(store, task.id, receiptId, bareOperationId);
+      assert.equal(decision.eligible, false);
+      assert.equal(decision.reason, SOURCE_ONLY_RECOVERY_REFUSALS.sourceAppliedNotProven);
+    } finally {
+      store.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("source-only recovery refuses a symlink proof path without mutation", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "fl-int-recover-sym-"));
+  const store = new StateStore(root);
+  try {
+    const { task, sourceDir, receiptId, operationId } =
+      await buildCrashedSourceOnlyTask(store, ["true"]);
+    // Redirect the live source proof through a symlink: the proof must fail
+    // closed rather than read through the link or mistake it for absence.
+    await rm(path.join(sourceDir, "readme.md"));
+    await symlink(path.join(sourceDir, "other.txt"), path.join(sourceDir, "readme.md"));
+
+    const outcome = await continueSourceOnlyIntegration(
+      store, task.id, receiptId, operationId, INTEGRATION_DEFAULTS,
+    );
+    assert.equal(outcome.status, "outcome-unknown");
+    assert.equal(outcome.reason, SOURCE_ONLY_RECOVERY_REFUSALS.unreadableProofPath);
+
+    assert.equal(store.listIntegrationResults(task.id).filter((r) => r.id === operationId).length, 0);
+    assert.equal((await lstat(path.join(sourceDir, "readme.md"))).isSymbolicLink(), true);
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("source-only recovery refuses a non-file backup proof path without mutation", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "fl-int-recover-dir-"));
+  const store = new StateStore(root);
+  try {
+    const { task, sourceDir, receiptId, operationId } =
+      await buildCrashedSourceOnlyTask(store, ["true"]);
+    // Replace the rollback backup with a directory: it is not a proven pre-apply
+    // file, so recovery must refuse before verification or rollback.
+    const backupFile = path.join(task.paths.root, "integration", receiptId, "backup", "readme.md");
+    await rm(backupFile);
+    await mkdir(backupFile, { recursive: true });
+
+    const outcome = await continueSourceOnlyIntegration(
+      store, task.id, receiptId, operationId, INTEGRATION_DEFAULTS,
+    );
+    assert.equal(outcome.status, "outcome-unknown");
+    assert.equal(outcome.reason, SOURCE_ONLY_RECOVERY_REFUSALS.unreadableProofPath);
+
+    assert.equal(store.listIntegrationResults(task.id).filter((r) => r.id === operationId).length, 0);
+    assert.match(await readFile(path.join(sourceDir, "readme.md"), "utf8"), /changed text/);
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("source-only recovery refuses stage evidence bound to a different receipt", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "fl-int-recover-receipt-"));
+  const store = new StateStore(root);
+  try {
+    const { task } = await buildSucceededTask(store, ["true"]);
+    const receipt = await preflightIntegration(store, task.id, INTEGRATION_DEFAULTS);
+    assert.equal(receipt.rejectionReasons.length, 0);
+    store.consumeIntegrationReceipt(receipt.id);
+    const operationId = randomUUID();
+    store.addEvent(
+      task.id, undefined, "integration.operation.started",
+      "Integration operation started",
+      { operationId, taskId: task.id, receiptId: receipt.id },
+    );
+    // The sole stage event names a different receipt: ambiguous, never eligible.
+    store.addEvent(
+      task.id, undefined, "integration.stage.completed",
+      "source-applied: passed",
+      { operationId, receiptId: "different-receipt", evidence: { stage: "source-applied", status: "passed" } },
+    );
+
+    const decision = classifySourceOnlyRecovery(store, task.id, receipt.id, operationId);
+    assert.equal(decision.eligible, false);
+    assert.equal(decision.reason, SOURCE_ONLY_RECOVERY_REFUSALS.stageHistoryAmbiguous);
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/** Seed a crashed source-only Task whose affected path has a parent directory
+ *  component (`notes/readme.md`), so an ancestor symlink under a canonical root
+ *  can redirect digest proof or rollback outside the owned path. Live source
+ *  equals the Candidate workspace, the deterministic backup equals the receipt
+ *  pre-apply bytes, and the receipt is consumed. */
+async function buildCrashedSourceOnlyNestedTask(
+  store: StateStore,
+  acceptanceCommands: string[],
+): Promise<{
+  task: TaskRecord;
+  sourceDir: string;
+  receiptId: string;
+  operationId: string;
+  nestedFile: string;
+  originalContent: string;
+  candidateContent: string;
+}> {
+  const root = await mkdtemp(path.join(tmpdir(), "fl-int-nested-"));
+  const sourceDir = path.join(root, "source");
+  const taskHome = path.join(root, "state");
+  const nestedFile = "notes/readme.md";
+  const originalContent = "# original notes\n";
+  const candidateContent = "# changed notes\n";
+  await mkdir(path.join(sourceDir, "notes"), { recursive: true });
+  await writeFile(path.join(sourceDir, nestedFile), originalContent);
+
+  const paths = taskPaths(taskHome, "task-nested");
+  const taskSpec = spec(sourceDir, acceptanceCommands);
+  await prepareWorkspace(taskSpec, paths);
+
+  // Simulate the worker edit: change only the nested file in the workspace.
+  await mkdir(path.join(paths.workspace, "notes"), { recursive: true });
+  await writeFile(path.join(paths.workspace, nestedFile), candidateContent);
+  await writeWorkspacePatchReport(paths, createPathPolicy(taskSpec));
+
+  const task: TaskRecord = {
+    id: "task-nested",
+    name: taskSpec.name,
+    status: "succeeded",
+    sourcePath: sourceDir,
+    taskFile: "/nonexistent/task.yaml",
+    spec: taskSpec,
+    paths,
+    sessionId: "test-session",
+    currentAttemptId: "attempt-1",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  store.createTask(task);
+  const attempt: AttemptRecord = {
+    id: "attempt-1",
+    taskId: task.id,
+    ordinal: 1,
+    status: "succeeded",
+    sessionId: task.sessionId,
+    rawLogPath: path.join(paths.logs, "attempt-1.jsonl"),
+    startedAt: task.createdAt,
+    finishedAt: task.updatedAt,
+    exitCode: 0,
+    runtimeBudgetUsd: taskSpec.runtime.maxBudgetUsd,
+  };
+  store.createAttempt(attempt);
+  const verification: VerificationResult = {
+    passed: true,
+    behaviorPassed: true,
+    policyPassed: true,
+    sourceCompatible: true,
+    commands: acceptanceCommands.map((command) => ({
+      command,
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+      durationMs: 1,
+      timedOut: false,
+    })),
+    diffPath: paths.diff,
+    sourceUnchanged: true,
+  };
+  store.addEvent(
+    task.id,
+    attempt.id,
+    "verification.completed",
+    "Independent verification passed",
+    verification,
+  );
+  recordMainReview(store, task.id, {
+    decision: "accept",
+    reason: "Integration fixture independently verified",
+    confirm: true,
+  });
+
+  const receipt = await preflightIntegration(store, task.id, INTEGRATION_DEFAULTS);
+  assert.equal(receipt.rejectionReasons.length, 0);
+  assert.deepEqual(receipt.affectedFiles, [nestedFile]);
+  store.consumeIntegrationReceipt(receipt.id);
+
+  // The reviewed patch is already present in live source.
+  await writeFile(path.join(sourceDir, nestedFile), candidateContent);
+
+  // Deterministic backup captures the exact pre-apply source bytes.
+  const backupDir = path.join(task.paths.root, "integration", receipt.id, "backup");
+  await mkdir(path.join(backupDir, "notes"), { recursive: true });
+  await writeFile(path.join(backupDir, nestedFile), originalContent);
+
+  const operationId = randomUUID();
+  store.addEvent(
+    task.id, undefined, "integration.operation.started",
+    "Integration operation started",
+    { operationId, taskId: task.id, receiptId: receipt.id },
+  );
+  store.addEvent(
+    task.id, undefined, "integration.stage.completed",
+    "source-applied: passed",
+    { operationId, receiptId: receipt.id, evidence: { stage: "source-applied", status: "passed" } },
+  );
+
+  return {
+    task: store.getTask(task.id),
+    sourceDir,
+    receiptId: receipt.id,
+    operationId,
+    nestedFile,
+    originalContent,
+    candidateContent,
+  };
+}
+
+test("source-only recovery refuses a live-source ancestor symlink and mutates nothing outside the owned path", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "fl-int-recover-ancsym-"));
+  const store = new StateStore(root);
+  try {
+    // Failing acceptance so a naive proof that read through the symlink would
+    // proceed to rollback and write backup bytes through the symlink.
+    const { task, sourceDir, receiptId, operationId, nestedFile, originalContent, candidateContent } =
+      await buildCrashedSourceOnlyNestedTask(store, ["false"]);
+
+    // Tempt a naive final-node-only proof: redirect the live source's parent
+    // directory component to an outside directory whose readme.md already equals
+    // the reviewed Candidate final bytes. A proof that lstats only the final
+    // node would follow the parent symlink, see a regular file, and read the
+    // outside bytes as if they were the owned source. Later rollback would then
+    // write the proven backup bytes through the symlink onto the outside file.
+    const outsideDir = path.join(root, "outside");
+    await mkdir(outsideDir, { recursive: true });
+    await writeFile(path.join(outsideDir, "readme.md"), candidateContent);
+    await rm(path.join(sourceDir, "notes"), { recursive: true, force: true });
+    await symlink(outsideDir, path.join(sourceDir, "notes"));
+
+    const outcome = await continueSourceOnlyIntegration(
+      store, task.id, receiptId, operationId, INTEGRATION_DEFAULTS,
+    );
+    assert.equal(outcome.status, "outcome-unknown");
+    assert.equal(outcome.reason, SOURCE_ONLY_RECOVERY_REFUSALS.unreadableProofPath);
+
+    // No result was fabricated.
+    assert.equal(store.listIntegrationResults(task.id).filter((r) => r.id === operationId).length, 0);
+
+    // No outside mutation: rollback never wrote the backup bytes through the
+    // symlink. The outside file still equals the Candidate bytes, not the
+    // backup's pre-apply bytes.
+    assert.notEqual(candidateContent, originalContent);
+    assert.equal(await readFile(path.join(outsideDir, "readme.md"), "utf8"), candidateContent);
+
+    // The owned live source still resolves through the intact ancestor symlink
+    // to the unchanged Candidate bytes; recovery neither repaired nor rolled it.
+    assert.equal((await lstat(path.join(sourceDir, "notes"))).isSymbolicLink(), true);
+    assert.equal(
+      await readFile(path.join(sourceDir, nestedFile), "utf8"),
+      candidateContent,
+    );
+
+    // The proven backup is untouched.
+    const backupFile = path.join(task.paths.root, "integration", receiptId, "backup", nestedFile);
+    assert.equal(await readFile(backupFile, "utf8"), originalContent);
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("source-only recovery refuses a backup-root ancestor symlink before rollback authority", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "fl-int-recover-ancbk-"));
+  const store = new StateStore(root);
+  try {
+    const { task, sourceDir, receiptId, operationId, nestedFile, originalContent, candidateContent } =
+      await buildCrashedSourceOnlyNestedTask(store, ["false"]);
+
+    // Redirect the deterministic backup's parent directory component to an
+    // outside directory whose readme.md already equals the receipt pre-apply
+    // bytes. A naive final-node-only proof would follow the parent symlink,
+    // read the outside bytes as the backup, and authorize rollback from the
+    // wrong material.
+    const outsideDir = path.join(root, "outside-backup");
+    await mkdir(outsideDir, { recursive: true });
+    await writeFile(path.join(outsideDir, "readme.md"), originalContent);
+    const backupNotes = path.join(task.paths.root, "integration", receiptId, "backup", "notes");
+    await rm(backupNotes, { recursive: true, force: true });
+    await symlink(outsideDir, backupNotes);
+
+    const outcome = await continueSourceOnlyIntegration(
+      store, task.id, receiptId, operationId, INTEGRATION_DEFAULTS,
+    );
+    assert.equal(outcome.status, "outcome-unknown");
+    assert.equal(outcome.reason, SOURCE_ONLY_RECOVERY_REFUSALS.unreadableProofPath);
+
+    // No result was fabricated and no rollback was authorized from the outside.
+    assert.equal(store.listIntegrationResults(task.id).filter((r) => r.id === operationId).length, 0);
+    assert.equal(
+      await readFile(path.join(sourceDir, nestedFile), "utf8"),
+      candidateContent,
+    );
+    // The outside file used to tempt the naive backup read is unchanged.
+    assert.equal(await readFile(path.join(outsideDir, "readme.md"), "utf8"), originalContent);
+    assert.equal((await lstat(backupNotes)).isSymbolicLink(), true);
   } finally {
     store.close();
     await rm(root, { recursive: true, force: true });

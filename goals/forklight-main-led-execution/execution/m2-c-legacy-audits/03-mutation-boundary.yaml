@@ -1,0 +1,64 @@
+version: 2
+name: M2-C independently audit compatibility mutation boundary
+project: /Users/yijunwang/code/forklight
+taskClass: m2-storage-legacy-integrated-boundary-audit
+taskFamily: forklight-storage-lifecycle
+workerProfileId: default
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 0
+  reason: Read-only deterministic privacy and mutation-boundary audit changes no files.
+contract:
+  outcome: Verify the integrated fix is in-memory read compatibility only, preserves current writes and bounded privacy-safe failures, and adds no Store migration or coordination system.
+  presentation: { summary: 独立只读核对无迁移、零改写、错误隐私和范围边界。, language: zh-CN }
+  context:
+    - Starts only after semantic lifecycle-chain audit passes.
+    - Main already accepted exact Revision f587fd8d after two Judges and safe Integration.
+  inScope:
+    - Inspect scoped source diff, read/write separation, current write shape, error privacy, generated boundary, and full focused Work Item suite.
+  outOfScope:
+    - No edits, real-home access, reclaim, retain, migration, deletion, authentication, Integration, Judge, Hub, commit, or push.
+  executionSteps:
+    - Confirm product changes stay in StateStore, handoff projection, Goal optional origin handling, and tests.
+    - Confirm reads never rewrite JSON/events and current writes remain typed-origin records.
+    - Confirm no locks, leases, hashes, handshakes, schema negotiation, or duplicate consistency authority exists.
+    - Run the full focused Work Item suite and return pass or one exact blocker.
+  deliverables: [A bounded no-migration privacy and scope verdict.]
+  modules:
+    - name: Integrated mutation boundary
+      responsibility: Audit zero-write compatibility, privacy-safe error, and accepted source scope.
+      consumes: [Integrated diff, Store readers/writers, tests, and generated-path policy.]
+      produces: [Pass or one exact boundary mismatch.]
+      boundaries: [No real data, cleanup, new protocol, or product edit.]
+  callChain:
+    - Prior audits establish read and semantic truth.
+    - This Task checks mutation, privacy, and scope evidence.
+    - Machine success releases transport readiness once.
+  scenarios:
+    - name: Minimal boundary holds
+      given: Integrated compatibility behavior passes focused tests.
+      when: Read/write, privacy and diff boundaries are inspected.
+      then: Durable bytes stay unchanged and no migration or coordination mechanism exists.
+    - name: Boundary expansion stops
+      given: The diff adds a Store rewrite, schema negotiation, coordination primitive, raw-content error, or out-of-scope product path.
+      when: Integrated source and tests are inspected.
+      then: The audit fails and transport readiness is not released.
+  risks: [Test fixture volume must not be mistaken for a broader product migration.]
+  changeBudget: { maxFiles: 1, maxDiffLines: 20 }
+advancedPolicy: { maxDurationMs: null, observedTokenCeiling: null, noProgressTimeoutMs: null, fileLimit: null, fileLimitMode: warn, changedLineLimit: null, changedLineLimitMode: warn, baseMaxAttempts: 1, maxExtraAttempts: 0, maxMainCorrections: 0, maxMainReverifications: 0, maxConcurrency: 1, completionMode: warn, changeBudgetMode: warn, maxAdaptationRounds: 0 }
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: false
+  allowedCommands: []
+  focusPaths: [src/state/store.ts, src/core/candidate-handoff.ts, src/core/goal.ts, tests/store.test.ts, tests/competition.test.ts, tests/task-decision-view.test.ts, tests/storage-lifecycle.test.ts, tests/work-hierarchy.test.ts]
+acceptance:
+  criteria:
+    - Integrated compatibility is in-memory read behavior only; current writes, privacy, and source scope remain exact.
+    - No migration, coordination mechanism, generated Candidate content, or source file change is present.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/store.test.ts tests/competition.test.ts tests/task-decision-view.test.ts tests/storage-lifecycle.test.ts tests/work-hierarchy.test.ts tests/goal.test.ts
+    - git diff --check

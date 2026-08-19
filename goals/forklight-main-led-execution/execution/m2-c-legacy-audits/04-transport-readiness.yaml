@@ -1,0 +1,63 @@
+version: 2
+name: M2-C independently audit real storage read transport readiness
+project: /Users/yijunwang/code/forklight
+taskClass: m2-storage-legacy-integrated-transport-audit
+taskFamily: forklight-storage-lifecycle
+workerProfileId: default
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 0
+  reason: Read-only deterministic CLI and daemon readiness audit changes no files.
+contract:
+  outcome: Verify integrated CLI and daemon storage audit/preview still route through the corrected shared lifecycle authority and are ready for Main's real-home read-only commands without Worker access to real data.
+  presentation: { summary: 独立只读核对 CLI/Daemon Storage 读取面已准备好交给 Main 实测。, language: zh-CN }
+  context:
+    - Starts only after durable-read, lifecycle, and mutation-boundary audits pass.
+    - Main alone will execute real storage audit/preview after this Goal; this Task uses temporary data only.
+  inScope:
+    - Inspect CLI storage audit/preview parsing, daemon protocol/server/coordinator routing, shared lifecycle call, read-only receipt behavior, and focused tests.
+  outOfScope:
+    - No edits, real-home access, real command execution, reclaim, retain, process signal, Integration, Judge, Hub, commit, or push.
+  executionSteps:
+    - Trace CLI and daemon audit/preview to the integrated lifecycle authority.
+    - Confirm read-only commands add no exchange receipts and no separate legacy logic exists at transports.
+    - Run approved transport/lifecycle commands and return pass or one exact blocker to Main's real read.
+  deliverables: [A bounded real-read transport readiness verdict.]
+  modules:
+    - name: Integrated storage read transports
+      responsibility: Audit CLI and daemon parity with the corrected shared lifecycle authority.
+      consumes: [CLI parser, daemon protocol/server/coordinator, lifecycle authority, and temporary tests.]
+      produces: [Pass or one exact transport blocker.]
+      boundaries: [No real data, mutation, reclaim authority, UI, or duplicated compatibility layer.]
+  callChain:
+    - Prior audits establish Core and Store truth.
+    - CLI and daemon route audit/preview into that truth without writing receipts.
+    - Goal success returns Main to real-home audit and preview.
+  scenarios:
+    - name: Main real read is transport-ready
+      given: Integrated shared authority and temporary transport tests pass.
+      when: CLI and daemon routes are inspected.
+      then: Main can invoke the real read-only commands without a transport-specific legacy workaround.
+    - name: Transport divergence stops
+      given: CLI or daemon bypasses shared lifecycle truth, writes a read receipt, or requires real-home access in the Worker.
+      when: Routing and focused tests are inspected.
+      then: The audit fails and Main does not run real preview or reclaim.
+  risks: [This audit is readiness evidence, not permission to reclaim real space.]
+  changeBudget: { maxFiles: 1, maxDiffLines: 20 }
+advancedPolicy: { maxDurationMs: null, observedTokenCeiling: null, noProgressTimeoutMs: null, fileLimit: null, fileLimitMode: warn, changedLineLimit: null, changedLineLimitMode: warn, baseMaxAttempts: 1, maxExtraAttempts: 0, maxMainCorrections: 0, maxMainReverifications: 0, maxConcurrency: 1, completionMode: warn, changeBudgetMode: warn, maxAdaptationRounds: 0 }
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: false
+  allowedCommands: []
+  focusPaths: [src/cli.ts, src/core/storage-lifecycle.ts, src/daemon/protocol.ts, src/daemon/coordinator.ts, src/daemon/server.ts, tests/daemon-cli.test.ts, tests/daemon.test.ts, tests/storage-lifecycle.test.ts]
+acceptance:
+  criteria:
+    - Integrated CLI and daemon audit/preview use the corrected shared lifecycle truth and remain read-only on temporary Homes.
+    - No transport-specific compatibility layer or source file change exists.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/storage-lifecycle.test.ts tests/daemon.test.ts tests/daemon-cli.test.ts
+    - git diff --check

@@ -53,6 +53,12 @@ export type DaemonMethod =
   | "direct_codex_review"
   | "direct_codex_publication_preview"
   | "direct_codex_publication_register"
+  | "main_token_capture"
+  | "main_token_capture_episode"
+  | "main_token_status"
+  | "main_token_assess"
+  | "main_token_pair_report"
+  | "main_token_value_report"
   | "adaptation_preview"
   | "adaptation_apply"
   | "activation_handoff_shutdown"
@@ -62,7 +68,10 @@ export type DaemonMethod =
   | "correction_eligibility"
   | "correct"
   | "review_graph_create"
+  | "review_graph_repair_result"
   | "review_graph_status"
+  | "delivery_prepare"
+  | "delivery_decide"
   | "goal_submit_file"
   | "goal_validate"
   | "goal_status"
@@ -87,6 +96,10 @@ export type DaemonMethod =
   | "outcome_intake_get"
   | "outcome_intake_propose"
   | "outcome_intake_confirm"
+  | "storage_audit"
+  | "storage_preview"
+  | "storage_reclaim"
+  | "storage_retain"
   | "shutdown";
 
 export interface DaemonRequest {
@@ -131,6 +144,9 @@ const READ_ONLY_METHODS = new Set<DaemonMethod>([
   "task_economics",
   "direct_codex_inbox",
   "direct_codex_publication_preview",
+  "main_token_status",
+  "main_token_pair_report",
+  "main_token_value_report",
   "adaptation_preview",
   "candidate_reverify_eligibility",
   "correction_eligibility",
@@ -151,6 +167,8 @@ const READ_ONLY_METHODS = new Set<DaemonMethod>([
   "work_hierarchy",
   "outcome_intake_list",
   "outcome_intake_get",
+  "storage_audit",
+  "storage_preview",
 ]);
 
 function isMutatingDaemonMethod(method: DaemonMethod): boolean {

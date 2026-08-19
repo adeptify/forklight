@@ -1,0 +1,53 @@
+version: 2
+name: M2 audit activated resolved succeeded Candidate lifecycle
+project: /Users/yijunwang/code/forklight
+taskClass: m2-resolved-candidate-regression-audit
+taskFamily: forklight-storage-lifecycle
+workerProfileId: default
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 0
+  reason: Read-only deterministic activated-source audit changes no product files and reruns the approved classifier regression gate.
+contract:
+  outcome: Verify activated storage classification makes an explicitly resolved terminal succeeded Candidate reclaimable while unresolved, active, ambiguous, or evidence-incomplete equivalents stay protected.
+  presentation: { summary: 合入后只读核对 resolved Candidate 与安全优先级。, language: zh-CN }
+  context:
+    - Starts only after the implementation Candidate passes independent verification, two usable Judges, Main accept, safe Integration, activation, and matched health.
+    - Read the accepted resolved-terminal storage disposition spec completely; audit activated truth rather than reopening design.
+  inScope: [Existing classifier precedence, authentic succeeded Candidate regression, active and artifact guards, durable evidence preservation, zero diff.]
+  outOfScope: [Edits, real Home mutation, reclaim, Store rewrite, correction, review, Integration, public redesign, Hub, commit, or push.]
+  executionSteps: [Trace the activated classifier, inspect the focused regression meaning, run approved commands, and return pass or one exact blocker.]
+  deliverables: [One bounded activated classifier verdict with zero Candidate change.]
+  modules:
+    - name: Activated resolved-terminal classifier
+      responsibility: Audit resolution versus stale packet waits and unchanged safety precedence.
+      consumes: [Integrated source, focused storage lifecycle tests, accepted Work Item.]
+      produces: [Pass or one exact mismatch.]
+      boundaries: [No mutation, historical relabel, cleanup, or coordination mechanism.]
+  callChain: [Terminal Task records Candidate and Main packet truth, Main resolves it, audit classifies after safety guards, reclaim preserves durable evidence.]
+  scenarios:
+    - name: Resolution precedence is narrow
+      given: Resolved and unresolved succeeded Candidates differ only by a valid terminal resolution event.
+      when: Activated focused tests classify and reclaim temporary Task roots.
+      then: Only the safe resolved Task becomes main-resolved-terminal and its Revision remains.
+    - name: Unsafe resolved Task is refused
+      given: A resolved terminal Task still has an active or unknown operation, ambiguous mapping, or missing latest Revision artifact.
+      when: Activated audit or reclaim classifies it.
+      then: The safety reason remains protected and no target is removed.
+  risks: [A test that bypasses the authentic Candidate/Main packet shape is insufficient.]
+  changeBudget: { maxFiles: 1, maxDiffLines: 20 }
+advancedPolicy: { maxDurationMs: null, observedTokenCeiling: null, noProgressTimeoutMs: null, fileLimit: null, fileLimitMode: warn, changedLineLimit: null, changedLineLimitMode: warn, baseMaxAttempts: 1, maxExtraAttempts: 0, maxMainCorrections: 0, maxMainReverifications: 0, maxConcurrency: 1, completionMode: warn, changeBudgetMode: warn, maxAdaptationRounds: 0 }
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: false
+  allowedCommands: []
+  focusPaths: [src/core/storage-lifecycle.ts, tests/storage-lifecycle.test.ts]
+acceptance:
+  criteria: [Activated classifier passes the authentic resolved succeeded Candidate and safety-guard regressions with zero source change.]
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/storage-lifecycle.test.ts
+    - git diff --check

@@ -1,0 +1,209 @@
+diff --git a/src/workers/grok.ts b/src/workers/grok.ts
+index 770f141..2a461fd 100644
+--- a/src/workers/grok.ts	
++++ b/src/workers/grok.ts	
+@@ -131,11 +131,13 @@ export function grokAllowTools(allowEdits: boolean): string {
+ 
+ /**
+  * Native /goal allowlist registers planner dependencies (Agent plus background
+- * task tools and the shell capability the planner must see) while actual Bash
+- * stays denied.
++ * task tools, the shell capability the planner must see, and Task-local plan
++ * mutators) while actual Bash stays denied. Workspace mutation is gated by
++ * deny argv, not by stripping search_replace/write.
+  */
+ export function grokNativeAllowTools(allowEdits: boolean): string {
+-  const registered = [
++  void allowEdits;
++  return [
+     "read_file",
+     "list_dir",
+     "grep",
+@@ -144,9 +146,9 @@ export function grokNativeAllowTools(allowEdits: boolean): string {
+     "get_task_output",
+     "kill_task",
+     "wait_tasks",
+-  ];
+-  if (!allowEdits) return registered.join(",");
+-  return [...registered, "search_replace", "write"].join(",");
++    "search_replace",
++    "write",
++  ].join(",");
+ }
+ 
+ /** First launch uses --session-id; later Attempts resume the same Task session. */
+@@ -199,7 +201,7 @@ export function buildGrokCliArgs(input: {
+   const tools = nativeGoal ? grokNativeAllowTools(input.allowEdits) : grokAllowTools(input.allowEdits);
+   const disallowed = nativeGoal ? grokNativeDisallowedTools() : grokDisallowedTools();
+   const denyArgs = nativeGoal
+-    ? grokNativeDenyArgs(input.grokHome, input.workspace, input.sessionId)
++    ? grokNativeDenyArgs(input.grokHome, input.workspace, input.sessionId, input.allowEdits)
+     : [
+         // Path denials use Grok permission tool prefixes (Write/Edit), not internal ids.
+         "--deny",
+@@ -232,14 +234,21 @@ export function buildGrokCliArgs(input: {
+   ];
+ }
+ 
+-/** Model-write denials for auth, agent id, configuration, and native state.json. */
++/**
++ * Native denials: read-only Tasks prepend exact Workspace Write/Edit pairs.
++ * Task-local GROK_HOME is not glob-denied so the Planner can persist its plan.
++ */
+ export function grokNativeDenyArgs(
+   grokHome: string,
+   workspace: string,
+   sessionId: string,
++  allowEdits: boolean,
+ ): string[] {
+   const statePath = grokNativeGoalStatePath(grokHome, workspace, sessionId);
+   return [
++    ...(!allowEdits
++      ? ["--deny", `Write(${workspace}/**)`, "--deny", `Edit(${workspace}/**)`]
++      : []),
+     "--deny",
+     `Write(${path.join(grokHome, "auth.json")})`,
+     "--deny",
+diff --git a/tests/worker-runtime.test.ts b/tests/worker-runtime.test.ts
+index 2504320..48d49a7 100644
+--- a/tests/worker-runtime.test.ts	
++++ b/tests/worker-runtime.test.ts	
+@@ -2105,6 +2105,33 @@ test("inspect keeps a historically frozen Grok persistent-session Task unchanged
+ const GROK_NATIVE_SESSION = "11111111-1111-4111-8111-111111111111";
+ const GROK_NATIVE_WORKSPACE = "/task/workspace";
+ const GROK_NATIVE_CONTRACT = "Complete the Worker contract exactly as written.";
++const GROK_NATIVE_PLAN_TOOLS = [
++  "read_file",
++  "list_dir",
++  "grep",
++  "Agent",
++  "run_terminal_cmd",
++  "get_task_output",
++  "kill_task",
++  "wait_tasks",
++  "search_replace",
++  "write",
++] as const;
++
++function assertExactDenyPair(args: readonly string[], rule: string): void {
++  let count = 0;
++  for (let i = 0; i < args.length - 1; i += 1) {
++    if (args[i] === "--deny" && args[i + 1] === rule) count += 1;
++  }
++  assert.equal(count, 1, `expected exactly one adjacent --deny ${rule} pair`);
++}
++
++function assertNativePlanToolsOnce(tools: string): void {
++  const items = tools.split(",");
++  for (const name of GROK_NATIVE_PLAN_TOOLS) {
++    assert.equal(items.filter((item) => item === name).length, 1, `${name} exactly once`);
++  }
++}
+ 
+ async function writeGrokNativeState(input: {
+   grokHome: string;
+@@ -2184,7 +2211,7 @@ test("Grok native-goal first launch uses /goal, same Session, frozen model, and
+   assert.ok(denyJoined.includes(
+     `Write(${grokNativeGoalStatePath(grokHome, GROK_NATIVE_WORKSPACE, GROK_NATIVE_SESSION)})`,
+   ));
+-  const denyArgs = grokNativeDenyArgs(grokHome, GROK_NATIVE_WORKSPACE, GROK_NATIVE_SESSION);
++  const denyArgs = grokNativeDenyArgs(grokHome, GROK_NATIVE_WORKSPACE, GROK_NATIVE_SESSION, true);
+   const denyBashAt = denyArgs.indexOf("Bash");
+   assert.ok(denyBashAt > 0 && denyArgs[denyBashAt - 1] === "--deny", "native policy must emit the exact --deny Bash pair");
+   const argvBashAt = args.indexOf("Bash");
+@@ -2252,6 +2279,95 @@ test("Grok native-goal resume keeps the Session and explicit persistent-session
+   }
+ });
+ 
++test("Grok native-goal read-only argv registers plan mutators and exact Workspace Write/Edit denials", () => {
++  const grokHome = "/task/grok-home";
++  const workspace = GROK_NATIVE_WORKSPACE;
++  assert.notEqual(workspace, grokHome);
++  assertNativePlanToolsOnce(grokNativeAllowTools(false));
++  assertNativePlanToolsOnce(grokNativeAllowTools(true));
++  const args = buildGrokCliArgs({
++    prompt: `${GROK_NATIVE_GOAL_PROMPT_PREFIX}${GROK_NATIVE_CONTRACT}`,
++    workspace,
++    model: "grok-4.6",
++    allowEdits: false,
++    grokHome,
++    effort: "xhigh",
++    sessionId: GROK_NATIVE_SESSION,
++    resuming: false,
++    executionMode: "native-goal",
++  });
++  const tools = args[args.indexOf("--tools") + 1] ?? "";
++  assert.equal(tools, grokNativeAllowTools(false));
++  assertNativePlanToolsOnce(tools);
++  assertExactDenyPair(args, `Write(${workspace}/**)`);
++  assertExactDenyPair(args, `Edit(${workspace}/**)`);
++  assert.equal(args.includes(`Write(${grokHome}/**)`), false);
++  assert.equal(args.includes(`Edit(${grokHome}/**)`), false);
++  assertExactDenyPair(args, `Write(${path.join(grokHome, "auth.json")})`);
++  assertExactDenyPair(args, `Edit(${path.join(grokHome, "auth.json")})`);
++  assertExactDenyPair(args, `Write(${path.join(grokHome, "agent_id")})`);
++  assertExactDenyPair(args, `Edit(${path.join(grokHome, "agent_id")})`);
++  assertExactDenyPair(args, `Write(${path.join(grokHome, "config.toml")})`);
++  assertExactDenyPair(args, `Edit(${path.join(grokHome, "config.toml")})`);
++  const statePath = grokNativeGoalStatePath(grokHome, workspace, GROK_NATIVE_SESSION);
++  assertExactDenyPair(args, `Write(${statePath})`);
++  assertExactDenyPair(args, `Edit(${statePath})`);
++  assertExactDenyPair(args, "MCPTool");
++  assertExactDenyPair(args, "Bash");
++  const denyArgs = grokNativeDenyArgs(grokHome, workspace, GROK_NATIVE_SESSION, false);
++  assertExactDenyPair(denyArgs, `Write(${workspace}/**)`);
++  assertExactDenyPair(denyArgs, `Edit(${workspace}/**)`);
++  assert.equal(denyArgs.includes(`Write(${grokHome}/**)`), false);
++  assert.equal(denyArgs.includes(`Edit(${grokHome}/**)`), false);
++});
++
++test("Grok native-goal editable argv keeps plan mutators without Workspace-wide Write/Edit denials", () => {
++  const grokHome = "/task/grok-home";
++  const workspace = GROK_NATIVE_WORKSPACE;
++  const args = buildGrokCliArgs({
++    prompt: `${GROK_NATIVE_GOAL_PROMPT_PREFIX}${GROK_NATIVE_CONTRACT}`,
++    workspace,
++    model: "grok-4.6",
++    allowEdits: true,
++    grokHome,
++    effort: "xhigh",
++    sessionId: GROK_NATIVE_SESSION,
++    resuming: false,
++    executionMode: "native-goal",
++  });
++  const tools = args[args.indexOf("--tools") + 1] ?? "";
++  assert.equal(tools, grokNativeAllowTools(true));
++  assertNativePlanToolsOnce(tools);
++  assert.equal(args.includes(`Write(${workspace}/**)`), false);
++  assert.equal(args.includes(`Edit(${workspace}/**)`), false);
++  const denyArgs = grokNativeDenyArgs(grokHome, workspace, GROK_NATIVE_SESSION, true);
++  assert.equal(denyArgs.includes(`Write(${workspace}/**)`), false);
++  assert.equal(denyArgs.includes(`Edit(${workspace}/**)`), false);
++  assertExactDenyPair(args, "Bash");
++  assertExactDenyPair(args, "MCPTool");
++});
++
++test("Grok persistent-session read-only argv still omits plan mutators and denies whole GROK_HOME", () => {
++  const grokHome = "/task/grok-home";
++  const args = buildGrokCliArgs({
++    prompt: "do work",
++    workspace: GROK_NATIVE_WORKSPACE,
++    model: "grok-4.6",
++    allowEdits: false,
++    grokHome,
++    effort: "high",
++    sessionId: GROK_NATIVE_SESSION,
++    resuming: false,
++    executionMode: "persistent-session",
++  });
++  const tools = args[args.indexOf("--tools") + 1] ?? "";
++  assert.equal(tools, grokAllowTools(false));
++  assert.equal(tools.includes("search_replace"), false);
++  assert.equal(tools.includes("write"), false);
++  assertExactDenyPair(args, `Write(${grokHome}/**)`);
++  assertExactDenyPair(args, `Edit(${grokHome}/**)`);
++});
++
+ test("Grok native-goal child env freezes the foreground Planner budget", () => {
+   const previousBudget = process.env.GROK_FOREGROUND_BLOCK_BUDGET_MS;
+   assert.equal(GROK_NATIVE_FOREGROUND_BLOCK_BUDGET_MS, "86400000");

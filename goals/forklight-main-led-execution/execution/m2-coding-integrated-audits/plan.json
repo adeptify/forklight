@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "name": "M2 Coding integrated-source audit recovery",
+  "objective": "Replace one incompatible audit admission with serial checkpoint-capable zero-diff audits over the already integrated exact Candidate.",
+  "items": [
+    { "id": "integrated-call-chain", "task": "./01-integrated-call-chain.yaml", "dependsOn": [] },
+    { "id": "activated-runtime-boundary", "task": "./02-activated-runtime-boundary.yaml", "dependsOn": ["integrated-call-chain"] },
+    { "id": "wrong-candidate-safety", "task": "../m2-coding-journey/03-wrong-candidate-safety-audit.yaml", "dependsOn": ["activated-runtime-boundary"] },
+    { "id": "operation-surface", "task": "../m2-coding-journey/04-operation-surface-audit.yaml", "dependsOn": ["wrong-candidate-safety"] }
+  ]
+}

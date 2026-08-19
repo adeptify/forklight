@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "name": "M2 non-Coding Main-led delivery runbook",
+  "objective": "Publish the accepted local operator journey after proving one Grok persistent Session survives an intentional daemon restart, then audit the integrated document's primary flow, commands, links, scope, and recovery boundaries.",
+  "items": [
+    { "id": "main-led-runbook", "task": "./01-main-led-runbook.yaml", "dependsOn": [] },
+    { "id": "integrated-primary-flow-audit", "task": "./02-integrated-primary-flow-audit.yaml", "dependsOn": ["main-led-runbook"] },
+    { "id": "cli-link-accuracy-audit", "task": "./03-cli-link-accuracy-audit.yaml", "dependsOn": ["integrated-primary-flow-audit"] },
+    { "id": "scope-recovery-boundary-audit", "task": "./04-scope-recovery-boundary-audit.yaml", "dependsOn": ["cli-link-accuracy-audit"] }
+  ]
+}

@@ -1,0 +1,153 @@
+version: 2
+name: M4-C exact-Candidate test-only recovery
+project: /Users/yijunwang/code/forklight
+taskClass: m4-family-main-token-value-report-recovery
+taskFamily: forklight-main-token-leverage
+workerProfileId: grok-4-6-xhigh
+executionPreference: auto
+routingDecision:
+  taskFamily: forklight-main-token-leverage
+  shortlist:
+    - provider: xai
+      model: grok-4.6
+      runtime: grok-build
+      effort: xhigh
+      workerProfileId: grok-4-6-xhigh
+  selectedWorker:
+    provider: xai
+    model: grok-4.6
+    runtime: grok-build
+    effort: xhigh
+    workerProfileId: grok-4-6-xhigh
+  selectedBecause:
+    code: user-specified
+    note: 一骏 explicitly authorized all subsequent Goal tasks and continuous progress; Main selects one fresh exact-Candidate recovery without claiming a routing ranking.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+reviewRequirement:
+  requiredJudges: 2
+  reason: The retained family value report authorizes a Main Token claim surface; two fresh different-view Judges must inspect exact-seed preservation, test correction, claim gating and economics separation before Integration.
+runtime:
+  name: grok-build
+  executable: /Users/yijunwang/code/forklight/goals/forklight-main-led-execution/execution/m4-wave-1/m4-c-workspace-local-recovery-bootstrap.mjs
+  effort: xhigh
+  maxBudgetUsd: null
+contract:
+  outcome: Materialize exact M4-C Revision 61dc45c0-e4b2-49c3-95db-f54a3a4d7861 from a Workspace-local seed, replace only the one brittle CLI source-text regex test with behavior-based coverage, and deliver the unchanged family value report through independent verification, two fresh Judges and Main serial Integration.
+  presentation:
+    summary: 原样复用已通过绝大多数验收的M4-C，只修一条误报的源码正则测试，再走完整质量链。
+    language: zh-CN
+  context:
+    - Read AGENTS.md, specs/m4-c-family-value-report/spec.md, specs/m4-c-family-value-report/work-items/exact-candidate-test-only-recovery/spec.md and goals/forklight-main-led-execution/evidence/m4-c-initial-task-stop-decision-packet.md completely before editing. They are the unique accepted boundary.
+    - Failed Task 89e60adc-d9ca-4560-9940-b423698c51f0, its Workspace, Attempts, native Goals and Revisions are immutable and protected. Do not resume, correct, reverify or modify it.
+    - The exact retained Candidate is packaged inside this Task source snapshot at goals/forklight-main-led-execution/execution/m4-wave-1/m4-c-retained-candidate.patch. The wrapper proves the authorized digest/path set and applies it on the matching source base before Grok starts.
+    - This is a fresh Grok 4.6 Xhigh native Goal. Never claim Session, Attempt or Goal continuity with the old Task.
+    - Retain all product behavior and nine non-target files byte-for-byte. The only editable gap is the brittle source-text regex in tests/main-token-value-report.test.ts; real CLI JSON and human behavior tests already pass.
+    - ForkLight serves one local developer. The exact seed digest/path/source check exists only to prevent wrong Candidate/source-base reuse; add no other checksum, lock, lease, version handshake or distributed mechanism.
+    - This recovery has one base Attempt, zero generic extra Attempt, zero validation repair/Main correction/adaptation and at most one no-Worker reverify after useful edits. Failure after that is final; create no replacement.
+  inScope:
+    - Confirm the exact Workspace-local Candidate is materialized before editing.
+    - Remove the brittle source-text regex assertion or replace it with a behavior assertion in tests/main-token-value-report.test.ts.
+    - Preserve the already-passing real CLI empty/seeded JSON and human tests plus every parent M4-C acceptance behavior.
+    - Inspect the final diff against the seed and report the one focused test delta.
+  outOfScope:
+    - Product code or report behavior change, Store/schema change, new report fields/reasons, economics change, hidden pair selection, automatic calibration, model ranking, Competition, Hub/UI, commit, push or reset.
+    - Editing any retained path other than tests/main-token-value-report.test.ts, any non-retained path or any Goal/Spec/evidence/seed/wrapper file.
+    - Retry, validation repair, Main correction, adaptation, model switch, fallback or another replacement.
+  executionSteps:
+    - Read the accepted recovery boundary and inspect the materialized Candidate plus the exact failing test.
+    - Make the narrowest behavior-based test correction in tests/main-token-value-report.test.ts only.
+    - Inspect the final delta against the seed and hand off without changing product behavior.
+  deliverables:
+    - One exact ten-path Candidate with nine seed-equivalent files and one focused test correction.
+    - Passing ForkLight independent wrapper policy, build, 343-test suite and diff validation.
+    - Concise handoff for two fresh Judges and Main serial Integration.
+  modules:
+    - name: Exact Candidate materialization
+      responsibility: Apply the retained Revision inside the fresh isolated Workspace before model work.
+      consumes: [Workspace-local seed, authorized digest/path set, matching source base.]
+      produces: [Exact ten-path retained Candidate.]
+      boundaries: [No sibling Task read, broader integrity system or product source write.]
+    - name: Test-only correction
+      responsibility: Replace one brittle source-text assertion with behavior-based proof.
+      consumes: [One failing test, already-passing real CLI tests.]
+      produces: [Passing non-brittle focused coverage.]
+      boundaries: [No product code, report semantics or other test change.]
+  callChain:
+    - ForkLight source preparation places the seed inside the fresh Workspace.
+    - Main-owned wrapper validates and applies it, then launches a fresh Grok native Goal.
+    - Grok edits only the named test and hands off.
+    - ForkLight independently runs the unchanged quality commands; two fresh Judges inspect the exact Revision; Main alone may integrate.
+  scenarios:
+    - name: Exact test recovery passes
+      given: The Workspace-local seed matches the retained Revision and current source.
+      when: Grok replaces the brittle source scan without product edits.
+      then: All 343 focused tests pass and the exact Candidate proceeds to dual review.
+    - name: Seed or source mismatch stops
+      given: The seed digest/path set or current source base differs.
+      when: The wrapper starts.
+      then: It fails before Grok or product/test edits and no Candidate is accepted.
+    - name: Recovery cannot close
+      given: Native terminal truth or the unchanged suite still fails after the optional no-Worker reverify.
+      when: The Task reaches its bounded stop.
+      then: M4-C stops with a final decision packet and no replacement.
+  risks:
+    - Reimplementing M4-C could regress accepted behavior; exact seed materialization and test-only edit scope prevent it.
+    - A wrong seed could review the wrong Candidate; one digest/path/source-base check and focused bootstrap test stop that concrete failure.
+  changeBudget:
+    maxFiles: 10
+    maxDiffLines: 1910
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 60000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 1
+  maxWorkerValidationRepairs: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test, .forklight-boundary-capture, .forklight-receipt-retry, plans]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/cli.ts
+    - src/core/main-token-value-report.ts
+    - src/daemon/coordinator.ts
+    - src/daemon/protocol.ts
+    - src/daemon/server.ts
+    - src/mcp/server.ts
+    - tests/daemon-cli.test.ts
+    - tests/daemon.test.ts
+    - tests/main-token-value-report.test.ts
+    - tests/mcp.test.ts
+acceptance:
+  criteria:
+    - The exact retained Candidate is materialized from the Task Workspace on the matching source base; the final Candidate contains exactly its ten paths.
+    - Only tests/main-token-value-report.test.ts differs from the retained seed, replacing the brittle source-text regex with behavior-based coverage.
+    - All parent M4-C pair visibility, strict-positive claim, missing evidence, Worker/economics separation, privacy and read-only behavior remains unchanged.
+    - Daemon, CLI JSON/human and MCP still agree and create no work; no Hub/UI, calibration, ranking or coordination mechanism exists.
+    - One fresh Grok 4.6 Xhigh native Goal, ForkLight independent verification, two fresh different-view Judges and Main serial Integration complete the chain.
+  commands:
+    - node goals/forklight-main-led-execution/execution/m4-wave-1/m4-c-workspace-local-recovery-bootstrap.test.mjs
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/main-token-usage.test.ts tests/main-token-pair.test.ts tests/main-token-value-report.test.ts tests/task-economics-report.test.ts tests/daemon.test.ts tests/daemon-cli.test.ts tests/mcp.test.ts
+    - git diff --check

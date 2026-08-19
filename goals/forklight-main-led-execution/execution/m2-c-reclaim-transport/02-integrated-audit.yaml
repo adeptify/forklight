@@ -1,0 +1,62 @@
+version: 2
+name: M2-C audit integrated reclaim transport observation
+project: /Users/yijunwang/code/forklight
+taskClass: m2-storage-reclaim-transport-integrated-audit
+taskFamily: forklight-storage-lifecycle
+workerProfileId: default
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 0
+  reason: Read-only deterministic integrated transport audit changes no product files and replays no deletion.
+contract:
+  outcome: Verify integrated source gives storage_reclaim the accepted shared observation window, preserves every other timeout and no-replay boundary, and is ready for Main to graduate M2-C without another destructive dogfood run.
+  presentation: { summary: 合入后只读核对 Reclaim 观察窗、无重放和 CLI/MCP 共用路径。, language: zh-CN }
+  context:
+    - Starts only after the exact implementation Candidate is independently verified, accepted by two Judges, safely integrated and activated.
+    - Read the accepted reclaim transport Work Item completely. The prior real reclaim is durable evidence; do not create new reclaimable fixtures outside tests.
+  inScope:
+    - Inspect integrated daemon client mapping, CLI/MCP shared calls, focused tests, and scoped diff.
+  outOfScope:
+    - No edits, real-home access, reclaim, retain, migration, retry, Integration, Judge, Hub, commit, or push.
+  executionSteps:
+    - Trace CLI and MCP storage reclaim into the same daemonRequest resolver.
+    - Confirm long observation changes no daemon operation authority and disconnect remains no-replay.
+    - Run approved commands and return pass or one exact blocker.
+  deliverables: [One bounded integrated-source transport verdict.]
+  modules:
+    - name: Integrated reclaim observer
+      responsibility: Audit method-specific timeout truth and no-replay boundary after Integration.
+      consumes: [Integrated client, CLI/MCP call sites, and focused tests.]
+      produces: [Pass or one exact mismatch.]
+      boundaries: [No mutation, real data, second operation, or UI.]
+  callChain:
+    - Integrated CLI/MCP call shared daemonRequest once.
+    - Shared timeout policy waits without deciding daemon work.
+    - Machine pass returns Main to post-Integration real audit evidence and M2-C graduation.
+  scenarios:
+    - name: Integrated truth matches real failure
+      given: The measured batch took about 32 seconds and the former window was 15 seconds.
+      when: The integrated resolver and tests are inspected.
+      then: Reclaim has the accepted long window, ordinary methods stay exact, and no replay/cancel path exists.
+    - name: Ordinary method boundary remains bounded
+      given: Health, audit, preview and unrelated mutations still use the shared resolver.
+      when: Their integrated timeout mapping is inspected and tested.
+      then: They keep the prior generic or explicitly configured semantics and are not globally widened.
+  risks: [Do not confuse a long observer window with proof that an individual reclaim succeeded.]
+  changeBudget: { maxFiles: 1, maxDiffLines: 20 }
+advancedPolicy: { maxDurationMs: null, observedTokenCeiling: null, noProgressTimeoutMs: null, fileLimit: null, fileLimitMode: warn, changedLineLimit: null, changedLineLimitMode: warn, baseMaxAttempts: 1, maxExtraAttempts: 0, maxMainCorrections: 0, maxMainReverifications: 0, maxConcurrency: 1, completionMode: warn, changeBudgetMode: warn, maxAdaptationRounds: 0 }
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: false
+  allowedCommands: []
+  focusPaths: [src/daemon/client.ts, src/cli.ts, src/mcp/server.ts, tests/daemon.test.ts, tests/daemon-cli.test.ts, tests/mcp.test.ts]
+acceptance:
+  criteria:
+    - Integrated shared timeout mapping matches the accepted reclaim result-observation contract without source changes or destructive replay.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/daemon.test.ts tests/daemon-cli.test.ts tests/mcp.test.ts
+    - git diff --check

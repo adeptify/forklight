@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "family": "hub-product-comprehension",
+  "evidenceMode": "current-graduation-read-only",
+  "historicalRouting": {
+    "result": "cannot-determine",
+    "reason": "score-gap-too-small",
+    "createsWork": false,
+    "scope": "historical-only"
+  },
+  "requirements": [
+    {
+      "id": "runtime-goal-resume-truth",
+      "sourceContract": "goals/forklight-main-led-execution/evidence/m2-grok-native-goal-read-only-plan-persistence-delivery.md",
+      "outcome": "Show the actual Runtime strategy, Goal identity, continuation state, terminal condition and resume evidence without relabeling persistent sessions as native Goal."
+    },
+    {
+      "id": "dependency-ready-work-truth",
+      "sourceContract": "goals/forklight-main-led-execution/evidence/m3-routing-graduation.md",
+      "outcome": "Explain Goal, Plan and Task dependencies, the current ready work and honest cannot-determine routing without generating synthetic work."
+    },
+    {
+      "id": "verification-review-main-decision",
+      "sourceContract": "goals/forklight-main-led-execution/evidence/m4-e-main-efficient-delivery.md",
+      "outcome": "Separate Worker claims, ForkLight independent verification, Judge opinions and Main acceptance or rejection so the user can see who established each fact."
+    },
+    {
+      "id": "partial-result-workspace-disposition",
+      "sourceContract": "goals/forklight-main-led-execution/evidence/m2-storage-read-transport-and-final-reclaim.md",
+      "outcome": "Preserve reusable partial output, expose Workspace disposition and reclaim only named regenerable state after durable evidence is protected."
+    },
+    {
+      "id": "safe-integration-recovery-truth",
+      "sourceContract": "goals/forklight-main-led-execution/evidence/m4-e-host-staged-storage-pair-delivery.md",
+      "outcome": "Show exact Candidate binding, source compatibility, preflight, apply, verification, rollback or activation truth and the remaining recovery decision."
+    },
+    {
+      "id": "main-token-value-truth",
+      "sourceContract": "goals/forklight-main-led-execution/evidence/main-token-pairs.json",
+      "outcome": "Present direct versus delegated Main Token beside Worker usage, cost, elapsed time and corrections, and say cannot-determine when scope, quality or counters are incomplete."
+    }
+  ],
+  "hubMutationOccurred": false,
+  "m5Implemented": false,
+  "sourceRefs": [
+    "goals/forklight-main-led-execution/evidence/m2-grok-native-goal-read-only-plan-persistence-delivery.md",
+    "goals/forklight-main-led-execution/evidence/m2-storage-read-transport-and-final-reclaim.md",
+    "goals/forklight-main-led-execution/evidence/m3-routing-graduation.md",
+    "goals/forklight-main-led-execution/evidence/m4-e-main-efficient-delivery.md",
+    "goals/forklight-main-led-execution/evidence/m4-e-host-staged-storage-pair-delivery.md",
+    "goals/forklight-main-led-execution/evidence/main-token-pairs.json"
+  ]
+}

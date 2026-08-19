@@ -1,0 +1,73 @@
+version: 2
+name: M2 native-plan-only exact storage Candidate adoption
+project: /Users/yijunwang/code/forklight
+taskClass: m2-resolved-terminal-storage-native-plan-adoption
+taskFamily: forklight-storage-lifecycle
+workerProfileId: grok-4-6-xhigh
+deliveryProfileId: forklight-self-upgrade
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 2
+  reason: Destructive storage eligibility and a newly authorized native Planner write boundary require two fresh independent views on one exact Revision before Integration.
+runtime:
+  executable: /Users/yijunwang/code/forklight/goals/forklight-main-led-execution/execution/m2-resolved-terminal-storage-native-plan-recovery/exact-candidate-native-plan-bootstrap.mjs
+contract:
+  outcome: Materialize frozen Revision 172d6a80-bdd7-487a-9e97-b938a67f10c5 byte-for-byte in one new isolated Workspace, let Grok CLI 4.6 Xhigh native /goal create only its Task-local plan artifact while product paths remain model-read-only, and return the independently verified exact Candidate for two fresh Judges.
+  presentation: { summary: 只开放原生 Planner 的 Task-local plan 写入，原样采用两路径 storage Candidate。, language: zh-CN }
+  context:
+    - Read specs/m2-delivery-journeys/work-items/resolved-terminal-storage-native-plan-recovery/spec.md and both parent storage specs completely before acting.
+    - Final Task 65876057-5f0c-4676-a5dc-4a80e5425cb0 is permanently terminal and is not resumed, corrected, retried or replaced by this new Work Item.
+    - Its exact Candidate passed ForkLight verification; native Goal failed only because the read-only toolset had no plan-file mutator and Bash was correctly denied.
+    - This operational bootstrap exposes search_replace/write for Task-local native planning, keeps run_terminal_cmd and Bash denied, and explicitly denies Write/Edit across the Candidate Workspace.
+    - Seed sha256 is 48a73c6b6db1071fd62f2dfffa3799df81805cdc1e6d4a46cb163bb9ebdafcda; mismatch, source drift, missing plan, nonterminal Goal or any extra Candidate byte is terminal.
+    - ForkLight product truth remains persistent-session; only this Task-local operational bridge invokes real Grok CLI /goal with grok-4.6 xhigh and current-model-only.
+    - One base Attempt is the full authority. No extra Attempt, validation repair, correction, reverification, adaptation, handoff, reroute, model switch or replacement is allowed.
+  inScope: [Inspect the exact materialized Candidate, let native Planner persist its Task-local plan, confirm parent behavior and safety boundaries, return bounded native Goal self-check evidence.]
+  outOfScope: [Any Candidate edit or rewrite, third path, additional product test, Bash, web, MCP, Hub, Store/schema/protocol, Integration by Worker, reclaim, commit, push, credentials, model switch or distributed mechanism.]
+  executionSteps: [Read the accepted specs and exact seed, verify the already materialized two-path behavior without editing, use native Goal plan and self-check, stop on any mismatch or unavailable terminal truth.]
+  deliverables: [One byte-identical two-path Candidate plus durable native Goal plan and complete/achieved self-check, or one exact terminal stop reason.]
+  modules:
+    - name: Exact storage Candidate adoption
+      responsibility: Adopt one prior verified storage patch without changing its bytes or behavior while proving native Planner artifact access.
+      consumes: [Frozen seed and digest, current baseline, two allowed paths, accepted specs, Workspace-local native-plan bootstrap.]
+      produces: [Exact Candidate and native Goal truth, or one terminal identity/source/runtime stop.]
+      boundaries: [Model tools cannot Write/Edit Candidate Workspace; no new lifecycle behavior, general integrity protocol, cleanup or fallback.]
+  callChain: [Main materializer proves and applies exact seed in isolated Workspace, Workspace-local bootstrap starts Grok native /goal with plan-only runtime write boundary, Grok reads and self-checks, ForkLight independently verifies, two fresh Judges inspect one Revision, Main alone may integrate.]
+  scenarios:
+    - name: Native Planner succeeds without product edits
+      given: Seed, source and bootstrap match the accepted preflight.
+      when: Grok native Goal plans and inspects the materialized Candidate.
+      then: A non-empty task-local plan and complete plus achieved truth exist, while the Candidate stays byte-identical on exactly two paths.
+    - name: Model attempts product edit
+      given: search_replace/write are present only for native planning.
+      when: A model tool targets any Candidate Workspace path.
+      then: Explicit Write/Edit Workspace denial rejects it and the Work Item stops without fallback.
+    - name: Any exactness or terminal failure
+      given: Seed, paths, source, native Goal or verification differs.
+      when: Any gate runs.
+      then: Stop without correction, retry, replacement review, reroute or Integration.
+  risks: [A wrong Candidate could make unsafe terminal Workspaces reclaimable; exact seed/reverse checks prevent that concrete failure. Model mutators could change product bytes; explicit Workspace Write/Edit denials prevent it.]
+  changeBudget: { maxFiles: 2, maxDiffLines: 181 }
+advancedPolicy: { maxDurationMs: null, observedTokenCeiling: null, noProgressTimeoutMs: null, workerStopGraceMs: 60000, fileLimit: null, fileLimitMode: warn, changedLineLimit: null, changedLineLimitMode: warn, baseMaxAttempts: 1, maxExtraAttempts: 0, maxMainCorrections: 0, maxMainReverifications: 0, maxWorkerValidationRepairs: 0, maxConcurrency: 1, completionMode: warn, changeBudgetMode: warn, maxAdaptationRounds: 0 }
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: false
+  allowedCommands: []
+  focusPaths: [goals/forklight-main-led-execution/execution/m2-resolved-terminal-storage-recovery/172d6a80-bdd7-487a-9e97-b938a67f10c5.patch, goals/forklight-main-led-execution/execution/m2-resolved-terminal-storage-native-plan-recovery/native-plan-only-bootstrap.mjs, specs/m2-delivery-journeys/work-items/resolved-terminal-storage-native-plan-recovery/spec.md, specs/m2-delivery-journeys/work-items/resolved-terminal-storage-disposition/spec.md, src/core/storage-lifecycle.ts, tests/storage-lifecycle.test.ts]
+acceptance:
+  criteria:
+    - Operational policy test proves Planner mutators are exposed while terminal/Bash and Candidate Workspace writes remain denied.
+    - Seed digest and reverse-apply prove exact current-source materialization.
+    - Candidate changes exactly src/core/storage-lifecycle.ts and tests/storage-lifecycle.test.ts, 181 lines, at the frozen full digest.
+    - Grok native Goal has a non-empty plan, at least one classifier run and durable complete plus achieved truth under current-model-only.
+    - Original build, focused storage/daemon/CLI/MCP suite and diff validation pass independently.
+  commands:
+    - node goals/forklight-main-led-execution/execution/m2-resolved-terminal-storage-native-plan-recovery/native-plan-bootstrap.test.mjs
+    - test "$(shasum -a 256 goals/forklight-main-led-execution/execution/m2-resolved-terminal-storage-recovery/172d6a80-bdd7-487a-9e97-b938a67f10c5.patch | awk '{print $1}')" = "48a73c6b6db1071fd62f2dfffa3799df81805cdc1e6d4a46cb163bb9ebdafcda"
+    - git apply -p2 --reverse --check goals/forklight-main-led-execution/execution/m2-resolved-terminal-storage-recovery/172d6a80-bdd7-487a-9e97-b938a67f10c5.patch
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/storage-lifecycle.test.ts tests/daemon.test.ts tests/daemon-cli.test.ts tests/cli-supervision.test.ts tests/mcp.test.ts
+    - git diff --check

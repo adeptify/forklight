@@ -12,6 +12,12 @@ import type {
 } from "./core/direct-codex-publication-service.js";
 import type { DirectCodexSampleReview } from "./core/direct-codex-review.js";
 import type { DirectCodexInboxItem } from "./core/direct-codex-workflow-service.js";
+import type { MainUsageSample, MainUsageStatus } from "./core/main-token-usage.js";
+import type { MainPairAssessResult, MainPairReport } from "./core/main-token-pair.js";
+import {
+  formatMainTokenValueReportHuman,
+  type MainTokenValueReport,
+} from "./core/main-token-value-report.js";
 import { forklightHome } from "./core/config.js";
 import { providerProbeBatchFailed } from "./core/provider-probe.js";
 import { providerLabel, providerNames, providerReadiness } from "./core/providers.js";
@@ -78,6 +84,8 @@ import {
 import { readActivationHandoffContext } from "./activation/runner.js";
 import type { DaemonMethod } from "./daemon/protocol.js";
 import { createSystemInspector, SetupService } from "./setup/service.js";
+import { runSetupCommand, SETUP_USAGE } from "./cli/setup.js";
+import { runBackupCommand, BACKUP_USAGE } from "./cli/backup.js";
 import { HubServer } from "./hub/server.js";
 import {
   discoverOrClaimHub,
@@ -121,11 +129,15 @@ import {
   buildProgressCursor,
   humanCompactInspectionLines,
   humanWaitLines,
+  parseDeliveryDecideOptions,
+  parseDeliveryPrepareOptions,
   parseInspectSummaryOptions,
   parseWaitOptions,
   waitForTask,
   type TaskProgressSnapshot,
 } from "./cli/supervision.js";
+import { formatMainDeliveryCheckpointHuman } from "./core/main-delivery.js";
+import type { MainDeliveryCheckpoint } from "./core/types.js";
 import {
   DEFAULT_QUIET_AFTER_MS,
   isTerminalTaskStatus,
@@ -140,6 +152,14 @@ import {
 } from "./core/task-summary.js";
 import type { TaskResolutionState } from "./core/task-resolution.js";
 import { buildTaskDecisionView } from "./core/task-decision-view.js";
+import { buildMainDecisionPacketForTask } from "./core/main-decision-packet.js";
+import { formatStorageLifecycleHuman } from "./core/storage-lifecycle.js";
+import type {
+  StorageAuditView,
+  StoragePreviewView,
+  StorageReclaimView,
+  StorageRetainView,
+} from "./core/types.js";
 import {
   failureCategoryForTask,
   type WorkerFailureCategory,
@@ -244,15 +264,22 @@ Usage:
   forklight failure-attribution <task-id> --attempt <id> --verification-sequence <n> --cause <candidate|verification-infrastructure|acceptance-contract|insufficient-evidence> --note <text> [--candidate-revision <id> --candidate-digest <sha256>] --confirm [--json]
   forklight review-graph create <task-id> --reviewer-profile <id> [--reviewer-profile <id> ...] --reason <text> --confirm [--json]
       # or --reviewer-profiles <id1,id2,id3> for 1–3 independent read-only judges
+  forklight review-graph repair-result <task-id> --assignment <id> --reason <text> --confirm [--json]
   forklight review-graph status <task-id> [--json]
   forklight inspect <task-id> [--summary] [--events <nonnegative integer>] [--json]
       # prefer --summary for main-thread supervision; full inspect is for deep audit
+  forklight delivery prepare (--task-file <path>|--task <id>) [--reviewer-profiles <id1,id2>] --reason <text> --timeout-ms <ms> --confirm [--include-diff-max-bytes <n>] [--json]
+      # one resumable prepare: submit-or-observe, exact Review Graph, wait to Main decision
+  forklight delivery decide <task-id> --decision <accept|revise|reject> --revision <id> --digest <sha256> --reason <text> --timeout-ms <ms> --confirm [--json]
+      # exact Main decision; accept runs one fresh preflight and one Integration
   forklight list [--json]
   forklight stats [--json] [--provider <name>] [--model <name>] [--since <ISO>] [--until <ISO>] [--deep-audit]
       # default JSON is aggregate-only; --deep-audit requires --json for full failure evidence
-  forklight routing <task-class> --candidates <json> [--json]
+  forklight routing <task-class> (--candidates <json> | --profiles <json-array>) [--family <family>] [--comp-intent none|consider|required] [--comp-triggers <json>] [--json]
       # --candidates <json>: legacy provider/model pairs (runtime/effort optional)
       # --profiles <json-array>: saved Worker Profile ids (mutually exclusive with --candidates)
+      # --family <family>: optional explicit task family for evidence fallback
+      # --comp-intent / --comp-triggers: Main's explicit Competition intent; never implied
   forklight daemon <start|status|stop|restart>
       # start|restart accept optional --startup-timeout-ms <1000-600000>; default 30000
   forklight health [--json]
@@ -275,6 +302,16 @@ Usage:
   forklight upgrade status [--required <1-20>] [--json]
       # read-only consecutive self-upgrade streak; never starts a daemon or Integration
   forklight tokens <task-id> [--json]
+  forklight main-token capture --task-id <id> --comparison-id <id> --role <direct-main|delegated-main> --run-ref <ref> --usage <json-object> [--json]
+  forklight main-token capture-episode --task-id <id> --comparison-id <id> --role <direct-main|delegated-main> --run-ref <episode-ref> --segments <json-array> [--json]
+      # sums named Codex terminal segments into one count-only role sample; never claims savings
+  forklight main-token status --task-id <id> --comparison-id <id> [--json]
+      # status is read-only count-only observation; never computes savings or starts work
+  forklight main-token assess --task-id <id> --comparison-id <id> --same-scope <true|false> --same-acceptance <true|false> --delegated-quality-not-lower <true|false> --direct-verification-ref <id> --delegated-integration-id <id> --reviewer main-codex --assessed-at <canonical-ISO> --schema-version 1 --confirm [--json]
+  forklight main-token pair-report --task-id <id> --comparison-id <id> [--json]
+      # pair-report is read-only; never starts work or invents a saving
+  forklight value-report --families <json-array> [--comparisons <json-array>] [--json]
+      # read-only family Main Token value report; never starts work or writes evidence
   forklight direct-codex capture --usage <json-object> --metadata <json-object> [--json]
   forklight direct-codex capture-task --task-id <id> --run-ref <ref> --usage <json-object> [--json]
   forklight direct-codex inbox --task-class <class> --profile-id <id> [--json]
@@ -296,6 +333,12 @@ Usage:
   forklight remediate verify <task-id> --reason <text> --confirm [--amendment <file>] [--json]
   forklight reverify <task-id> --reason <text> --confirm [--json]
       # rerun a failed candidate's original acceptance suite without a Worker or new Attempt
+  forklight storage audit [--json]
+  forklight storage preview [--task <id>] [--json]
+  forklight storage reclaim (--task <id>|--all-eligible) --confirm [--json]
+  forklight storage retain --task <id> --reason <text> --confirm [--json]
+      # audit/preview never mutate; reclaim removes only known regenerable Task space
+${BACKUP_USAGE}
   forklight hub [--no-open] [--port <port>]
       # starts backend daemon + Hub UI (only control-center UI)
   forklight hub restart --confirm [--detach] [--no-open] [--port <port>] [--startup-timeout-ms <1000-60000>] [--json]
@@ -304,7 +347,7 @@ Usage:
   forklight hub status [--json]
       # read-only Hub status; never starts, claims, replaces, or signals
   forklight doctor [--json]
-`;
+${SETUP_USAGE}`;
 }
 
 function required(value: string | undefined, label: string): string {
@@ -920,6 +963,16 @@ function parseDirectCodexJsonObject(raw: string, flag: "--usage" | "--metadata")
   }
 }
 
+function parseMainTokenJsonArray(raw: string, flag: string): unknown[] {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) throw new Error("shape");
+    return parsed;
+  } catch {
+    throw new Error(`Invalid ${flag} JSON array`);
+  }
+}
+
 function parseCliScalar(raw: string): unknown {
   try { return JSON.parse(raw) as unknown; } catch { return raw; }
 }
@@ -989,6 +1042,173 @@ function humanDirectCodexPublicationPreviewLines(preview: DirectCodexPublication
     `hasNewAcceptedEvidence: ${preview.hasNewAcceptedEvidence}`,
     `acceptedSampleIds: ${preview.acceptedSampleIds.join(", ") || "(none)"}`,
   ].join("\n") + "\n";
+}
+
+function parseMainTokenOptions(
+  arguments_: string[], valueFlags: readonly string[], switchFlags: readonly string[] = ["--json"],
+): DirectCodexCliOptions {
+  const values: Record<string, string> = {};
+  const switches = new Set<string>();
+  const valueSet = new Set(valueFlags);
+  const switchSet = new Set(switchFlags);
+  const seen = new Set<string>();
+  for (let index = 0; index < arguments_.length; index += 1) {
+    const flag = arguments_[index]!;
+    if ((!valueSet.has(flag) && !switchSet.has(flag)) || seen.has(flag)) {
+      throw new Error("Invalid main-token arguments");
+    }
+    seen.add(flag);
+    if (switchSet.has(flag)) {
+      switches.add(flag);
+      continue;
+    }
+    const value = arguments_[index + 1];
+    if (value === undefined || value.startsWith("--")) {
+      throw new Error("Invalid main-token arguments");
+    }
+    values[flag] = value;
+    index += 1;
+  }
+  return { values, switches };
+}
+
+function requiredMainTokenOption(options: DirectCodexCliOptions, flag: string): string {
+  const value = options.values[flag];
+  if (value === undefined) throw new Error(`Missing main-token option: ${flag}`);
+  return value;
+}
+
+function parseMainTokenBooleanFlag(options: DirectCodexCliOptions, flag: string): boolean {
+  const raw = requiredMainTokenOption(options, flag);
+  if (raw === "true") return true;
+  if (raw === "false") return false;
+  throw new Error(`Invalid main-token option: ${flag}`);
+}
+
+function parseValueReportStringArray(raw: string, flag: string): string[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(`Invalid ${flag} JSON array`);
+  }
+  if (!Array.isArray(parsed) || parsed.some((entry) => typeof entry !== "string")) {
+    throw new Error(`Invalid ${flag} JSON array`);
+  }
+  return parsed;
+}
+
+function humanMainPairAssessLines(result: MainPairAssessResult): string {
+  const lines = [
+    `outcome: ${result.outcome}`,
+    `reasons: ${result.reasons.join(", ") || "(none)"}`,
+    `schemaVersion: ${result.schemaVersion}`,
+  ];
+  if (result.assessment !== undefined) {
+    lines.push(`assessmentId: ${result.assessment.assessmentId}`);
+    lines.push(`decision: ${result.assessment.decision}`);
+    if (result.assessment.rejectionReason !== undefined) {
+      lines.push(`rejectionReason: ${result.assessment.rejectionReason}`);
+    }
+  }
+  return lines.join("\n") + "\n";
+}
+
+function humanMainPairReportLines(report: MainPairReport): string {
+  const percentage = report.percentageChange.available
+    ? String(report.percentageChange.value)
+    : `unavailable (${report.percentageChange.reason})`;
+  const saving = report.saving.status === "saving"
+    ? String(report.saving.tokens)
+    : report.saving.status;
+  return [
+    `forklightTaskId: ${report.forklightTaskId}`,
+    `comparisonId: ${report.comparisonId}`,
+    `validity: ${report.validity}`,
+    `reasons: ${report.reasons.join(", ") || "(none)"}`,
+    `method: ${report.method}`,
+    `directCodexProfileId: ${report.directCodexProfileId ?? "(none)"}`,
+    `directGrossTokens: ${report.directGrossTokens ?? "(none)"}`,
+    `delegatedGrossTokens: ${report.delegatedGrossTokens ?? "(none)"}`,
+    `signedChange: ${report.signedChange ?? "(none)"}`,
+    `percentageChange: ${percentage}`,
+    `saving: ${saving}`,
+    `schemaVersion: ${report.schemaVersion}`,
+  ].join("\n") + "\n";
+}
+
+function humanMainUsageSegmentLines(sample: MainUsageSample): string[] {
+  if (sample.segments === undefined) return [];
+  const lines = [`segments: ${sample.segments.length}`];
+  for (const segment of sample.segments) {
+    lines.push(`  ${segment.ordinal}: ${segment.runRef}`);
+    lines.push(`    inputTokens: ${segment.inputTokens}`);
+    lines.push(`    outputTokens: ${segment.outputTokens}`);
+    lines.push(`    cacheReadInputTokens: ${segment.cacheReadInputTokens}`);
+    lines.push(`    cacheCreationInputTokens: ${segment.cacheCreationInputTokens}`);
+    lines.push(`    grossTokens: ${segment.grossTokens}`);
+  }
+  return lines;
+}
+
+function humanMainUsageSampleLines(sample: MainUsageSample): string {
+  return [
+    `sampleId: ${sample.sampleId}`,
+    `forklightTaskId: ${sample.forklightTaskId}`,
+    `comparisonId: ${sample.comparisonId}`,
+    `role: ${sample.role}`,
+    `taskClass: ${sample.taskClass}`,
+    `taskFamily: ${sample.taskFamily}`,
+    `directCodexProfileId: ${sample.directCodexProfileId}`,
+    `inputTokens: ${sample.inputTokens}`,
+    `outputTokens: ${sample.outputTokens}`,
+    `cacheReadInputTokens: ${sample.cacheReadInputTokens}`,
+    `cacheCreationInputTokens: ${sample.cacheCreationInputTokens}`,
+    `grossTokens: ${sample.grossTokens}`,
+    `source: ${sample.source}`,
+    `runRef: ${sample.runRef}`,
+    `capturedAt: ${sample.capturedAt}`,
+    `schemaVersion: ${sample.schemaVersion}`,
+    ...humanMainUsageSegmentLines(sample),
+  ].join("\n") + "\n";
+}
+
+function humanMainUsageStatusLines(status: MainUsageStatus): string {
+  const lines = [
+    `forklightTaskId: ${status.forklightTaskId}`,
+    `comparisonId: ${status.comparisonId}`,
+    `taskClass: ${status.taskClass ?? "(none)"}`,
+    `taskFamily: ${status.taskFamily ?? "(none)"}`,
+    `directCodexProfileId: ${status.directCodexProfileId ?? "(none)"}`,
+    `capturedRoles: ${status.capturedRoles.join(", ") || "(none)"}`,
+    `missingRoles: ${status.missingRoles.join(", ") || "(none)"}`,
+    `countComplete: ${status.countComplete}`,
+    `samples: ${status.samples.length}`,
+  ];
+  for (const sample of status.samples) {
+    lines.push(`  ${sample.sampleId}: ${sample.role}`);
+    lines.push(`    inputTokens: ${sample.inputTokens}`);
+    lines.push(`    outputTokens: ${sample.outputTokens}`);
+    lines.push(`    cacheReadInputTokens: ${sample.cacheReadInputTokens}`);
+    lines.push(`    cacheCreationInputTokens: ${sample.cacheCreationInputTokens}`);
+    lines.push(`    grossTokens: ${sample.grossTokens}`);
+    lines.push(`    source: ${sample.source}`);
+    lines.push(`    runRef: ${sample.runRef}`);
+    lines.push(`    capturedAt: ${sample.capturedAt}`);
+    lines.push(`    schemaVersion: ${sample.schemaVersion}`);
+    if (sample.segments !== undefined) {
+      lines.push(`    segments: ${sample.segments.length}`);
+      for (const segment of sample.segments) {
+        lines.push(`      ${segment.ordinal}: ${segment.runRef}`);
+        lines.push(`        inputTokens: ${segment.inputTokens}`);
+        lines.push(`        outputTokens: ${segment.outputTokens}`);
+        lines.push(`        cacheReadInputTokens: ${segment.cacheReadInputTokens}`);
+        lines.push(`        cacheCreationInputTokens: ${segment.cacheCreationInputTokens}`);
+        lines.push(`        grossTokens: ${segment.grossTokens}`);
+      }
+    }
+  }
+  return `${lines.join("\n")}\n`;
 }
 
 function humanDirectCodexRegistrationLines(result: DirectCodexRegistrationResult): string {
@@ -1824,6 +2044,144 @@ async function main(): Promise<void> {
     );
   }
 
+  if (command === "main-token") {
+    const subcommand = required(positional, "main-token subcommand");
+    if (subcommand === "capture") {
+      const options = parseMainTokenOptions(rest, [
+        "--task-id", "--comparison-id", "--role", "--run-ref", "--usage",
+      ]);
+      const taskId = requiredMainTokenOption(options, "--task-id");
+      const comparisonId = requiredMainTokenOption(options, "--comparison-id");
+      const role = requiredMainTokenOption(options, "--role");
+      const runRef = requiredMainTokenOption(options, "--run-ref");
+      const usageEvent = parseDirectCodexJsonObject(
+        requiredMainTokenOption(options, "--usage"), "--usage",
+      );
+      await ensureDaemon();
+      const sample = await daemonRequest<MainUsageSample>("main_token_capture", {
+        taskId, comparisonId, role, runRef, usage: usageEvent,
+      });
+      process.stdout.write(options.switches.has("--json")
+        ? `${JSON.stringify(sample, null, 2)}\n`
+        : humanMainUsageSampleLines(sample));
+      return;
+    }
+
+    if (subcommand === "capture-episode") {
+      const options = parseMainTokenOptions(rest, [
+        "--task-id", "--comparison-id", "--role", "--run-ref", "--segments",
+      ]);
+      const taskId = requiredMainTokenOption(options, "--task-id");
+      const comparisonId = requiredMainTokenOption(options, "--comparison-id");
+      const role = requiredMainTokenOption(options, "--role");
+      const runRef = requiredMainTokenOption(options, "--run-ref");
+      const segments = parseMainTokenJsonArray(
+        requiredMainTokenOption(options, "--segments"), "--segments",
+      );
+      await ensureDaemon();
+      const sample = await daemonRequest<MainUsageSample>("main_token_capture_episode", {
+        taskId, comparisonId, role, runRef, segments,
+      });
+      process.stdout.write(options.switches.has("--json")
+        ? `${JSON.stringify(sample, null, 2)}\n`
+        : humanMainUsageSampleLines(sample));
+      return;
+    }
+
+    if (subcommand === "status") {
+      const options = parseMainTokenOptions(rest, ["--task-id", "--comparison-id"]);
+      const taskId = requiredMainTokenOption(options, "--task-id");
+      const comparisonId = requiredMainTokenOption(options, "--comparison-id");
+      await ensureDaemon();
+      const status = await daemonRequest<MainUsageStatus>("main_token_status", {
+        taskId, comparisonId,
+      });
+      process.stdout.write(options.switches.has("--json")
+        ? `${JSON.stringify(status, null, 2)}\n`
+        : humanMainUsageStatusLines(status));
+      return;
+    }
+
+    if (subcommand === "assess") {
+      const options = parseMainTokenOptions(rest, [
+        "--task-id", "--comparison-id", "--same-scope", "--same-acceptance",
+        "--delegated-quality-not-lower", "--direct-verification-ref",
+        "--delegated-integration-id", "--reviewer", "--assessed-at", "--schema-version",
+      ], ["--confirm", "--json"]);
+      if (!options.switches.has("--confirm")) {
+        throw new Error("Main pair assessment requires explicit --confirm");
+      }
+      const taskId = requiredMainTokenOption(options, "--task-id");
+      const comparisonId = requiredMainTokenOption(options, "--comparison-id");
+      const sameScope = parseMainTokenBooleanFlag(options, "--same-scope");
+      const sameAcceptance = parseMainTokenBooleanFlag(options, "--same-acceptance");
+      const delegatedQualityNotLower = parseMainTokenBooleanFlag(options, "--delegated-quality-not-lower");
+      const directVerificationRef = {
+        referenceId: requiredMainTokenOption(options, "--direct-verification-ref"),
+      };
+      const delegatedIntegrationOperationId = requiredMainTokenOption(options, "--delegated-integration-id");
+      const reviewer = requiredMainTokenOption(options, "--reviewer");
+      const assessedAt = requiredMainTokenOption(options, "--assessed-at");
+      const schemaVersion = parseCliScalar(requiredMainTokenOption(options, "--schema-version"));
+      await ensureDaemon();
+      const result = await daemonRequest<MainPairAssessResult>("main_token_assess", {
+        taskId,
+        comparisonId,
+        confirm: true,
+        sameScope,
+        sameAcceptance,
+        delegatedQualityNotLower,
+        directVerificationRef,
+        delegatedIntegrationOperationId,
+        reviewer,
+        assessedAt,
+        schemaVersion,
+      });
+      process.stdout.write(options.switches.has("--json")
+        ? `${JSON.stringify(result, null, 2)}\n`
+        : humanMainPairAssessLines(result));
+      return;
+    }
+
+    if (subcommand === "pair-report") {
+      const options = parseMainTokenOptions(rest, ["--task-id", "--comparison-id"]);
+      const taskId = requiredMainTokenOption(options, "--task-id");
+      const comparisonId = requiredMainTokenOption(options, "--comparison-id");
+      await ensureDaemon();
+      const report = await daemonRequest<MainPairReport>("main_token_pair_report", {
+        taskId, comparisonId,
+      });
+      process.stdout.write(options.switches.has("--json")
+        ? `${JSON.stringify(report, null, 2)}\n`
+        : humanMainPairReportLines(report));
+      return;
+    }
+
+    throw new Error("Unknown main-token subcommand. Use: capture, capture-episode, status, assess, or pair-report.");
+  }
+
+  if (command === "value-report") {
+    const tokens = positional === undefined ? rest : [positional, ...rest];
+    const options = parseMainTokenOptions(tokens, ["--families", "--comparisons"]);
+    const families = parseValueReportStringArray(
+      requiredMainTokenOption(options, "--families"),
+      "--families",
+    );
+    const comparisonsRaw = options.values["--comparisons"];
+    const comparisons = comparisonsRaw === undefined
+      ? undefined
+      : parseValueReportStringArray(comparisonsRaw, "--comparisons");
+    await ensureDaemon();
+    const report = await daemonRequest<MainTokenValueReport>("main_token_value_report", {
+      families,
+      ...(comparisons === undefined ? {} : { comparisons }),
+    });
+    process.stdout.write(options.switches.has("--json")
+      ? `${JSON.stringify(report, null, 2)}\n`
+      : formatMainTokenValueReportHuman(report));
+    return;
+  }
+
   if (command === "validate") {
     const store = new StateStore(forklightHome());
     try {
@@ -2607,6 +2965,89 @@ async function main(): Promise<void> {
     throw new Error(`Unknown upgrade subcommand: ${subcommand}. Use: status.`);
   }
 
+  if (command === "delivery") {
+    const subcommand = required(positional, "delivery subcommand (prepare or decide)");
+    if (subcommand === "prepare") {
+      const parsed = parseDeliveryPrepareOptions(rest);
+      let preparedTaskId: string | undefined = parsed.taskId;
+      const { output } = await withCliExchangeReceipt({
+        operation: "forklight_delivery_prepare",
+        home: forklightHome(),
+        args: {
+          ...(parsed.taskFile === undefined ? {} : { taskFile: parsed.taskFile }),
+          ...(parsed.taskId === undefined ? {} : { taskId: parsed.taskId }),
+          reviewerProfileIds: parsed.reviewerProfileIds,
+          reasonLength: parsed.reason.trim().length,
+          timeoutMs: parsed.timeoutMs,
+          confirm: true,
+          ...(parsed.includeDiffMaxBytes === undefined
+            ? {}
+            : { includeDiffMaxBytes: parsed.includeDiffMaxBytes }),
+          json: parsed.json,
+        },
+        taskId: () => preparedTaskId,
+        invoke: async () => {
+          await ensureDaemon();
+          const checkpoint = await daemonRequest<MainDeliveryCheckpoint>("delivery_prepare", {
+            ...(parsed.taskFile === undefined ? {} : { taskFile: parsed.taskFile }),
+            ...(parsed.taskId === undefined ? {} : { taskId: parsed.taskId }),
+            reviewerProfileIds: parsed.reviewerProfileIds,
+            reason: parsed.reason,
+            timeoutMs: parsed.timeoutMs,
+            confirm: true,
+            ...(parsed.includeDiffMaxBytes === undefined
+              ? {}
+              : { includeDiffMaxBytes: parsed.includeDiffMaxBytes }),
+          });
+          preparedTaskId = checkpoint.task.id;
+          return checkpoint;
+        },
+        renderOutput: (checkpoint) => parsed.json
+          ? `${JSON.stringify(checkpoint, null, 2)}\n`
+          : formatMainDeliveryCheckpointHuman(checkpoint),
+      });
+      process.stdout.write(output);
+      return;
+    }
+    if (subcommand === "decide") {
+      const taskId = required(rest[0], "task id");
+      const parsed = parseDeliveryDecideOptions(rest.slice(1), taskId);
+      const { output } = await withCliExchangeReceipt({
+        operation: "forklight_delivery_decide",
+        home: forklightHome(),
+        args: {
+          taskId: parsed.taskId,
+          decision: parsed.decision,
+          revisionId: parsed.revisionId,
+          digest: parsed.digest,
+          reasonLength: parsed.reason.trim().length,
+          timeoutMs: parsed.timeoutMs,
+          confirm: true,
+          json: parsed.json,
+        },
+        taskId: parsed.taskId,
+        invoke: async () => {
+          await ensureDaemon();
+          return daemonRequest<MainDeliveryCheckpoint>("delivery_decide", {
+            taskId: parsed.taskId,
+            decision: parsed.decision,
+            revisionId: parsed.revisionId,
+            digest: parsed.digest,
+            reason: parsed.reason,
+            timeoutMs: parsed.timeoutMs,
+            confirm: true,
+          });
+        },
+        renderOutput: (checkpoint) => parsed.json
+          ? `${JSON.stringify(checkpoint, null, 2)}\n`
+          : formatMainDeliveryCheckpointHuman(checkpoint),
+      });
+      process.stdout.write(output);
+      return;
+    }
+    throw new Error("delivery subcommand must be prepare or decide");
+  }
+
   if (command === "integration") {
     const subcommand = required(positional, "integration subcommand (preflight, apply, status, wait, or history)");
     if (subcommand === "preflight") {
@@ -2951,9 +3392,30 @@ async function main(): Promise<void> {
     throw new Error(`Unknown competition subcommand: ${subcommand}. Use: status, list, compare, main-decision, retain-partial, or handoff.`);
   }
 
-  if (command === "console" || command === "setup") {
+  if (command === "setup") {
+    const setupArgs = [positional, ...rest].filter(
+      (value): value is string => value !== undefined,
+    );
+    const result = await runSetupCommand(setupArgs);
+    process.stdout.write(result.stdout);
+    return;
+  }
+
+  if (command === "backup") {
+    const backupArgs = [positional, ...rest].filter(
+      (value): value is string => value !== undefined,
+    );
+    const handled = await runBackupCommand(backupArgs);
+    process.stdout.write(handled.stdout);
+    if (handled.result.status !== "ready" && handled.result.status !== "completed") {
+      process.exitCode = 1;
+    }
+    return;
+  }
+
+  if (command === "console") {
     throw new Error(
-      `The standalone ${command} UI was removed. Use: forklight hub\n\n${usage()}`,
+      `The standalone console UI was removed. Use: forklight hub\n\n${usage()}`,
     );
   }
 
@@ -3207,6 +3669,124 @@ async function main(): Promise<void> {
     throw new Error(
       `Unknown adapt subcommand: ${subcommand}. Use: preview or apply.`,
     );
+  }
+
+  if (command === "storage") {
+    const subcommand = required(positional, "storage subcommand (audit, preview, reclaim, or retain)");
+    const switches = new Set<string>();
+    const values = new Map<string, string>();
+    const valueFlags = new Set(["--task", "--reason"]);
+    const switchFlags = new Set(["--json", "--confirm", "--all-eligible"]);
+    for (let index = 0; index < rest.length; index += 1) {
+      const token = rest[index]!;
+      if (valueFlags.has(token)) {
+        const value = rest[index + 1];
+        if (value === undefined || value.startsWith("-")) {
+          throw new Error(`storage ${subcommand} requires a value for ${token}`);
+        }
+        if (values.has(token)) throw new Error(`storage ${subcommand} duplicate flag: ${token}`);
+        values.set(token, value);
+        index += 1;
+        continue;
+      }
+      if (switchFlags.has(token)) {
+        if (switches.has(token)) throw new Error(`storage ${subcommand} duplicate flag: ${token}`);
+        switches.add(token);
+        continue;
+      }
+      throw new Error(`storage ${subcommand}: unknown argument: ${token}`);
+    }
+    const taskId = values.get("--task");
+    if (subcommand === "audit") {
+      if (taskId !== undefined || values.has("--reason") || switches.has("--confirm") || switches.has("--all-eligible")) {
+        throw new Error("storage audit accepts only --json");
+      }
+      await ensureDaemon();
+      const view = await daemonRequest<StorageAuditView>("storage_audit", {});
+      process.stdout.write(json
+        ? `${JSON.stringify(view, null, 2)}\n`
+        : formatStorageLifecycleHuman(view));
+      return;
+    }
+    if (subcommand === "preview") {
+      if (values.has("--reason") || switches.has("--confirm") || switches.has("--all-eligible")) {
+        throw new Error("storage preview accepts only --task and --json");
+      }
+      await ensureDaemon();
+      const view = await daemonRequest<StoragePreviewView>(
+        "storage_preview",
+        taskId === undefined ? {} : { taskId },
+      );
+      process.stdout.write(json
+        ? `${JSON.stringify(view, null, 2)}\n`
+        : formatStorageLifecycleHuman(view));
+      return;
+    }
+    if (subcommand === "reclaim") {
+      if (!switches.has("--confirm")) {
+        throw new Error("storage reclaim requires explicit --confirm\n\n" + usage());
+      }
+      const allEligible = switches.has("--all-eligible");
+      if ((taskId === undefined) === !allEligible) {
+        throw new Error("storage reclaim requires exactly one of --task <id> or --all-eligible");
+      }
+      if (values.has("--reason")) {
+        throw new Error("storage reclaim does not accept --reason");
+      }
+      const { output } = await withCliExchangeReceipt({
+        operation: "forklight_storage_reclaim",
+        home: forklightHome(),
+        args: {
+          ...(taskId === undefined ? { allEligible: true } : { taskId }),
+          confirm: true,
+          json,
+        },
+        taskId: taskId ?? (() => undefined),
+        invoke: async () => {
+          await ensureDaemon();
+          return daemonRequest<StorageReclaimView>("storage_reclaim", {
+            confirm: true,
+            ...(taskId === undefined ? { allEligible: true } : { taskId }),
+          });
+        },
+        renderOutput: (view) => json
+          ? `${JSON.stringify(view, null, 2)}\n`
+          : formatStorageLifecycleHuman(view),
+      });
+      process.stdout.write(output);
+      return;
+    }
+    if (subcommand === "retain") {
+      if (!switches.has("--confirm")) {
+        throw new Error("storage retain requires explicit --confirm\n\n" + usage());
+      }
+      if (taskId === undefined) throw new Error("storage retain requires --task <id>");
+      const reason = values.get("--reason");
+      if (reason === undefined) throw new Error("storage retain requires --reason <text>");
+      if (switches.has("--all-eligible")) {
+        throw new Error("storage retain does not accept --all-eligible");
+      }
+      const { output } = await withCliExchangeReceipt({
+        operation: "forklight_storage_retain",
+        home: forklightHome(),
+        args: { taskId, reasonLength: reason.length, confirm: true, json },
+        taskId,
+        invoke: async () => {
+          await ensureDaemon();
+          return daemonRequest<StorageRetainView>("storage_retain", {
+            taskId,
+            reason,
+            confirm: true,
+          });
+        },
+        renderOutput: (view) => json
+          ? `${JSON.stringify(view, null, 2)}\n`
+          : formatStorageLifecycleHuman(view),
+      });
+      process.stdout.write(output);
+      return;
+    }
+    throw new Error(`Unknown storage subcommand: ${subcommand}. Use: audit, preview, reclaim, or retain.`);
   }
 
   if (command === "doctor") {
@@ -3967,7 +4547,7 @@ async function main(): Promise<void> {
       return;
     }
     if (command === "review-graph") {
-      const sub = required(positional, "review-graph subcommand (create|status)");
+      const sub = required(positional, "review-graph subcommand (create|status|repair-result)");
       const taskId = required(rest[0], "task id");
       const asJson = rest.includes("--json");
       if (sub === "create") {
@@ -4037,6 +4617,54 @@ async function main(): Promise<void> {
         }
         return;
       }
+      if (sub === "repair-result") {
+        const assignmentId = required(option(rest, "--assignment"), "assignment id");
+        const reason = required(option(rest, "--reason"), "repair reason");
+        if (!rest.includes("--confirm")) {
+          throw new Error("review-graph repair-result requires --confirm");
+        }
+        await ensureDaemon();
+        const result = await daemonRequest<Record<string, unknown>>("review_graph_repair_result", {
+          taskId,
+          assignmentId,
+          reason,
+          confirm: true,
+        });
+        if (asJson) {
+          process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+        } else {
+          const graph = result.graph as Record<string, unknown> | undefined;
+          process.stdout.write(`review-graph repair-result: ${String(result.repairTaskId)}\n`);
+          process.stdout.write(`assignment: ${String(result.assignmentId)}\n`);
+          process.stdout.write(`originalFailure: ${String(result.originalFailureCode)}\n`);
+          process.stdout.write(`created: ${String(result.created)}\n`);
+          const assignments = Array.isArray(graph?.assignments) ? graph.assignments : [];
+          process.stdout.write(`assignments: ${String(assignments.length)}\n`);
+          process.stdout.write(`judges: ${String(assignments.length)}\n`);
+          const aggregation = graph?.aggregation as Record<string, unknown> | undefined;
+          if (aggregation !== undefined) {
+            process.stdout.write(
+              `aggregation: state=${String(aggregation.state)} ` +
+              `usable=${String(aggregation.usable)}/${String(aggregation.total)} ` +
+              `unusable=${String(aggregation.unusable)} pending=${String(aggregation.pending)}\n`,
+            );
+          }
+          const repaired = assignments.find((raw) => {
+            const row = raw as Record<string, unknown>;
+            return String(row.id) === String(result.assignmentId);
+          }) as Record<string, unknown> | undefined;
+          const repair = repaired?.resultRepair as Record<string, unknown> | undefined;
+          process.stdout.write(`repair: ${String(repair?.status ?? "unknown")}\n`);
+          process.stdout.write(`originalFailureVisible: ${String(repaired?.failureCode ?? result.originalFailureCode)}\n`);
+          process.stdout.write(`effectiveUsable: ${String(repaired?.resultUsable ?? false)}\n`);
+          process.stdout.write(`requiresFreshMainReview: ${String(graph?.requiresFreshMainReview ?? false)}\n`);
+          process.stdout.write(`next: ${String(graph?.nextAction ?? "")}\n`);
+          process.stdout.write(
+            "Original failed assignment remains visible. This is not a new Judge. Main decides after the repair is terminal.\n",
+          );
+        }
+        return;
+      }
       if (sub === "status") {
         await ensureDaemon();
         const result = await daemonRequest<Record<string, unknown> | null>(
@@ -4083,6 +4711,15 @@ async function main(): Promise<void> {
             if (a.failureCode !== undefined) {
               process.stdout.write(`  failure: ${String(a.failureCode)}\n`);
             }
+            if (a.resultRepair !== undefined && a.resultRepair !== null && typeof a.resultRepair === "object") {
+              const repair = a.resultRepair as Record<string, unknown>;
+              let repairLine =
+                `  repair: status=${String(repair.status)} usable=${String(repair.resultUsable)}`;
+              if (repair.failureCode !== undefined) {
+                repairLine += ` failure=${String(repair.failureCode)}`;
+              }
+              process.stdout.write(`${repairLine}\n`);
+            }
           }
           process.stdout.write(
             "Main remains the final authority; judge dispositions are never automatic acceptance or a vote.\n",
@@ -4090,7 +4727,7 @@ async function main(): Promise<void> {
         }
         return;
       }
-      throw new Error("review-graph subcommand must be create or status");
+      throw new Error("review-graph subcommand must be create, status, or repair-result");
     }
     if (command === "revise") {
       const taskId = required(positional, "task id");
@@ -4317,17 +4954,19 @@ async function main(): Promise<void> {
             } catch {
               // A diff does not exist until independent verification begins.
             }
+            const decision = buildTaskDecisionView({
+              task,
+              attempts,
+              events,
+              integrationResults,
+            });
             return buildCompactInspection({
               task,
               attempts,
               events,
               integrationResults,
-              decision: buildTaskDecisionView({
-                task,
-                attempts,
-                events,
-                integrationResults,
-              }),
+              decision,
+              decisionPacket: buildMainDecisionPacketForTask(store, taskId, decision),
               diff,
               eventLimit: summaryOptions.eventLimit,
             });

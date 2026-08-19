@@ -1,0 +1,76 @@
+{
+  "schemaVersion": 1,
+  "family": "forklight-storage-lifecycle",
+  "taskClass": "m4-main-offline-storage-lifecycle-checkpoint",
+  "taskLabel": "M4-E Main-offline storage-lifecycle checkpoint pair",
+  "presentationSummary": "生成新的 Main-offline storage-lifecycle 单份可验证事实，保留旧负样本且不执行回收。",
+  "selectionNote": "The activated Main-offline episode delivery admits exactly one new current storage-lifecycle subject; the accepted negative pair remains immutable.",
+  "directCodexProfileId": "codex-main-gpt-5.6-sol-xhigh-v1",
+  "outputPath": "goals/forklight-main-led-execution/evidence/m4-calibration/forklight-storage-lifecycle-main-offline-checkpoint.json",
+  "acceptanceCommand": "node validate-artifact.mjs calibration-input.json goals/forklight-main-led-execution/evidence/m4-calibration/forklight-storage-lifecycle-main-offline-checkpoint.json",
+  "task": "Project the supplied current ForkLight storage previews for three M4-E Tasks. Preserve the rejected reusable partial, identify only the two integration-delivered comparison and episode Tasks as reclaimable, retain exact byte/process/integrity truth, and report that this comparison performed no reclaim. This is a new Main-offline subject and must not reuse or mutate the accepted negative comparison.",
+  "evidence": {
+    "source": "current-forklight-storage-preview",
+    "items": [
+      {
+        "taskId": "2d774265-344f-43ea-8f69-79e2624765d3",
+        "taskStatus": "succeeded",
+        "mainDisposition": "rejected-reusable-partial",
+        "classification": "protected",
+        "reason": "unresolved-partial",
+        "nextAction": "protect-and-wait",
+        "reusablePartial": true,
+        "regenerableBytes": 142781211,
+        "durableBytes": 5515895,
+        "unknownBytes": 0,
+        "processCount": 0
+      },
+      {
+        "taskId": "4709c1b1-e093-4465-bbb0-bbad221b34b7",
+        "taskStatus": "succeeded",
+        "mainDisposition": "accepted-integrated",
+        "classification": "reclaimable",
+        "reason": "integration-delivered",
+        "nextAction": "confirm-reclaim",
+        "reusablePartial": false,
+        "regenerableBytes": 19819291,
+        "durableBytes": 924880,
+        "unknownBytes": 0,
+        "processCount": 0
+      },
+      {
+        "taskId": "6676be3a-24b4-4bbc-a8c0-7f2a3079e848",
+        "taskStatus": "succeeded",
+        "mainDisposition": "accepted-integrated-activated",
+        "classification": "reclaimable",
+        "reason": "integration-delivered",
+        "nextAction": "confirm-reclaim",
+        "reusablePartial": false,
+        "regenerableBytes": 159988810,
+        "durableBytes": 13865918,
+        "unknownBytes": 0,
+        "processCount": 0
+      }
+    ],
+    "storeIntegrity": {
+      "quickCheck": "ok",
+      "foreignKeyViolationCount": 0
+    }
+  },
+  "requiredProjection": {
+    "evidenceMode": "current-m4-e-main-offline-read-only",
+    "protectedTaskIds": [
+      "2d774265-344f-43ea-8f69-79e2624765d3"
+    ],
+    "reclaimableTaskIds": [
+      "4709c1b1-e093-4465-bbb0-bbad221b34b7",
+      "6676be3a-24b4-4bbc-a8c0-7f2a3079e848"
+    ],
+    "reclaimExecuted": false
+  },
+  "sourceRefs": [
+    "goals/forklight-main-led-execution/evidence/m4-e-fresh-preflight-stop-decision-packet.md",
+    "goals/forklight-main-led-execution/evidence/m4-e-fresh-storage-lifecycle-pair-stop-decision-packet.md",
+    "goals/forklight-main-led-execution/evidence/m4-e-main-offline-usage-episode-delivery.md"
+  ]
+}

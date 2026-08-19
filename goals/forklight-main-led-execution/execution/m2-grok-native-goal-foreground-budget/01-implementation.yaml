@@ -1,0 +1,73 @@
+version: 2
+name: M2 Grok native Goal foreground Planner budget
+project: /Users/yijunwang/code/forklight
+taskClass: m2-grok-native-goal-foreground-budget
+taskFamily: forklight-runtime-recovery
+workerProfileId: grok-4-6-xhigh
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 2
+  reason: Core Runtime launch environment changes can falsely complete or pause every Grok native Goal, so two independent views are required.
+contract:
+  outcome: Prevent Grok CLI's default 600-second foreground Planner budget from canceling a still-progressing ForkLight native Goal while leaving ForkLight Task policy as the configurable completion authority.
+  presentation: { summary: 放宽Grok原生Goal规划等待，但不新增Task超时或重试。, language: zh-CN }
+  context:
+    - Read only the accepted Work Item spec and the two focus paths; do not scan broad repository history or other Goal files.
+    - Failed audit Task 385e9c92-e3bb-4eb9-8008-e5ae255f1b31 had no ForkLight duration, Token or no-progress ceiling, but Grok CLI 1.0.4 canceled its foreground Planner at budget_ms=600000 after 124 useful reads.
+    - GROK_FOREGROUND_BLOCK_BUDGET_MS is an official local Grok CLI environment variable; 86400000 is accepted and serves only as a distant process safety breaker.
+    - This is one local developer path. Do not add public configuration, schema, locks, leases, hashes, coordination or another timer.
+    - Preflight reviewed the three ignored roots still classified as visible business input; .forklight-boundary-capture, .forklight-receipt-retry and plans are empty zero-byte directories and cannot alter this Candidate.
+  inScope: [Native Goal environment freezes a 24-hour foreground-child budget, non-native environment deletes inherited drift, focused two-branch tests.]
+  outOfScope: [Audit retry, Goal resume, other Runtime behavior, Task policy, public configuration, Store, protocol, storage lifecycle, Integration internals, docs, Hub/UI, commit, push, or reclaim.]
+  executionSteps:
+    - Inspect buildGrokWorkerEnv and its existing environment tests only.
+    - Add one named constant and the two exact native/non-native environment branches.
+    - Add focused conflicting-parent-value tests with cleanup in finally.
+    - Run every approved command and self-review only the two allowed paths.
+  deliverables: [Exact two-path Candidate, focused behavior proof, concise handoff explaining process breaker versus Task deadline.]
+  modules:
+    - name: Grok child environment
+      responsibility: Freeze the native Planner foreground budget and remove accidental non-native inheritance.
+      consumes: [nativeGoal resolution, parent process environment, fixed local-development breaker value.]
+      produces: [Deterministic child environment for native and non-native Grok execution.]
+      boundaries: [No Task schema, user setting, timer, retry or Goal-state change.]
+    - name: Runtime environment regression tests
+      responsibility: Prove native override and non-native deletion without leaking parent test state.
+      consumes: [buildGrokWorkerEnv, conflicting parent environment.]
+      produces: [Focused deterministic assertions.]
+      boundaries: [No live Provider call or broad repository test rewrite.]
+  callChain: [ForkLight resolves native-goal, adapter builds isolated child environment, Grok Planner remains foreground while progressing, native Goal alone decides complete plus achieved, ForkLight independently verifies the Candidate.]
+  scenarios:
+    - name: Native Goal overrides the external default
+      given: The parent environment omits or supplies a conflicting GROK_FOREGROUND_BLOCK_BUDGET_MS.
+      when: ForkLight creates a native Goal child environment.
+      then: The child receives exactly 86400000 alongside existing Goal and current-model-only variables.
+    - name: Persistent session does not inherit operator drift
+      given: The parent environment supplies GROK_FOREGROUND_BLOCK_BUDGET_MS.
+      when: ForkLight creates a non-native Grok child environment.
+      then: The child does not contain that variable and existing non-native behavior stays unchanged.
+  risks:
+    - An inherited smaller value can recreate the exact 600-second false pause; explicit native override prevents it.
+    - Applying the value to every Grok mode could silently alter persistent-session behavior; explicit non-native deletion prevents it.
+  changeBudget: { maxFiles: 2, maxDiffLines: 120 }
+advancedPolicy: { maxDurationMs: null, observedTokenCeiling: null, noProgressTimeoutMs: null, fileLimit: null, fileLimitMode: warn, changedLineLimit: null, changedLineLimitMode: warn, baseMaxAttempts: 1, maxExtraAttempts: 0, maxMainCorrections: 1, maxMainReverifications: 0, maxWorkerValidationRepairs: 1, maxConcurrency: 1, completionMode: warn, changeBudgetMode: warn, maxAdaptationRounds: 0 }
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/workers/grok.ts
+    - tests/worker-runtime.test.ts
+acceptance:
+  criteria:
+    - Native Goal child environment freezes GROK_FOREGROUND_BLOCK_BUDGET_MS to exactly 86400000 regardless of parent drift.
+    - Non-native child environment removes GROK_FOREGROUND_BLOCK_BUDGET_MS even when inherited by the parent.
+    - Existing Grok Goal, current-model-only, Provider secret and network-policy assertions remain passing.
+    - Candidate changes only the two approved paths and explains the safety-breaker boundary.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/worker-runtime.test.ts
+    - git diff --check

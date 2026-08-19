@@ -1,0 +1,2129 @@
+diff --git a/baseline/README.md b/workspace/README.md
+index 57e6bac..84879c0 100644
+--- a/baseline/README.md
++++ b/workspace/README.md
+@@ -76,13 +76,18 @@ npm run smoke
+ 
+ ```bash
+ # CLI（构建后）
+-node dist/cli.js --help
++node dist/src/cli.js --help
+ 
+-# MCP server
+-node dist/mcp/server.js
++# 首次设置（不必打开旧 Hub）
++forklight setup status
++forklight setup provider select --provider xai
++printf '%s' "$KEY" | forklight setup provider select --provider deepseek --variant default --confirm
++forklight setup worker list
++forklight setup worker select --profile grok-4-6-xhigh
++forklight setup main install --client grok-build --component mcp --confirm
+ 
+-# Hub
+-# 见 docs/operations.md 与 docs/configuration.md
++# MCP server
++node dist/src/mcp/main.js
+ ```
+ 
+ 配置、Main 客户端接入：
+@@ -140,4 +145,14 @@ npm run build && npm run test && npm run check
+ npm run dev
+ ```
+ 
+-Project status and milestones: [`PROJECT.md`](./PROJECT.md). Ops: `docs/operations.md`, `docs/configuration.md`.
++First setup (no Hub required):
++
++```bash
++forklight setup status
++forklight setup provider select --provider xai
++printf '%s' "$KEY" | forklight setup provider select --provider deepseek --variant default --confirm
++forklight setup worker select --profile grok-4-6-xhigh
++forklight setup main install --client grok-build --component mcp --confirm
++```
++
++API keys are accepted only on stdin after `--confirm`. Project status and milestones: [`PROJECT.md`](./PROJECT.md). Ops: `docs/operations.md`, `docs/configuration.md`.
+diff --git a/baseline/docs/configuration.md b/workspace/docs/configuration.md
+index a7e46ea..cd3c3b1 100644
+--- a/baseline/docs/configuration.md
++++ b/workspace/docs/configuration.md
+@@ -4,6 +4,47 @@ ForkLight settings are versioned, validated, and persisted as a single document.
+ Every setting has a built-in default; overrides are merged onto those defaults
+ and validated atomically before persistence.
+ 
++## First setup without the Hub
++
++A clean install can finish Provider, built-in Worker, and Main-client setup from
++the public CLI. `forklight setup status` is read-only: it prints one fact, one
++reason, and one next command. It does not start the Hub, a Task, a Worker, or a
++paid probe.
++
++```bash
++forklight setup status
++forklight setup status --json
++```
++
++Local Grok or Codex sign-in is enough. Those paths never ask for an API key:
++
++```bash
++forklight setup provider select --provider xai
++forklight setup provider select --provider openai
++```
++
++API-key Providers require `--confirm` and the key on stdin. Do not put a key on
++the command line:
++
++```bash
++printf '%s' "$KEY" | forklight setup provider select --provider deepseek --variant default --confirm
++```
++
++Select a built-in Worker without editing a settings file, then install a Main
++connection. Install and uninstall require `--confirm` and back up the existing
++client file. Start a new Main session afterwards.
++
++```bash
++forklight setup worker list
++forklight setup worker select --profile grok-4-6-xhigh
++forklight setup main status
++forklight setup main install --client grok-build --component mcp --confirm
++forklight setup main uninstall --client grok-build --component mcp --confirm
++```
++
++Advanced policy still lives in `forklight settings` and the authenticated local
++API. First setup only selects an existing built-in Worker.
++
+ ## Configurable policy sections
+ 
+ ### contractQuality
+diff --git a/baseline/docs/m1-clean-user-runbook.md b/workspace/docs/m1-clean-user-runbook.md
+index 769f51b..96eed58 100644
+--- a/baseline/docs/m1-clean-user-runbook.md
++++ b/workspace/docs/m1-clean-user-runbook.md
+@@ -2,8 +2,9 @@
+ 
+ 更新时间：2026-07-30
+ 
+-这份手册只用于证明 ForkLight 是否真的能被一个全新本地用户使用。操作者按 Hub
+-页面完成配置，不编辑 ForkLight 数据库、状态文件、Main JSON、Task YAML 或项目源码。
++这份手册只用于证明 ForkLight 是否真的能被一个全新本地用户使用。首次 Provider、
++内置 Worker 和 Main 连接通过公开 CLI 完成，不必打开旧 Hub，也不编辑 ForkLight
++数据库、状态文件、Main JSON、Task YAML 或项目源码。
+ 手册只记录不含秘密的事实；API Key、Hub 私有 URL、Prompt 和 Provider 响应不得抄入记录。
+ 
+ ## 验收环境
+@@ -91,36 +92,50 @@ clean run 必须使用证据文件指向的精确 tarball；若源码、包内 b
+ 
+ 只记录“存在 / 不存在”，不要输出 Keychain 内容或完整 Hub URL。
+ 
+-### 2. 安装并打开 Hub
++### 2. 安装并用 CLI 完成首次设置
+ 
+ 操作者只执行：
+ 
+ ```bash
+ npm install -g /path/to/forklight-0.2.0.tgz
+-forklight hub
++forklight setup status
+ ```
+ 
+ 记录：
+ 
+ - 安装完成时间；
+ - `forklight` 版本和 build identity；
+-- 是否只出现一个 Hub；
+-- 页面是否不用解释就能指出下一步。
++- `setup status` 是否用一句话说明现状、原因和唯一下一步；
++- 是否没有要求打开旧 Hub。
++
++然后按打印出的下一步完成设置，例如：
++
++```bash
++# 本机已登录 Grok 时，不要输入 API key
++forklight setup provider select --provider xai
++
++# 或在确认后从 stdin 写入一个 API-key Provider
++printf '%s' "$KEY" | forklight setup provider select --provider deepseek --variant default --confirm
+ 
+-不得在失败后改用源码目录、`npm link` 或手工启动多个端口来掩盖安装问题。
++forklight setup worker list
++forklight setup worker select --profile grok-4-6-xhigh
++forklight setup main install --client grok-build --component mcp --confirm
++forklight doctor
++```
++
++不得把 API key 写在命令行参数、设置文件或验收记录里。Main 安装必须显式
++`--confirm`；记录是否提示需要新开 Main 会话。不得在失败后改用源码目录、
++`npm link` 或手工改设置文件来掩盖安装问题。
+ 
+-### 3. 从 Hub 完成配置
++### 3. 可选：打开 Hub 做后续监督
+ 
+-按 Overview 的顺序完成：
++首次设置完成后，如需 Hub 监督界面：
+ 
+-1. Models：选择 Provider 和模型，通过页面写入 Keychain；
+-2. Workers：创建 Worker，展开 Advanced 检查实际生效的质量、Token、时长、文件、代码量、
+-   Attempt 和自适应策略；
+-3. Main：从页面安装 Codex Plugin、MCP 或 Skill 所需部分；
+-4. Services：确认 Task service 可以使用。
++```bash
++forklight hub
++```
+ 
+-记录每一步：页面说了什么、操作者做了什么、是否遇到 macOS 权限提示、用了多久。
+-模型/Worker 预览和保存后的生效结果必须一致；不一致即为失败证据，不能手改数据库修正。
++记录是否只出现一个 Hub。首次 Provider / Worker / Main 设置不得再依赖 Hub 页面。
+ 
+ ### 4. 新建 Main 会话
+ 
+diff --git a/baseline/docs/operations.md b/workspace/docs/operations.md
+index ab6a75a..2fbbcc1 100644
+--- a/baseline/docs/operations.md
++++ b/workspace/docs/operations.md
+@@ -54,6 +54,35 @@ handoff, exact-Candidate Integration, and terminal storage — follow
+ [main-led-delivery.md](main-led-delivery.md). This page remains the command
+ reference.
+ 
++### 0. First setup
++
++A new install can become ready without opening the Hub or editing a settings
++file. Start with the read-only summary:
++
++```bash
++forklight setup status
++forklight setup status --json
++```
++
++Then take the printed next command. Typical first-use sequence:
++
++```bash
++# Already signed in to Grok or Codex — no API key is requested
++forklight setup provider select --provider xai
++
++# Or store one API-key Provider from stdin after confirmation
++printf '%s' "$KEY" | forklight setup provider select --provider deepseek --variant default --confirm
++
++forklight setup worker list
++forklight setup worker select --profile grok-4-6-xhigh
++forklight setup main install --client grok-build --component mcp --confirm
++forklight doctor
++```
++
++API keys are never accepted as command-line flags. Main install/uninstall
++require `--confirm`, back up the existing client file, and tell you whether a
++new Main session is needed.
++
+ ### 1. Submit a task
+ 
+ A task is defined in a YAML/JSON Task Contract or submitted inline via MCP:
+@@ -644,6 +673,8 @@ mutation bypass.
+ | Delivery decide | `forklight delivery decide` | Accept integrates; revise/reject do not |
+ | Main usage capture / episode / status | `forklight main-token capture` / `capture-episode` / `status` | **No** — count-only; never starts work or claims savings |
+ | Health check | `forklight health` | **No** |
++| Setup status | `forklight setup status` | **No** — read-only; no Hub, Task, Worker, or probe |
++| Setup provider/worker/main | `forklight setup provider select` / `worker select` / `main install` | **No** — local settings/Keychain/Main config only |
+ 
+ ## Actions that mutate the source project
+ 
+diff --git a/workspace/src/cli/setup.ts b/workspace/src/cli/setup.ts
+new file mode 100644
+index 0000000..4a98459
+--- /dev/null
++++ b/workspace/src/cli/setup.ts
+@@ -0,0 +1,446 @@
++import { existsSync } from "node:fs";
++import path from "node:path";
++import { fileURLToPath } from "node:url";
++import { forklightHome } from "../core/config.js";
++import { isProviderName, type ProviderName } from "../core/providers.js";
++import { createKeychainStore } from "../core/secrets.js";
++import { SettingsService } from "../core/settings.js";
++import {
++  installMainComponent,
++  statusMainInstall,
++  statusMainSkill,
++  uninstallMainComponent,
++  type MainClientId,
++  type MainInstallComponent,
++} from "../hub/main-install.js";
++import { StateStore } from "../state/store.js";
++import { createSystemInspector, SetupService } from "../setup/service.js";
++import {
++  projectMainSetupResult,
++  projectSetupStatus,
++  renderSetupStatusHuman,
++  renderSetupStatusJson,
++} from "../setup/status.js";
++import type {
++  SetupKeychainStore,
++  SetupProviderSelection,
++  SetupStatusView,
++  SetupSystemInspector,
++} from "../setup/types.js";
++
++export const SETUP_USAGE = `  forklight setup status [--json]
++      # read-only readiness: fact, reason, and one next action
++  forklight setup provider select --provider <name> [--variant <id>] [--model <name>] [--endpoint <url>] [--confirm]
++      # local Grok/Codex sign-in, or pipe an API key on stdin after --confirm
++  forklight setup worker list [--json]
++  forklight setup worker select --profile <id> [--json]
++  forklight setup main status [--client <id>] [--json]
++  forklight setup main install --client <id> [--component plugin|mcp|skill|all] --confirm [--json]
++  forklight setup main uninstall --client <id> [--component plugin|mcp|skill|all] --confirm [--json]
++`;
++
++export interface SetupCliDependencies {
++  home?: string;
++  settings?: Pick<SettingsService, "get" | "update">;
++  keychain?: SetupKeychainStore;
++  inspector?: SetupSystemInspector;
++  stdin?: NodeJS.ReadableStream;
++  mainHome?: string;
++  packageRoot?: string;
++}
++
++export interface SetupCliResult {
++  stdout: string;
++  json?: unknown;
++}
++
++const SECRET_FLAGS = new Set(["--api-key", "--key", "--token", "--password"]);
++const MAIN_CLIENTS = new Set<MainClientId>(["codex", "claude-code", "grok-build"]);
++const MAIN_COMPONENTS = new Set<MainInstallComponent>(["plugin", "mcp", "skill", "all"]);
++
++export async function runSetupCommand(
++  args: string[],
++  deps: SetupCliDependencies = {},
++): Promise<SetupCliResult> {
++  const tokens = args.filter((item) => item !== undefined);
++  const json = tokens.includes("--json");
++  const rest = tokens.filter((item) => item !== "--json");
++  if (deps.packageRoot === undefined) {
++    const packageRoot = findSetupPackageRoot();
++    if (packageRoot !== undefined) deps = { ...deps, packageRoot };
++  }
++  const action = rest[0];
++  if (action === undefined || action === "status") {
++    if (rest.length > 1) {
++      throw new Error(`Unexpected setup status argument.\n\n${SETUP_USAGE}`);
++    }
++    return withSetup(deps, async (ctx) => {
++      const status = await collectStatus(ctx.service, ctx.settings, deps.mainHome);
++      return {
++        stdout: json ? renderSetupStatusJson(status) : renderSetupStatusHuman(status),
++        json: status,
++      };
++    });
++  }
++  if (action === "provider") {
++    return withSetup(deps, (ctx) => handleProvider(rest.slice(1), json, ctx, deps));
++  }
++  if (action === "worker") {
++    return withSetup(deps, (ctx) => handleWorker(rest.slice(1), json, ctx.service));
++  }
++  if (action === "main") {
++    return withSetup(deps, () => handleMain(rest.slice(1), json, deps));
++  }
++  throw new Error(`Unknown setup command.\n\n${SETUP_USAGE}`);
++}
++
++async function handleProvider(
++  args: string[],
++  json: boolean,
++  ctx: SetupContext,
++  deps: SetupCliDependencies,
++): Promise<SetupCliResult> {
++  if (args[0] !== "select") {
++    throw new Error(`Unknown provider setup command.\n\n${SETUP_USAGE}`);
++  }
++  const parsed = parseNamedArgs(args.slice(1), new Set([
++    "--provider", "--variant", "--model", "--endpoint",
++  ]), new Set(["--confirm"]));
++  const providerRaw = requiredValue(parsed, "--provider");
++  if (!isProviderName(providerRaw)) {
++    throw new Error("Unsupported provider. Use a built-in name such as xai, openai, or deepseek.");
++  }
++  const selection = selectionFromFlags(ctx.service, providerRaw, parsed);
++  const { resolved, mode } = ctx.service.resolveProviderSetup(selection);
++  if (mode === "local-sign-in") {
++    const result = ctx.service.selectSignedInProvider(selection);
++    const workers = ctx.service.listWorkers();
++    const next = workers.find((item) => item.provider === result.provider)?.id ?? "grok-4-6-xhigh";
++    const payload = {
++      fact: `${result.providerLabel} is selected using the local sign-in.`,
++      reason: "No API key is stored for this path.",
++      next: `forklight setup worker select --profile ${next}`,
++      provider: result.provider,
++      authMode: result.authMode,
++      stored: false,
++    };
++    return present(json, payload, [
++      `fact: ${payload.fact}`,
++      `reason: ${payload.reason}`,
++      `next: ${payload.next}`,
++    ]);
++  }
++  if (!parsed.switches.has("--confirm")) {
++    throw new Error(
++      "Storing an API key requires explicit --confirm and the key on stdin. The key must not be passed as a command-line flag.\n"
++      + `Example: printf '%s' "$KEY" | forklight setup provider select --provider ${resolved.provider} --variant ${resolved.variant} --confirm`,
++    );
++  }
++  const apiKey = await readStdinSecret(deps.stdin ?? process.stdin);
++  const result = ctx.service.commitProvider(selection, apiKey);
++  const workers = ctx.service.listWorkers();
++  const next = workers.find((item) => item.provider === result.provider)?.id ?? "default";
++  const payload = {
++    fact: `${result.providerLabel} is stored.`,
++    reason: "The API key was saved and settings were updated.",
++    next: `forklight setup worker select --profile ${next}`,
++    provider: result.provider,
++    authMode: result.authMode,
++    stored: true,
++  };
++  return present(json, payload, [
++    `fact: ${payload.fact}`,
++    `reason: ${payload.reason}`,
++    `next: ${payload.next}`,
++  ]);
++}
++
++function handleWorker(
++  args: string[],
++  json: boolean,
++  service: SetupService,
++): SetupCliResult {
++  const action = args[0] ?? "list";
++  if (action === "list") {
++    if (args.length > 1) throw new Error(`Unexpected worker list argument.\n\n${SETUP_USAGE}`);
++    const workers = service.listWorkers();
++    if (json) return { stdout: `${JSON.stringify({ workers }, null, 2)}\n`, json: { workers } };
++    const lines = workers.map((item) => {
++      const mark = item.selected ? "*" : " ";
++      return `${mark} ${item.id}  ${item.label}  ${item.provider}/${item.model}  ${item.runtime}`;
++    });
++    return { stdout: `${lines.join("\n")}\n`, json: { workers } };
++  }
++  if (action !== "select") {
++    throw new Error(`Unknown worker setup command.\n\n${SETUP_USAGE}`);
++  }
++  const parsed = parseNamedArgs(args.slice(1), new Set(["--profile"]), new Set());
++  const id = requiredValue(parsed, "--profile");
++  const selected = service.selectWorker(id);
++  const payload = {
++    fact: `${selected.label} is now the selected Worker.`,
++    reason: "The built-in profile was selected without editing a settings file.",
++    next: `forklight setup main install --client ${mainClientForRuntime(selected.runtime)} --component mcp --confirm`,
++    worker: selected,
++  };
++  return present(json, payload, [
++    `fact: ${payload.fact}`,
++    `reason: ${payload.reason}`,
++    `next: ${payload.next}`,
++  ]);
++}
++
++async function handleMain(
++  args: string[],
++  json: boolean,
++  deps: SetupCliDependencies,
++): Promise<SetupCliResult> {
++  const action = args[0] ?? "status";
++  if (action === "status") {
++    const parsed = parseNamedArgs(args.slice(1), new Set(["--client"]), new Set());
++    const client = optionalClient(parsed.values.get("--client"));
++    const rows = await listMainRows(deps.mainHome, client);
++    if (json) return { stdout: `${JSON.stringify({ mains: rows }, null, 2)}\n`, json: { mains: rows } };
++    const lines = rows.map((row) => (
++      `${row.client}: mcp=${row.mcp ? "yes" : "no"} skill=${row.skill ? "yes" : "no"}`
++    ));
++    return { stdout: `${lines.join("\n")}\n`, json: { mains: rows } };
++  }
++  if (action !== "install" && action !== "uninstall") {
++    throw new Error(`Unknown main setup command.\n\n${SETUP_USAGE}`);
++  }
++  const parsed = parseNamedArgs(
++    args.slice(1),
++    new Set(["--client", "--component"]),
++    new Set(["--confirm"]),
++  );
++  const client = requiredClient(parsed.values.get("--client"));
++  const component = optionalComponent(parsed.values.get("--component"));
++  if (!parsed.switches.has("--confirm")) {
++    throw new Error(
++      `${action === "install" ? "Installing" : "Removing"} a Main connection requires explicit --confirm. `
++      + "This changes that Main's local config after making a backup.",
++    );
++  }
++  const options = {
++    ...(deps.mainHome === undefined ? {} : { home: deps.mainHome }),
++    ...(deps.packageRoot === undefined ? {} : { packageRoot: deps.packageRoot }),
++    ...(deps.mainHome === undefined ? {} : { backupRoot: path.join(deps.mainHome, ".forklight", "hub-backups") }),
++  };
++  const raw = action === "install"
++    ? await installMainComponent(client, component, options)
++    : await uninstallMainComponent(client, component, options);
++  const projected = projectMainSetupResult(raw, component);
++  if (!projected.ok) {
++    throw new Error(
++      `${projected.message} No further Main files were changed. Check the client and component, then retry with --confirm.`,
++    );
++  }
++  const session = projected.newSessionNeeded
++    ? `Start a new ${clientLabel(client)} session so it can load the change.`
++    : "A new Main session is not required.";
++  const backup = projected.backupPath === undefined
++    ? "No existing config needed a backup."
++    : `Existing config was backed up.`;
++  const payload = {
++    fact: projected.message,
++    reason: backup,
++    next: session,
++    client,
++    component,
++    action: projected.action,
++    newSessionNeeded: projected.newSessionNeeded,
++    ...(projected.backupPath === undefined ? {} : { backupPath: projected.backupPath }),
++    ...(projected.targetPath === undefined ? {} : { targetPath: projected.targetPath }),
++  };
++  return present(json, payload, [
++    `fact: ${payload.fact}`,
++    `reason: ${payload.reason}`,
++    `next: ${payload.next}`,
++  ]);
++}
++
++export async function readStdinSecret(input: NodeJS.ReadableStream): Promise<string> {
++  if ("isTTY" in input && input.isTTY === true) {
++    throw new Error(
++      "API keys must be piped on stdin. Example: printf '%s' \"$KEY\" | forklight setup provider select --provider deepseek --variant default --confirm",
++    );
++  }
++  const chunks: Buffer[] = [];
++  for await (const chunk of input) {
++    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
++  }
++  const value = Buffer.concat(chunks).toString("utf8").replace(/\r?\n$/, "");
++  if (value.length === 0) {
++    throw new Error("No API key was provided on stdin.");
++  }
++  return value;
++}
++
++function selectionFromFlags(
++  service: SetupService,
++  provider: ProviderName,
++  parsed: ParsedArgs,
++): SetupProviderSelection {
++  const variant = parsed.values.get("--variant") ?? service.defaultVariantId(provider);
++  const model = parsed.values.get("--model");
++  const endpoint = parsed.values.get("--endpoint");
++  return {
++    provider,
++    variant,
++    ...(model === undefined ? {} : { model }),
++    ...(endpoint === undefined ? {} : { endpoint }),
++  };
++}
++
++async function collectStatus(
++  service: SetupService,
++  settings: Pick<SettingsService, "get">,
++  mainHome: string | undefined,
++): Promise<SetupStatusView> {
++  const effective = settings.get();
++  const mains = await Promise.all((["codex", "claude-code", "grok-build"] as const).map(async (client) => {
++    const mcp = await statusMainInstall(client, mainHome === undefined ? {} : { home: mainHome });
++    const skill = await statusMainSkill(client, mainHome === undefined ? {} : { home: mainHome });
++    return { client, installed: mcp.installed || skill.installed };
++  }));
++  return projectSetupStatus({
++    prerequisites: service.inspectPrerequisites(),
++    providers: service.describeProviders(),
++    defaultProvider: effective.execution.defaultProvider,
++    workers: service.listWorkers(),
++    mains,
++  });
++}
++
++async function listMainRows(mainHome: string | undefined, client: MainClientId | undefined) {
++  const clients: MainClientId[] = client === undefined
++    ? ["codex", "claude-code", "grok-build"]
++    : [client];
++  return Promise.all(clients.map(async (id) => {
++    const mcp = await statusMainInstall(id, mainHome === undefined ? {} : { home: mainHome });
++    const skill = await statusMainSkill(id, mainHome === undefined ? {} : { home: mainHome });
++    return { client: id, mcp: mcp.installed, skill: skill.installed, installed: mcp.installed || skill.installed };
++  }));
++}
++
++interface SetupContext {
++  service: SetupService;
++  settings: Pick<SettingsService, "get" | "update">;
++}
++
++async function withSetup<T>(
++  deps: SetupCliDependencies,
++  fn: (ctx: SetupContext) => Promise<T> | T,
++): Promise<T> {
++  const home = deps.home ?? forklightHome();
++  const createdStore = deps.settings === undefined ? new StateStore(home) : undefined;
++  try {
++    const settings = deps.settings ?? new SettingsService(createdStore!);
++    const service = new SetupService(
++      settings,
++      deps.keychain ?? createKeychainStore(),
++      deps.inspector ?? createSystemInspector(),
++    );
++    return await fn({ service, settings });
++  } finally {
++    createdStore?.close();
++  }
++}
++
++interface ParsedArgs {
++  values: Map<string, string>;
++  switches: Set<string>;
++}
++
++function parseNamedArgs(
++  args: string[],
++  valueFlags: Set<string>,
++  switchFlags: Set<string>,
++): ParsedArgs {
++  const values = new Map<string, string>();
++  const switches = new Set<string>();
++  for (let index = 0; index < args.length; index += 1) {
++    const token = args[index]!;
++    if (SECRET_FLAGS.has(token)) {
++      throw new Error(
++        "API keys cannot be passed as command-line flags. Pipe the key on stdin after --confirm.",
++      );
++    }
++    if (!token.startsWith("--")) {
++      throw new Error(`Unexpected argument.\n\n${SETUP_USAGE}`);
++    }
++    if (switchFlags.has(token)) {
++      switches.add(token);
++      continue;
++    }
++    if (valueFlags.has(token)) {
++      const value = args[index + 1];
++      if (value === undefined || value.startsWith("--")) {
++        throw new Error(`${token} requires a value.`);
++      }
++      if (values.has(token)) throw new Error(`Duplicate ${token}.`);
++      values.set(token, value);
++      index += 1;
++      continue;
++    }
++    throw new Error(`Unknown flag: ${token}. No settings were changed.`);
++  }
++  return { values, switches };
++}
++
++function requiredValue(parsed: ParsedArgs, flag: string): string {
++  const value = parsed.values.get(flag);
++  if (value === undefined || value.trim() === "") {
++    throw new Error(`${flag} is required.\n\n${SETUP_USAGE}`);
++  }
++  return value;
++}
++
++function requiredClient(value: string | undefined): MainClientId {
++  if (value === undefined || !MAIN_CLIENTS.has(value as MainClientId)) {
++    throw new Error("Unsupported Main client. Use codex, claude-code, or grok-build. No files were changed.");
++  }
++  return value as MainClientId;
++}
++
++function optionalClient(value: string | undefined): MainClientId | undefined {
++  if (value === undefined) return undefined;
++  return requiredClient(value);
++}
++
++function optionalComponent(value: string | undefined): MainInstallComponent {
++  if (value === undefined) return "mcp";
++  if (!MAIN_COMPONENTS.has(value as MainInstallComponent)) {
++    throw new Error("Unsupported component. Use plugin, mcp, skill, or all. No files were changed.");
++  }
++  return value as MainInstallComponent;
++}
++
++function mainClientForRuntime(runtime: string): string {
++  if (runtime === "codex-cli") return "codex";
++  if (runtime === "claude-code") return "claude-code";
++  return "grok-build";
++}
++
++function clientLabel(client: MainClientId): string {
++  if (client === "claude-code") return "Claude Code";
++  if (client === "codex") return "Codex";
++  return "Grok";
++}
++
++function present(json: boolean, payload: unknown, lines: string[]): SetupCliResult {
++  return {
++    stdout: json ? `${JSON.stringify(payload, null, 2)}\n` : `${lines.join("\n")}\n`,
++    json: payload,
++  };
++}
++
++export function findSetupPackageRoot(): string | undefined {
++  let candidate = path.dirname(fileURLToPath(import.meta.url));
++  for (let depth = 0; depth < 5; depth += 1) {
++    if (existsSync(path.join(candidate, "package.json"))) return candidate;
++    candidate = path.dirname(candidate);
++  }
++  return undefined;
++}
+diff --git a/baseline/src/cli.ts b/workspace/src/cli.ts
+index ad3083e..54c75b1 100755
+--- a/baseline/src/cli.ts
++++ b/workspace/src/cli.ts
+@@ -84,6 +84,7 @@ import {
+ import { readActivationHandoffContext } from "./activation/runner.js";
+ import type { DaemonMethod } from "./daemon/protocol.js";
+ import { createSystemInspector, SetupService } from "./setup/service.js";
++import { runSetupCommand, SETUP_USAGE } from "./cli/setup.js";
+ import { HubServer } from "./hub/server.js";
+ import {
+   discoverOrClaimHub,
+@@ -344,7 +345,7 @@ Usage:
+   forklight hub status [--json]
+       # read-only Hub status; never starts, claims, replaces, or signals
+   forklight doctor [--json]
+-`;
++${SETUP_USAGE}`;
+ }
+ 
+ function required(value: string | undefined, label: string): string {
+@@ -3389,9 +3390,18 @@ async function main(): Promise<void> {
+     throw new Error(`Unknown competition subcommand: ${subcommand}. Use: status, list, compare, main-decision, retain-partial, or handoff.`);
+   }
+ 
+-  if (command === "console" || command === "setup") {
++  if (command === "setup") {
++    const setupArgs = [positional, ...rest].filter(
++      (value): value is string => value !== undefined,
++    );
++    const result = await runSetupCommand(setupArgs);
++    process.stdout.write(result.stdout);
++    return;
++  }
++
++  if (command === "console") {
+     throw new Error(
+-      `The standalone ${command} UI was removed. Use: forklight hub\n\n${usage()}`,
++      `The standalone console UI was removed. Use: forklight hub\n\n${usage()}`,
+     );
+   }
+ 
+diff --git a/baseline/src/core/providers.ts b/workspace/src/core/providers.ts
+index d8c04cd..dd73667 100644
+--- a/baseline/src/core/providers.ts
++++ b/workspace/src/core/providers.ts
+@@ -146,7 +146,7 @@ export function providerVariants(
+     return [{
+       id: "default",
+       label: "xAI (Grok Build)",
+-      description: "Used with runtime grok-build. Keychain-only readiness; not Anthropic-compatible.",
++      description: "Used with runtime grok-build. Local Grok sign-in or a stored API key; not Anthropic-compatible.",
+       endpoint: current.defaultEndpoint,
+       models: [current.defaultModel, "grok-4", "grok-3"],
+       recommended: true,
+diff --git a/baseline/src/hub/server.ts b/workspace/src/hub/server.ts
+index 6f3e7e1..e48be94 100644
+--- a/baseline/src/hub/server.ts
++++ b/workspace/src/hub/server.ts
+@@ -29,6 +29,7 @@ import {
+   type DaemonHealthEvidence,
+   type RuntimeDisplayMetadata,
+ } from "../setup/doctor.js";
++import { projectMainSetupResult, projectSetupStatus } from "../setup/status.js";
+ import type { DaemonMethod } from "../daemon/protocol.js";
+ import { WORK_HIERARCHY_INVALID_FILTER_REASON } from "../core/work-hierarchy.js";
+ import {
+@@ -41,7 +42,6 @@ import {
+   type OutcomeIntakeCreateInput,
+ } from "../core/outcome-intake.js";
+ import {
+-  providerDefinition,
+   providerLabel,
+   providerNames,
+   isProviderName,
+@@ -2216,6 +2216,38 @@ export class HubServer {
+           this.deps.packageRoot,
+         );
+         const versionJourney = this.buildVersionJourney(daemon);
++        const setup = projectSetupStatus({
++          prerequisites: prereqs,
++          providers: providers.map((provider) => ({
++            name: provider.name,
++            label: provider.label,
++            variantLabel: provider.variantLabel,
++            configured: provider.configured,
++            authMode: provider.authMode,
++            defaultModel: provider.defaultModel,
++            defaultEndpoint: provider.defaultEndpoint,
++            variants: provider.variants,
++          })),
++          defaultProvider: settings.execution.defaultProvider,
++          workers: settings.workerProfiles.profiles.map((profile) => {
++            const ready = workerReadiness.find((row) => row.workerId === profile.id);
++            const provider: ProviderName = ready?.provider
++              ?? profile.provider
++              ?? settings.execution.defaultProvider;
++            return {
++              id: profile.id,
++              label: profile.label,
++              runtime: profile.runtime,
++              provider,
++              model: ready?.model ?? profile.model ?? "",
++              selected: profile.id === settings.workerProfiles.defaultProfileId,
++            };
++          }),
++          mains: mains.map((item) => ({
++            client: item.client,
++            installed: item.mcp.installed || item.skill.installed || item.plugin.installed,
++          })),
++        });
+         return {
+           settings: viewHubSettings(settings),
+           modelCatalog: settings.modelCatalog,
+@@ -2230,6 +2262,7 @@ export class HubServer {
+           runtimeReadinessSourceDetail: runtimeFacts.sourceDetail,
+           runtimes,
+           mains,
++          setup,
+           daemon,
+           versionJourney,
+         };
+@@ -2386,29 +2419,69 @@ export class HubServer {
+         this.sendJson(req, res, 422, { error: "Unsupported provider" });
+         return;
+       }
+-      if (provider === "openai") {
+-        this.sendJson(req, res, 422, {
+-          error: "Codex Workers use the local Codex sign-in; do not store an OpenAI API key here",
++      const variant = typeof body.variant === "string" && body.variant.length > 0
++        ? body.variant
++        : this.deps.setup.defaultVariantId(provider);
++      const selection = {
++        provider,
++        variant,
++        ...(typeof body.model === "string" ? { model: body.model } : {}),
++        ...(typeof body.endpoint === "string" ? { endpoint: body.endpoint } : {}),
++      };
++      try {
++        if (provider === "openai") {
++          if (apiKey.length > 0) {
++            this.sendJson(req, res, 422, {
++              error: "Codex Workers use the local Codex sign-in; do not store an OpenAI API key here",
++            });
++            return;
++          }
++          const result = this.deps.setup.selectSignedInProvider(selection);
++          this.cache.invalidate("setupStatus");
++          this.cache.invalidate("opsHealth");
++          this.sendJson(req, res, 200, {
++            ok: true,
++            provider,
++            configured: true,
++            authMode: result.authMode,
++          });
++          return;
++        }
++        if (apiKey.length === 0) {
++          const decided = this.deps.setup.resolveProviderSetup(selection);
++          if (decided.mode === "local-sign-in") {
++            const result = this.deps.setup.selectSignedInProvider(selection);
++            this.cache.invalidate("setupStatus");
++            this.cache.invalidate("opsHealth");
++            this.sendJson(req, res, 200, {
++              ok: true,
++              provider,
++              configured: true,
++              authMode: result.authMode,
++            });
++            return;
++          }
++          this.sendJson(req, res, 422, { error: "Invalid API key" });
++          return;
++        }
++        if (apiKey.length < 8 || apiKey.length > 4096 || /[\0\r\n]/.test(apiKey)) {
++          this.sendJson(req, res, 422, { error: "Invalid API key" });
++          return;
++        }
++        const result = this.deps.setup.commitProvider(selection, apiKey);
++        this.cache.invalidate("setupStatus");
++        this.cache.invalidate("opsHealth");
++        this.sendJson(req, res, 200, {
++          ok: true,
++          provider,
++          keychainService: result.keychainService,
++          configured: true,
++          authMode: result.authMode,
+         });
+-        return;
+-      }
+-      if (apiKey.length < 8 || apiKey.length > 4096 || /[\0\r\n]/.test(apiKey)) {
+-        this.sendJson(req, res, 422, { error: "Invalid API key" });
+-        return;
++      } catch (error) {
++        const message = error instanceof Error ? error.message : "Provider setup failed";
++        this.sendJson(req, res, 422, { error: message });
+       }
+-      const settings = this.deps.settings.get();
+-      const definition = providerDefinition(provider, settings.providerDefaults);
+-      const account = this.deps.account();
+-      this.deps.keychain.write(definition.defaultKeychainService, account, apiKey);
+-      // Keychain change affects describeProviders() — invalidate setup snapshot.
+-      this.cache.invalidate("setupStatus");
+-      this.cache.invalidate("opsHealth");
+-      this.sendJson(req, res, 200, {
+-        ok: true,
+-        provider,
+-        keychainService: definition.defaultKeychainService,
+-        configured: true,
+-      });
+       return;
+     }
+ 
+@@ -2440,14 +2513,15 @@ export class HubServer {
+           ? {}
+           : { packageRoot: this.deps.packageRoot }),
+       });
+-      const ok = "ok" in result ? result.ok : true;
++      const projected = projectMainSetupResult(result, component);
++      const ok = projected.ok;
+       // Only invalidate when install actually succeeded; a failed install must
+       // not invent a fresh "installed" snapshot.
+       if (ok) {
+         this.cache.invalidate("setupStatus");
+         this.cache.invalidate("opsHealth");
+       }
+-      this.sendJson(req, res, ok ? 200 : 422, result);
++      this.sendJson(req, res, ok ? 200 : 422, { ...result, newSessionNeeded: projected.newSessionNeeded });
+       return;
+     }
+ 
+@@ -2473,12 +2547,13 @@ export class HubServer {
+         component = body.component;
+       }
+       const result = await uninstallMainComponent(client, component);
+-      const ok = "ok" in result ? result.ok : true;
++      const projected = projectMainSetupResult(result, component);
++      const ok = projected.ok;
+       if (ok) {
+         this.cache.invalidate("setupStatus");
+         this.cache.invalidate("opsHealth");
+       }
+-      this.sendJson(req, res, ok ? 200 : 422, result);
++      this.sendJson(req, res, ok ? 200 : 422, { ...result, newSessionNeeded: projected.newSessionNeeded });
+       return;
+     }
+ 
+diff --git a/baseline/src/setup/service.ts b/workspace/src/setup/service.ts
+index e5b9776..cb984ed 100644
+--- a/baseline/src/setup/service.ts
++++ b/workspace/src/setup/service.ts
+@@ -8,12 +8,21 @@ import {
+   providerVariantLabel,
+   providerVariants,
+   hasLocalCodexSignIn,
++  hasLocalGrokSignIn,
+   resolveProvider as resolveRuntimeProvider,
++  type ProviderName,
+   type ResolvedProviderConfig,
+ } from "../core/providers.js";
+ import type { SettingsService } from "../core/settings.js";
++import {
++  executionPatchFromProfile,
++  isWorkerProfileId,
++  materializeWorkerModel,
++  setDefaultWorkerProfile,
++} from "../core/worker-profiles.js";
+ import type {
+   ResolvedSetupProvider,
++  SetupAuthMode,
+   SetupBootstrap,
+   SetupKeychainStore,
+   SetupPrerequisite,
+@@ -21,12 +30,24 @@ import type {
+   SetupProviderOption,
+   SetupProviderSelection,
+   SetupSystemInspector,
++  SetupWorkerOption,
++  SetupWorkerSelection,
+ } from "./types.js";
+ 
+ type SetupSettings = Pick<SettingsService, "get" | "update">;
+ 
+ const MODEL_PATTERN = /^[A-Za-z0-9._+:/\[\]-]{1,128}$/;
+ 
++function compatibleRuntimeForProvider(
++  provider: ProviderName,
++): "grok-build" | "codex-cli" {
++  if (provider === "xai") return "grok-build";
++  if (provider === "openai") return "codex-cli";
++  throw new Error(
++    "Local sign-in is only available for xAI and OpenAI. No settings were changed.",
++  );
++}
++
+ export function createSystemInspector(): SetupSystemInspector {
+   return {
+     platform: () => process.platform,
+@@ -41,6 +62,7 @@ export function createSystemInspector(): SetupSystemInspector {
+       }
+     },
+     hasLocalCodexSignIn,
++    hasLocalGrokSignIn,
+   };
+ }
+ 
+@@ -81,16 +103,15 @@ export class SetupService {
+ 
+   describeProviders(): SetupProviderOption[] {
+     const effective = this.settings.get();
+-    const account = this.system.account();
+     return providerNames().map((name) => {
+       const definition = providerDefinition(name, effective.providerDefaults);
++      const auth = this.providerAuth(name);
+       return {
+         name,
+         label: providerLabel(name),
+         variantLabel: providerVariantLabel(name),
+-        configured: name === "openai"
+-          ? (this.system.hasLocalCodexSignIn?.() ?? false)
+-          : this.keychain.has(definition.defaultKeychainService, account),
++        configured: auth.configured,
++        authMode: auth.authMode,
+         defaultModel: definition.defaultModel,
+         defaultEndpoint: definition.defaultEndpoint,
+         variants: providerVariants(name, effective.providerDefaults),
+@@ -100,17 +121,14 @@ export class SetupService {
+ 
+   currentProvider(): ResolvedSetupProvider | null {
+     const effective = this.settings.get();
+-    const account = this.system.account();
+     const ordered = [
+       effective.execution.defaultProvider,
+       ...providerNames().filter((name) => name !== effective.execution.defaultProvider),
+     ];
+     for (const name of ordered) {
++      const auth = this.providerAuth(name);
++      if (!auth.configured) continue;
+       const definition = providerDefinition(name, effective.providerDefaults);
+-      const configured = name === "openai"
+-        ? (this.system.hasLocalCodexSignIn?.() ?? false)
+-        : this.keychain.has(definition.defaultKeychainService, account);
+-      if (!configured) continue;
+       const variant = providerVariants(name, effective.providerDefaults)
+         .find((candidate) => candidate.endpoint === definition.defaultEndpoint);
+       return {
+@@ -126,6 +144,99 @@ export class SetupService {
+     return null;
+   }
+ 
++  defaultVariantId(provider: ProviderName): string {
++    const variants = providerVariants(provider, this.settings.get().providerDefaults);
++    return variants.find((item) => item.recommended)?.id ?? variants[0]?.id ?? "default";
++  }
++
++  /** Decide local sign-in vs API-key storage without reading a secret. */
++  resolveProviderSetup(selection: SetupProviderSelection): {
++    resolved: ResolvedSetupProvider;
++    mode: "local-sign-in" | "api-key";
++  } {
++    const resolved = this.resolveProvider(selection);
++    if (resolved.provider === "openai") {
++      if (!(this.system.hasLocalCodexSignIn?.() ?? false)) {
++        throw new Error(
++          "Codex is not signed in locally. Sign in with the Codex CLI, then run this command again. ForkLight does not store an OpenAI API key.",
++        );
++      }
++      return { resolved, mode: "local-sign-in" };
++    }
++    if (resolved.provider === "xai" && (this.system.hasLocalGrokSignIn?.() ?? false)) {
++      return { resolved, mode: "local-sign-in" };
++    }
++    return { resolved, mode: "api-key" };
++  }
++
++  selectSignedInProvider(selection: SetupProviderSelection): SetupProviderCommit {
++    const { resolved, mode } = this.resolveProviderSetup(selection);
++    if (mode !== "local-sign-in") {
++      throw new Error(
++        "This provider needs an API key on stdin after --confirm. Local sign-in is not available.",
++      );
++    }
++    this.writeProviderSettings(resolved, compatibleRuntimeForProvider(resolved.provider));
++    return { ...resolved, stored: false, settingsUpdated: true, authMode: "local-sign-in" };
++  }
++
++  listWorkers(): SetupWorkerOption[] {
++    const effective = this.settings.get();
++    return effective.workerProfiles.profiles.map((profile) => {
++      const model = materializeWorkerModel(
++        profile,
++        effective.modelCatalog,
++        effective.providerDefaults,
++      );
++      return {
++        id: profile.id,
++        label: profile.label,
++        runtime: profile.runtime,
++        provider: model.provider,
++        model: model.model,
++        selected: profile.id === effective.workerProfiles.defaultProfileId,
++      };
++    });
++  }
++
++  selectWorker(id: string): SetupWorkerSelection {
++    if (!isWorkerProfileId(id)) {
++      throw new Error(
++        "That Worker id is not valid. No settings were changed. Run `forklight setup worker list` and choose an existing id.",
++      );
++    }
++    const current = this.settings.get();
++    const profile = current.workerProfiles.profiles.find((item) => item.id === id);
++    if (profile === undefined) {
++      throw new Error(
++        "That Worker is not in the current settings. No settings were changed. Run `forklight setup worker list` and choose an existing id.",
++      );
++    }
++    const workerProfiles = setDefaultWorkerProfile(current.workerProfiles, id);
++    const patch = executionPatchFromProfile(
++      profile,
++      current.modelCatalog,
++      current.providerDefaults,
++    );
++    this.settings.update({
++      workerProfiles,
++      execution: patch.execution,
++      providerDefaults: patch.providerDefaults,
++    });
++    const model = materializeWorkerModel(
++      profile,
++      current.modelCatalog,
++      current.providerDefaults,
++    );
++    return {
++      id: profile.id,
++      label: profile.label,
++      runtime: profile.runtime,
++      provider: model.provider,
++      model: model.model,
++    };
++  }
++
+   bootstrap(): SetupBootstrap {
+     return {
+       prerequisites: this.inspectPrerequisites(),
+@@ -192,16 +303,7 @@ export class SetupService {
+     }
+ 
+     try {
+-      this.settings.update({
+-        execution: { defaultProvider: resolved.provider },
+-        providerDefaults: {
+-          [resolved.provider]: {
+-            defaultModel: resolved.model,
+-            defaultEndpoint: resolved.endpoint,
+-            defaultKeychainService: resolved.keychainService,
+-          },
+-        },
+-      });
++      this.writeProviderSettings(resolved);
+     } catch {
+       try {
+         if (previous === undefined) this.keychain.delete(resolved.keychainService, account);
+@@ -212,7 +314,40 @@ export class SetupService {
+       throw new Error("Settings could not be saved. The previous Keychain state was restored.");
+     }
+ 
+-    return { ...resolved, stored: true, settingsUpdated: true };
++    return { ...resolved, stored: true, settingsUpdated: true, authMode: "api-key" };
++  }
++
++  private providerAuth(name: ProviderName): { configured: boolean; authMode: SetupAuthMode } {
++    const definition = providerDefinition(name, this.settings.get().providerDefaults);
++    const account = this.system.account();
++    if (name === "openai") {
++      const ready = this.system.hasLocalCodexSignIn?.() ?? false;
++      return { configured: ready, authMode: ready ? "local-sign-in" : "none" };
++    }
++    const keyReady = this.keychain.has(definition.defaultKeychainService, account);
++    const grokReady = name === "xai" && (this.system.hasLocalGrokSignIn?.() ?? false);
++    if (keyReady) return { configured: true, authMode: "api-key" };
++    if (grokReady) return { configured: true, authMode: "local-sign-in" };
++    return { configured: false, authMode: "none" };
++  }
++
++  private writeProviderSettings(
++    resolved: ResolvedSetupProvider,
++    defaultRuntime?: "grok-build" | "codex-cli",
++  ): void {
++    this.settings.update({
++      execution: {
++        defaultProvider: resolved.provider,
++        ...(defaultRuntime === undefined ? {} : { defaultRuntime }),
++      },
++      providerDefaults: {
++        [resolved.provider]: {
++          defaultModel: resolved.model,
++          defaultEndpoint: resolved.endpoint,
++          defaultKeychainService: resolved.keychainService,
++        },
++      },
++    });
+   }
+ 
+   private commandCheck(command: string, label: string, fix: string): SetupPrerequisite {
+diff --git a/workspace/src/setup/status.ts b/workspace/src/setup/status.ts
+new file mode 100644
+index 0000000..3f979cc
+--- /dev/null
++++ b/workspace/src/setup/status.ts
+@@ -0,0 +1,205 @@
++import type {
++  InstallResult,
++  MainInstallComponent,
++  MainSurfaceStatus,
++} from "../hub/main-install.js";
++import type {
++  SetupNextAction,
++  SetupStatusInput,
++  SetupStatusView,
++  SetupWorkerOption,
++} from "./types.js";
++
++const GROK_WORKER = "grok-4-6-xhigh";
++
++/** Read-only first-setup projection. Never starts Hub, Task, Worker, or a probe. */
++export function projectSetupStatus(input: SetupStatusInput): SetupStatusView {
++  const blocking = input.prerequisites.find((item) => item.blocker && (item.id === "platform" || item.id === "node"));
++  const readyProviders = input.providers.filter((item) => item.configured);
++  const selectedWorker = input.workers.find((item) => item.selected) ?? null;
++  const workerReady = selectedWorker !== null && providerReady(input, selectedWorker.provider);
++  const launchableWorker = firstLaunchableWorker(input);
++  const anyMain = input.mains.some((item) => item.installed);
++  const preferredReady = readyProviders.find((item) => item.name === input.defaultProvider)
++    ?? readyProviders[0]
++    ?? null;
++
++  if (blocking !== undefined) {
++    const command = "forklight setup status";
++    return view(input, {
++      ready: false,
++      fact: `${blocking.label} is not ready.`,
++      reason: blocking.message,
++      nextAction: {
++        code: "fix-prerequisite",
++        command,
++        message: blocking.fix ?? `Fix ${blocking.label}, then run ${command}.`,
++      },
++      providerReady: false,
++      workerReady: false,
++    });
++  }
++
++  if (preferredReady === null) {
++    return view(input, {
++      ready: false,
++      fact: "No provider is ready.",
++      reason: "There is no local Grok or Codex sign-in and no stored API key.",
++      nextAction: {
++        code: "select-provider",
++        command: "forklight setup provider select --provider xai",
++        message: "Sign in to Grok, then run: forklight setup provider select --provider xai",
++      },
++      providerReady: false,
++      workerReady: false,
++    });
++  }
++
++  if (!workerReady) {
++    const profile = launchableWorker?.id ?? GROK_WORKER;
++    const command = `forklight setup worker select --profile ${profile}`;
++    return view(input, {
++      ready: false,
++      fact: `${preferredReady.label} is ready, but the selected Worker is not.`,
++      reason: selectedWorker === null
++        ? "No built-in Worker is selected."
++        : "The selected Worker uses a provider that is not ready.",
++      nextAction: {
++        code: "select-worker",
++        command,
++        message: `Select a built-in Worker: ${command}`,
++      },
++      providerReady: true,
++      workerReady: false,
++    });
++  }
++
++  if (!anyMain) {
++    const client = mainClientForWorker(selectedWorker);
++    const command = `forklight setup main install --client ${client} --component mcp --confirm`;
++    return view(input, {
++      ready: false,
++      fact: "Provider and Worker are ready. No Main connection is installed.",
++      reason: "ForkLight is not yet connected to Grok, Codex, or Claude Code.",
++      nextAction: {
++        code: "install-main",
++        command,
++        message: `Install a Main connection: ${command}`,
++      },
++      providerReady: true,
++      workerReady: true,
++    });
++  }
++
++  return view(input, {
++    ready: true,
++    fact: "Setup is ready.",
++    reason: "A provider, a built-in Worker, and a Main connection are in place.",
++    nextAction: {
++      code: "ready",
++      command: "forklight doctor",
++      message: "Run forklight doctor, then use the usual delivery commands.",
++    },
++    providerReady: true,
++    workerReady: true,
++  });
++}
++
++export function renderSetupStatusHuman(status: SetupStatusView): string {
++  return `fact: ${status.fact}\nreason: ${status.reason}\nnext: ${status.nextAction.message}\n`;
++}
++
++export function renderSetupStatusJson(status: SetupStatusView): string {
++  return `${JSON.stringify(status, null, 2)}\n`;
++}
++
++export function projectMainSetupResult(
++  result: InstallResult | MainSurfaceStatus,
++  component: MainInstallComponent,
++): {
++  ok: boolean;
++  action: string;
++  message: string;
++  backupPath?: string;
++  targetPath?: string;
++  newSessionNeeded: boolean;
++} {
++  if ("plugin" in result && "mcp" in result && "skill" in result) {
++    const backupPath = result.mcp.backupPath;
++    const changed = result.message.includes("Installed")
++      || result.message.includes("Removed")
++      || result.mcp.action === "installed"
++      || result.mcp.action === "uninstalled";
++    return {
++      ok: result.ok,
++      action: component === "all" ? "all" : result.mcp.action,
++      message: result.message,
++      ...(backupPath === undefined ? {} : { backupPath }),
++      ...(result.mcp.targetPath === undefined ? {} : { targetPath: result.mcp.targetPath }),
++      newSessionNeeded: result.ok && changed,
++    };
++  }
++  return {
++    ok: result.ok,
++    action: result.action,
++    message: result.message,
++    ...(result.backupPath === undefined ? {} : { backupPath: result.backupPath }),
++    ...(result.targetPath === undefined ? {} : { targetPath: result.targetPath }),
++    newSessionNeeded: result.ok && (result.action === "installed" || result.action === "uninstalled"),
++  };
++}
++
++function providerReady(input: SetupStatusInput, name: string): boolean {
++  return input.providers.some((item) => item.name === name && item.configured);
++}
++
++function firstLaunchableWorker(input: SetupStatusInput): SetupWorkerOption | undefined {
++  const grok = input.workers.find((item) => item.id === GROK_WORKER && providerReady(input, item.provider));
++  if (grok !== undefined) return grok;
++  return input.workers.find((item) => providerReady(input, item.provider));
++}
++
++function mainClientForWorker(worker: SetupWorkerOption | null): string {
++  if (worker?.runtime === "codex-cli") return "codex";
++  if (worker?.runtime === "claude-code") return "claude-code";
++  return "grok-build";
++}
++
++function view(
++  input: SetupStatusInput,
++  parts: {
++    ready: boolean;
++    fact: string;
++    reason: string;
++    nextAction: SetupNextAction;
++    providerReady: boolean;
++    workerReady: boolean;
++  },
++): SetupStatusView {
++  const preferred = input.providers.find((item) => item.name === input.defaultProvider && item.configured)
++    ?? input.providers.find((item) => item.configured)
++    ?? input.providers.find((item) => item.name === input.defaultProvider)
++    ?? null;
++  const selectedWorker = input.workers.find((item) => item.selected) ?? null;
++  return {
++    ready: parts.ready,
++    fact: parts.fact,
++    reason: parts.reason,
++    nextAction: parts.nextAction,
++    provider: {
++      name: preferred?.name ?? null,
++      label: preferred?.label ?? null,
++      authMode: preferred?.authMode ?? "none",
++      ready: parts.providerReady,
++    },
++    worker: {
++      id: selectedWorker?.id ?? null,
++      label: selectedWorker?.label ?? null,
++      ready: parts.workerReady,
++    },
++    main: {
++      anyInstalled: input.mains.some((item) => item.installed),
++      clients: input.mains.map((item) => ({ client: item.client, installed: item.installed })),
++    },
++  };
++}
+diff --git a/baseline/src/setup/types.ts b/workspace/src/setup/types.ts
+index f6073cf..8cff87b 100644
+--- a/baseline/src/setup/types.ts
++++ b/workspace/src/setup/types.ts
+@@ -9,11 +9,14 @@ export interface SetupPrerequisite {
+   fix?: string;
+ }
+ 
++export type SetupAuthMode = "api-key" | "local-sign-in" | "none";
++
+ export interface SetupProviderOption {
+   name: ProviderName;
+   label: string;
+   variantLabel: string;
+   configured: boolean;
++  authMode: SetupAuthMode;
+   defaultModel: string;
+   defaultEndpoint: string;
+   variants: ProviderVariant[];
+@@ -37,8 +40,69 @@ export interface ResolvedSetupProvider {
+ }
+ 
+ export interface SetupProviderCommit extends ResolvedSetupProvider {
+-  stored: true;
++  stored: boolean;
+   settingsUpdated: true;
++  authMode: Exclude<SetupAuthMode, "none">;
++}
++
++export interface SetupWorkerOption {
++  id: string;
++  label: string;
++  runtime: string;
++  provider: ProviderName;
++  model: string;
++  selected: boolean;
++}
++
++export interface SetupWorkerSelection {
++  id: string;
++  label: string;
++  runtime: string;
++  provider: ProviderName;
++  model: string;
++}
++
++export type SetupNextActionCode =
++  | "fix-prerequisite"
++  | "select-provider"
++  | "select-worker"
++  | "install-main"
++  | "ready";
++
++export interface SetupNextAction {
++  code: SetupNextActionCode;
++  message: string;
++  command: string;
++}
++
++export interface SetupStatusView {
++  ready: boolean;
++  fact: string;
++  reason: string;
++  nextAction: SetupNextAction;
++  provider: {
++    name: ProviderName | null;
++    label: string | null;
++    authMode: SetupAuthMode;
++    ready: boolean;
++  };
++  worker: {
++    id: string | null;
++    label: string | null;
++    ready: boolean;
++  };
++  main: {
++    anyInstalled: boolean;
++    clients: Array<{ client: string; installed: boolean }>;
++  };
++}
++
++export interface SetupStatusInput {
++  prerequisites: SetupPrerequisite[];
++  providers: SetupProviderOption[];
++  defaultProvider: ProviderName;
++  workers: SetupWorkerOption[];
++  mains: Array<{ client: string; installed: boolean }>;
+ }
+ 
+ export interface SetupBootstrap {
+@@ -53,6 +117,7 @@ export interface SetupSystemInspector {
+   account(): string;
+   commandExists(command: string): boolean;
+   hasLocalCodexSignIn?(): boolean;
++  hasLocalGrokSignIn?(): boolean;
+ }
+ 
+ export interface SetupKeychainStore {
+diff --git a/workspace/tests/cli-setup.test.ts b/workspace/tests/cli-setup.test.ts
+new file mode 100644
+index 0000000..e7d6406
+--- /dev/null
++++ b/workspace/tests/cli-setup.test.ts
+@@ -0,0 +1,414 @@
++import assert from "node:assert/strict";
++import { execFile } from "node:child_process";
++import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
++import { tmpdir } from "node:os";
++import path from "node:path";
++import { Readable } from "node:stream";
++import { promisify } from "node:util";
++import { fileURLToPath } from "node:url";
++import test from "node:test";
++import { runSetupCommand, SETUP_USAGE, type SetupCliDependencies } from "../src/cli/setup.js";
++import { SettingsService } from "../src/core/settings.js";
++import { SetupService } from "../src/setup/service.js";
++import type { SetupKeychainStore, SetupSystemInspector } from "../src/setup/types.js";
++import { StateStore } from "../src/state/store.js";
++
++const execFileAsync = promisify(execFile);
++const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
++
++class MemoryKeychain implements SetupKeychainStore {
++  readonly values = new Map<string, string>();
++  reads = 0;
++  writes = 0;
++  failWrite = false;
++  unreadable = false;
++
++  private id(service: string, account: string): string { return `${account}:${service}`; }
++  has(service: string, account: string): boolean { return this.values.has(this.id(service, account)); }
++  read(service: string, account: string): string | undefined {
++    this.reads += 1;
++    if (this.unreadable) return undefined;
++    return this.values.get(this.id(service, account));
++  }
++  write(service: string, account: string, value: string): void {
++    this.writes += 1;
++    if (this.failWrite) throw new Error(`write failed ${value}`);
++    this.values.set(this.id(service, account), value);
++  }
++  delete(service: string, account: string): void {
++    this.values.delete(this.id(service, account));
++  }
++}
++
++function inspector(overrides: Partial<SetupSystemInspector> = {}): SetupSystemInspector {
++  return {
++    platform: () => "darwin",
++    nodeVersion: () => "v24.5.0",
++    account: () => "cli-setup-user",
++    commandExists: () => true,
++    hasLocalGrokSignIn: () => false,
++    hasLocalCodexSignIn: () => false,
++    ...overrides,
++  };
++}
++
++async function isolated() {
++  const home = await mkdtemp(path.join(tmpdir(), "fl-cli-setup-"));
++  const mainHome = await mkdtemp(path.join(tmpdir(), "fl-cli-main-"));
++  const store = new StateStore(home);
++  const settings = new SettingsService(store);
++  const keychain = new MemoryKeychain();
++  const system = inspector();
++  return {
++    home,
++    mainHome,
++    store,
++    settings,
++    keychain,
++    system,
++    deps(extra: Partial<SetupCliDependencies> = {}) {
++      return {
++        home,
++        settings,
++        keychain,
++        inspector: system,
++        mainHome,
++        ...extra,
++      };
++    },
++    close() { store.close(); },
++  };
++}
++
++function containsSecret(haystack: string, secret: string): boolean {
++  return haystack.includes(secret);
++}
++
++test("setup status is read-only fact/reason/next on a clean home", async () => {
++  const ctx = await isolated();
++  try {
++    const human = await runSetupCommand([], ctx.deps());
++    const json = await runSetupCommand(["status", "--json"], ctx.deps());
++    assert.match(human.stdout, /^fact: /m);
++    assert.match(human.stdout, /^reason: /m);
++    assert.match(human.stdout, /^next: /m);
++    assert.doesNotMatch(human.stdout, /use: forklight hub/i);
++    const body = JSON.parse(json.stdout) as {
++      fact: string;
++      reason: string;
++      nextAction: { code: string; message: string; command: string };
++    };
++    assert.equal(typeof body.fact, "string");
++    assert.equal(typeof body.reason, "string");
++    assert.equal(body.nextAction.code, "select-provider");
++    assert.match(body.nextAction.command, /setup provider select/);
++    assert.equal(ctx.keychain.reads, 0);
++    assert.equal(ctx.keychain.values.size, 0);
++  } finally {
++    ctx.close();
++  }
++});
++
++test("selecting signed-in Grok asks for no API key and points at a built-in Worker", async () => {
++  const ctx = await isolated();
++  try {
++    assert.equal(ctx.settings.get().execution.defaultRuntime, "claude-code");
++    const result = await runSetupCommand(
++      ["provider", "select", "--provider", "xai"],
++      ctx.deps({ inspector: inspector({ hasLocalGrokSignIn: () => true }) }),
++    );
++    assert.match(result.stdout, /local sign-in/i);
++    assert.match(result.stdout, /grok-4-6-xhigh/);
++    assert.doesNotMatch(result.stdout, /API key was saved/);
++    assert.equal(ctx.keychain.values.size, 0);
++    assert.equal(ctx.keychain.reads, 0);
++    assert.equal(ctx.keychain.writes, 0);
++    assert.equal(ctx.settings.get().execution.defaultProvider, "xai");
++    assert.equal(ctx.settings.get().execution.defaultRuntime, "grok-build");
++  } finally {
++    ctx.close();
++  }
++});
++
++test("selecting signed-in Codex asks for no API key", async () => {
++  const ctx = await isolated();
++  try {
++    assert.equal(ctx.settings.get().execution.defaultRuntime, "claude-code");
++    const result = await runSetupCommand(
++      ["provider", "select", "--provider", "openai"],
++      ctx.deps({ inspector: inspector({ hasLocalCodexSignIn: () => true }) }),
++    );
++    assert.match(result.stdout, /local sign-in/i);
++    assert.equal(ctx.keychain.values.size, 0);
++    assert.equal(ctx.keychain.reads, 0);
++    assert.equal(ctx.keychain.writes, 0);
++    assert.equal(ctx.settings.get().execution.defaultProvider, "openai");
++    assert.equal(ctx.settings.get().execution.defaultRuntime, "codex-cli");
++  } finally {
++    ctx.close();
++  }
++});
++
++test("API-key provider stores from stdin after confirm and never leaks the secret", async () => {
++  const ctx = await isolated();
++  const secret = "stdin-only-secret-must-not-leak";
++  const args = ["provider", "select", "--provider", "minimax", "--variant", "china", "--confirm"];
++  try {
++    const result = await runSetupCommand(args, ctx.deps({
++      stdin: Readable.from([secret]),
++    }));
++    assert.equal(ctx.keychain.values.get("cli-setup-user:forklight.minimax.api-key"), secret);
++    assert.equal(ctx.settings.get().execution.defaultProvider, "minimax");
++    assert.equal(containsSecret(result.stdout, secret), false);
++    assert.equal(containsSecret(args.join(" "), secret), false);
++    assert.equal(containsSecret(JSON.stringify(ctx.settings.get()), secret), false);
++    assert.equal(containsSecret(JSON.stringify(result.json), secret), false);
++  } finally {
++    ctx.close();
++  }
++});
++
++test("API-key store without --confirm writes nothing", async () => {
++  const ctx = await isolated();
++  try {
++    await assert.rejects(
++      () => runSetupCommand(
++        ["provider", "select", "--provider", "minimax", "--variant", "china"],
++        ctx.deps(),
++      ),
++      /--confirm/,
++    );
++    assert.equal(ctx.keychain.values.size, 0);
++    assert.equal(ctx.settings.get().execution.defaultProvider, "deepseek");
++  } finally {
++    ctx.close();
++  }
++});
++
++test("API-key argv flags are rejected without leaking the secret", async () => {
++  const ctx = await isolated();
++  const secret = "argv-secret-must-not-leak";
++  const before = structuredClone(ctx.settings.get());
++  try {
++    await assert.rejects(
++      () => runSetupCommand(
++        ["provider", "select", "--provider", "minimax", "--variant", "china", "--api-key", secret, "--confirm"],
++        ctx.deps(),
++      ),
++      (error: unknown) => error instanceof Error
++        && error.message.includes("command-line flags")
++        && !error.message.includes(secret),
++    );
++    assert.deepEqual(ctx.settings.get(), before);
++    assert.equal(ctx.keychain.values.size, 0);
++  } finally {
++    ctx.close();
++  }
++});
++
++test("unreadable existing Keychain item refuses overwrite and prints no credential", async () => {
++  const ctx = await isolated();
++  const previous = "existing-unreadable-secret";
++  const replacement = "replacement-secret-must-not-leak";
++  ctx.keychain.values.set("cli-setup-user:forklight.minimax.api-key", previous);
++  ctx.keychain.unreadable = true;
++  const before = structuredClone(ctx.settings.get());
++  try {
++    await assert.rejects(
++      () => runSetupCommand(
++        ["provider", "select", "--provider", "minimax", "--variant", "china", "--confirm"],
++        ctx.deps({ stdin: Readable.from([replacement]) }),
++      ),
++      (error: unknown) => error instanceof Error
++        && /could not be backed up/.test(error.message)
++        && !error.message.includes(previous)
++        && !error.message.includes(replacement),
++    );
++    assert.equal(ctx.keychain.values.get("cli-setup-user:forklight.minimax.api-key"), previous);
++    assert.deepEqual(ctx.settings.get(), before);
++  } finally {
++    ctx.close();
++  }
++});
++
++test("settings-write failure restores the previous Keychain value without leaking", async () => {
++  const ctx = await isolated();
++  const previous = "previous-cli-secret";
++  const replacement = "replacement-cli-secret";
++  ctx.keychain.values.set("cli-setup-user:forklight.minimax.api-key", previous);
++  const failingSettings = {
++    get: () => ctx.settings.get(),
++    update: () => { throw new Error("db failed"); },
++  };
++  try {
++    await assert.rejects(
++      () => runSetupCommand(
++        ["provider", "select", "--provider", "minimax", "--variant", "china", "--confirm"],
++        ctx.deps({
++          settings: failingSettings,
++          stdin: Readable.from([replacement]),
++        }),
++      ),
++      (error: unknown) => error instanceof Error
++        && /previous Keychain state was restored/.test(error.message)
++        && !error.message.includes(previous)
++        && !error.message.includes(replacement),
++    );
++    assert.equal(ctx.keychain.values.get("cli-setup-user:forklight.minimax.api-key"), previous);
++  } finally {
++    ctx.close();
++  }
++});
++
++test("built-in Worker list includes grok-4-6-xhigh and invalid ids do not mutate", async () => {
++  const ctx = await isolated();
++  try {
++    const listed = await runSetupCommand(["worker", "list"], ctx.deps());
++    assert.match(listed.stdout, /grok-4-6-xhigh/);
++    const selected = await runSetupCommand(
++      ["worker", "select", "--profile", "grok-4-6-xhigh"],
++      ctx.deps(),
++    );
++    assert.match(selected.stdout, /Grok 4.6 Xhigh/);
++    assert.equal(ctx.settings.get().workerProfiles.defaultProfileId, "grok-4-6-xhigh");
++    await assert.rejects(
++      () => runSetupCommand(["worker", "select", "--profile", "missing-profile"], ctx.deps()),
++      /not in the current settings/,
++    );
++    assert.equal(ctx.settings.get().workerProfiles.defaultProfileId, "grok-4-6-xhigh");
++  } finally {
++    ctx.close();
++  }
++});
++
++test("Main install status and uninstall use a temp home, backup, and new-session guidance", async () => {
++  const ctx = await isolated();
++  try {
++    const targetDir = path.join(ctx.mainHome, ".grok");
++    await mkdir(targetDir, { recursive: true });
++    const targetPath = path.join(targetDir, "config.toml");
++    await writeFile(targetPath, 'model = "grok"\n', "utf8");
++
++    const missing = await runSetupCommand(
++      ["main", "install", "--client", "grok-build", "--component", "mcp"],
++      ctx.deps(),
++    ).catch((error: unknown) => error);
++    assert.ok(missing instanceof Error);
++    assert.match((missing as Error).message, /--confirm/);
++    assert.equal(await readFile(targetPath, "utf8"), 'model = "grok"\n');
++
++    const installed = await runSetupCommand(
++      ["main", "install", "--client", "grok-build", "--component", "mcp", "--confirm", "--json"],
++      ctx.deps(),
++    );
++    const body = JSON.parse(installed.stdout) as {
++      newSessionNeeded: boolean;
++      backupPath?: string;
++      fact: string;
++      next: string;
++    };
++    assert.equal(body.newSessionNeeded, true);
++    assert.ok(body.backupPath);
++    assert.match(body.next, /new Grok session/i);
++    const afterInstall = await readFile(targetPath, "utf8");
++    assert.match(afterInstall, /\[mcp_servers\.forklight\]/);
++    assert.doesNotMatch(afterInstall, /sk-|api_key|ANTHROPIC_AUTH/i);
++
++    const status = await runSetupCommand(
++      ["main", "status", "--client", "grok-build", "--json"],
++      ctx.deps(),
++    );
++    const statusBody = JSON.parse(status.stdout) as { mains: Array<{ client: string; mcp: boolean }> };
++    assert.equal(statusBody.mains[0]?.mcp, true);
++
++    const uninstalled = await runSetupCommand(
++      ["main", "uninstall", "--client", "grok-build", "--component", "mcp", "--confirm"],
++      ctx.deps(),
++    );
++    assert.match(uninstalled.stdout, /new Grok session/i);
++    const afterUninstall = await readFile(targetPath, "utf8");
++    assert.doesNotMatch(afterUninstall, /mcp_servers\.forklight/);
++    assert.match(afterUninstall, /model = "grok"/);
++  } finally {
++    ctx.close();
++  }
++});
++
++test("unsupported Main client is rejected before any file change", async () => {
++  const ctx = await isolated();
++  try {
++    await assert.rejects(
++      () => runSetupCommand(
++        ["main", "install", "--client", "notepad", "--component", "mcp", "--confirm"],
++        ctx.deps(),
++      ),
++      /Unsupported Main client/,
++    );
++  } finally {
++    ctx.close();
++  }
++});
++
++test("usage lists the implemented setup commands and no secret flags", async () => {
++  assert.match(SETUP_USAGE, /setup status/);
++  assert.match(SETUP_USAGE, /setup provider select/);
++  assert.match(SETUP_USAGE, /setup worker list/);
++  assert.match(SETUP_USAGE, /setup worker select/);
++  assert.match(SETUP_USAGE, /setup main status/);
++  assert.match(SETUP_USAGE, /setup main install/);
++  assert.match(SETUP_USAGE, /setup main uninstall/);
++  assert.doesNotMatch(SETUP_USAGE, /--api-key|--key /);
++  const { stdout } = await execFileAsync(
++    process.execPath,
++    [
++      "--disable-warning=ExperimentalWarning",
++      "--import",
++      "tsx",
++      path.join(root, "src", "cli.ts"),
++      "help",
++    ],
++    { cwd: root, timeout: 20_000 },
++  );
++  assert.match(stdout, /forklight setup status/);
++  assert.match(stdout, /forklight setup provider select/);
++  assert.match(stdout, /forklight setup worker select/);
++  assert.match(stdout, /forklight setup main install/);
++});
++
++test("real CLI entry prints setup status instead of the removed Hub redirect", async () => {
++  const home = await mkdtemp(path.join(tmpdir(), "fl-cli-setup-spawn-"));
++  const { stdout, stderr } = await execFileAsync(
++    process.execPath,
++    [
++      "--disable-warning=ExperimentalWarning",
++      "--import",
++      "tsx",
++      path.join(root, "src", "cli.ts"),
++      "setup",
++      "status",
++    ],
++    {
++      cwd: root,
++      env: { ...process.env, FORKLIGHT_HOME: home },
++      timeout: 20_000,
++    },
++  );
++  const text = `${stdout}${stderr}`;
++  assert.match(text, /^fact: /m);
++  assert.match(text, /^reason: /m);
++  assert.match(text, /^next: /m);
++  assert.doesNotMatch(text, /standalone setup UI was removed/i);
++});
++
++test("SetupService still owns the transactional API-key commit used by CLI", async () => {
++  const ctx = await isolated();
++  try {
++    const service = new SetupService(ctx.settings, ctx.keychain, ctx.system);
++    const secret = "service-owned-secret";
++    const result = service.commitProvider({ provider: "deepseek", variant: "default" }, secret);
++    assert.equal(result.stored, true);
++    assert.equal(JSON.stringify(result).includes(secret), false);
++  } finally {
++    ctx.close();
++  }
++});
+diff --git a/baseline/tests/hub-main-install.test.ts b/workspace/tests/hub-main-install.test.ts
+index 313399b..f1db60f 100644
+--- a/baseline/tests/hub-main-install.test.ts
++++ b/workspace/tests/hub-main-install.test.ts
+@@ -14,6 +14,7 @@ import {
+   upsertClaudeMcpServer,
+   upsertTomlMcpServer,
+ } from "../src/hub/main-install.js";
++import { projectMainSetupResult } from "../src/setup/status.js";
+ 
+ test("isTomlTableHeaderLine rejects array literals inside values", () => {
+   assert.equal(isTomlTableHeaderLine("[mcp_servers.forklight]"), true);
+@@ -323,6 +324,9 @@ test("installMainMcp for grok-build writes toml with backup", async () => {
+   assert.equal(result.ok, true);
+   assert.equal(result.installed, true);
+   assert.ok(result.backupPath);
++  const projected = projectMainSetupResult(result, "mcp");
++  assert.equal(projected.newSessionNeeded, true);
++  assert.equal(projected.backupPath, result.backupPath);
+ 
+   const content = await readFile(targetPath, "utf8");
+   assert.match(content, /model = "grok"/);
+diff --git a/baseline/tests/hub-settings.test.ts b/workspace/tests/hub-settings.test.ts
+index 5c180cf..7940d5f 100644
+--- a/baseline/tests/hub-settings.test.ts
++++ b/workspace/tests/hub-settings.test.ts
+@@ -238,6 +238,13 @@ test("Hub status returns one privacy-safe readiness result per saved Worker", as
+     const xai = body.providers.find((provider) => provider.name === "xai");
+     assert.equal(xai?.configured, true);
+     assert.equal(xai?.authMode, "local-sign-in");
++    const setup = (status.body as {
++      setup?: { fact?: string; reason?: string; nextAction?: { code?: string; message?: string } };
++    }).setup;
++    assert.equal(typeof setup?.fact, "string");
++    assert.equal(typeof setup?.reason, "string");
++    assert.equal(typeof setup?.nextAction?.code, "string");
++    assert.equal(typeof setup?.nextAction?.message, "string");
+ 
+     const serialized = JSON.stringify(body.workerReadiness);
+     for (const forbidden of [
+@@ -1641,12 +1648,46 @@ test("Hub provider-key writes to Keychain with setup account", async () => {
+       ctx.keychain.read("forklight.deepseek.api-key", "hub-test-user"),
+       "sk-hub-test-key-abcdef",
+     );
++    assert.equal(ctx.settings.get().execution.defaultProvider, "deepseek");
++    assert.equal(JSON.stringify(res.body).includes("sk-hub-test-key-abcdef"), false);
++
++    const second = await doHttp(`${base}/api/provider-key`, "POST", ctx.token, {
++      provider: "minimax",
++      apiKey: "sk-hub-minimax-key-abcdef",
++    });
++    assert.equal(second.status, 200);
++    assert.equal(ctx.settings.get().execution.defaultProvider, "minimax");
++    assert.equal(JSON.stringify(second.body).includes("sk-hub-minimax-key-abcdef"), false);
+ 
+     const bad = await doHttp(`${base}/api/provider-key`, "POST", ctx.token, {
+       provider: "deepseek",
+       apiKey: "short",
+     });
+     assert.equal(bad.status, 422);
++    assert.equal(JSON.stringify(bad.body).includes("sk-hub-test-key-abcdef"), false);
++  } finally {
++    await ctx.cleanup();
++  }
++});
++
++test("Hub provider-key refuses an unreadable existing item and leaves settings unchanged", async () => {
++  const ctx = await makeHub();
++  try {
++    ctx.keychain.write("forklight.deepseek.api-key", "hub-test-user", "keep-this-secret");
++    const originalRead = ctx.keychain.read.bind(ctx.keychain);
++    ctx.keychain.read = () => undefined;
++    const beforeProvider = ctx.settings.get().execution.defaultProvider;
++    const res = await doHttp(`http://127.0.0.1:${ctx.port}/api/provider-key`, "POST", ctx.token, {
++      provider: "deepseek",
++      apiKey: "replacement-hub-secret",
++    });
++    assert.equal(res.status, 422);
++    assert.match(String((res.body as { error?: string }).error), /could not be backed up/);
++    assert.equal(JSON.stringify(res.body).includes("keep-this-secret"), false);
++    assert.equal(JSON.stringify(res.body).includes("replacement-hub-secret"), false);
++    ctx.keychain.read = originalRead;
++    assert.equal(ctx.keychain.read("forklight.deepseek.api-key", "hub-test-user"), "keep-this-secret");
++    assert.equal(ctx.settings.get().execution.defaultProvider, beforeProvider);
+   } finally {
+     await ctx.cleanup();
+   }
+diff --git a/baseline/tests/main-install-skill.test.ts b/workspace/tests/main-install-skill.test.ts
+index 3bb99c1..ee51a0f 100644
+--- a/baseline/tests/main-install-skill.test.ts
++++ b/workspace/tests/main-install-skill.test.ts
+@@ -11,6 +11,7 @@ import {
+   uninstallMainFull,
+   uninstallMainSkill,
+ } from "../src/hub/main-install.js";
++import { projectMainSetupResult } from "../src/setup/status.js";
+ 
+ const SAMPLE_SKILL = `---
+ name: forklight-orchestrator
+@@ -36,6 +37,7 @@ test("installMainSkill writes skill file with backup; uninstall removes it", asy
+   });
+   assert.equal(installed.ok, true);
+   assert.equal(installed.skillInstalled, true);
++  assert.equal(projectMainSetupResult(installed, "skill").newSessionNeeded, true);
+   const body = await readFile(skillPath, "utf8");
+   assert.match(body, /ForkLight Orchestrator/);
+   assert.doesNotMatch(body, /api[_-]?key|sk-/i);
+diff --git a/baseline/tests/setup-service.test.ts b/workspace/tests/setup-service.test.ts
+index 77d9064..360db32 100644
+--- a/baseline/tests/setup-service.test.ts
++++ b/workspace/tests/setup-service.test.ts
+@@ -12,6 +12,7 @@ import { StateStore } from "../src/state/store.js";
+ class MemoryKeychain implements SetupKeychainStore {
+   readonly values = new Map<string, string>();
+   reads = 0;
++  writes = 0;
+   failWrite = false;
+   failDelete = false;
+ 
+@@ -22,6 +23,7 @@ class MemoryKeychain implements SetupKeychainStore {
+     return this.values.get(this.id(service, account));
+   }
+   write(service: string, account: string, value: string): void {
++    this.writes += 1;
+     if (this.failWrite) throw new Error(`write failed ${value}`);
+     this.values.set(this.id(service, account), value);
+   }
+@@ -164,3 +166,88 @@ test("credential commit refuses unsupported environments", async () => {
+   );
+   assert.equal(keychain.values.size, 0);
+ });
++
++test("local Grok sign-in marks xAI ready without a Keychain item", async () => {
++  const { service, keychain } = await fixture(inspector({
++    hasLocalGrokSignIn: () => true,
++  }));
++  const xai = service.describeProviders().find((item) => item.name === "xai");
++  assert.equal(xai?.configured, true);
++  assert.equal(xai?.authMode, "local-sign-in");
++  assert.equal(keychain.values.size, 0);
++  assert.equal(keychain.reads, 0);
++  const decided = service.resolveProviderSetup({ provider: "xai", variant: "default" });
++  assert.equal(decided.mode, "local-sign-in");
++});
++
++test("selecting signed-in Grok updates settings and never stores a key", async () => {
++  const { service, settings, keychain } = await fixture(inspector({
++    hasLocalGrokSignIn: () => true,
++  }));
++  assert.equal(settings.get().execution.defaultRuntime, "claude-code");
++  const result = service.selectSignedInProvider({ provider: "xai", variant: "default" });
++  assert.equal(result.authMode, "local-sign-in");
++  assert.equal(result.stored, false);
++  assert.equal(settings.get().execution.defaultProvider, "xai");
++  assert.equal(settings.get().execution.defaultRuntime, "grok-build");
++  assert.equal(keychain.values.size, 0);
++  assert.equal(keychain.reads, 0);
++  assert.equal(keychain.writes, 0);
++});
++
++test("selecting signed-in Codex updates settings and refuses an API key path", async () => {
++  const { service, settings, keychain } = await fixture(inspector({
++    hasLocalCodexSignIn: () => true,
++  }));
++  assert.equal(settings.get().execution.defaultRuntime, "claude-code");
++  const result = service.selectSignedInProvider({ provider: "openai", variant: "local-codex" });
++  assert.equal(result.authMode, "local-sign-in");
++  assert.equal(settings.get().execution.defaultProvider, "openai");
++  assert.equal(settings.get().execution.defaultRuntime, "codex-cli");
++  assert.equal(keychain.values.size, 0);
++  assert.equal(keychain.reads, 0);
++  assert.equal(keychain.writes, 0);
++  assert.throws(
++    () => service.commitProvider({ provider: "openai", variant: "local-codex" }, "should-not-store"),
++    /no OpenAI API key/,
++  );
++  assert.equal(keychain.values.size, 0);
++  assert.equal(keychain.reads, 0);
++  assert.equal(keychain.writes, 0);
++});
++
++test("xAI without local sign-in stays on the API-key path", async () => {
++  const { service } = await fixture(inspector({
++    hasLocalGrokSignIn: () => false,
++  }));
++  const decided = service.resolveProviderSetup({ provider: "xai", variant: "default" });
++  assert.equal(decided.mode, "api-key");
++  assert.throws(
++    () => service.selectSignedInProvider({ provider: "xai", variant: "default" }),
++    /API key on stdin/,
++  );
++});
++
++test("built-in Workers are listable and selectable without file editing", async () => {
++  const { service, settings } = await fixture();
++  const workers = service.listWorkers();
++  assert.ok(workers.some((item) => item.id === "grok-4-6-xhigh"));
++  const before = structuredClone(settings.get());
++  const selected = service.selectWorker("grok-4-6-xhigh");
++  assert.equal(selected.id, "grok-4-6-xhigh");
++  assert.equal(settings.get().workerProfiles.defaultProfileId, "grok-4-6-xhigh");
++  assert.equal(settings.get().execution.defaultProvider, "xai");
++  assert.notEqual(settings.get().workerProfiles.defaultProfileId, before.workerProfiles.defaultProfileId);
++});
++
++test("invalid Worker ids explain the choice and write no settings", async () => {
++  const { service, settings } = await fixture();
++  const beforeId = settings.get().workerProfiles.defaultProfileId;
++  const beforeProvider = settings.get().execution.defaultProvider;
++  assert.throws(
++    () => service.selectWorker("does-not-exist"),
++    /not in the current settings/,
++  );
++  assert.equal(settings.get().workerProfiles.defaultProfileId, beforeId);
++  assert.equal(settings.get().execution.defaultProvider, beforeProvider);
++});

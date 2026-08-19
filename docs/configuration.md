@@ -4,6 +4,47 @@ ForkLight settings are versioned, validated, and persisted as a single document.
 Every setting has a built-in default; overrides are merged onto those defaults
 and validated atomically before persistence.
 
+## First setup without the Hub
+
+A clean install can finish Provider, built-in Worker, and Main-client setup from
+the public CLI. `forklight setup status` is read-only: it prints one fact, one
+reason, and one next command. It does not start the Hub, a Task, a Worker, or a
+paid probe.
+
+```bash
+forklight setup status
+forklight setup status --json
+```
+
+Local Grok or Codex sign-in is enough. Those paths never ask for an API key:
+
+```bash
+forklight setup provider select --provider xai
+forklight setup provider select --provider openai
+```
+
+API-key Providers require `--confirm` and the key on stdin. Do not put a key on
+the command line:
+
+```bash
+printf '%s' "$KEY" | forklight setup provider select --provider deepseek --variant default --confirm
+```
+
+Select a built-in Worker without editing a settings file, then install a Main
+connection. Install and uninstall require `--confirm` and back up the existing
+client file. Start a new Main session afterwards.
+
+```bash
+forklight setup worker list
+forklight setup worker select --profile grok-4-6-xhigh
+forklight setup main status
+forklight setup main install --client grok-build --component mcp --confirm
+forklight setup main uninstall --client grok-build --component mcp --confirm
+```
+
+Advanced policy still lives in `forklight settings` and the authenticated local
+API. First setup only selects an existing built-in Worker.
+
 ## Configurable policy sections
 
 ### contractQuality
@@ -31,12 +72,29 @@ Governs Worker runtime behavior and cost ceilings.
 | `noProgressTimeoutMs` | 1,800,000 | Watchdog timeout when no effective implementation progress is seen |
 | `defaultEffort` | `high` | Default Worker effort level (`low`, `medium`, `high`, `xhigh`, `max`) |
 | `defaultProvider` | `deepseek` | Default provider when a task omits one |
-| `defaultRuntime` | `claude-code` | Default **Worker** runtime (`claude-code`, `grok-build`). Independent of which Main client (Claude Code / Grok / OpenCode / Codex) is connected. Must pair with provider (`grok-build` requires `xai`). |
+| `defaultRuntime` | `claude-code` | Default **Worker** runtime (`claude-code`, `grok-build`, `codex-cli`). Independent of which Main client (Claude Code / Grok / OpenCode / Codex) is connected. Must pair with provider (`grok-build` requires `xai`). |
 | `defaultMaxBudgetUsd` | 0.50 | Per-task spend limit when the task omits one |
 | `maximumBudgetUsd` | 20 | Hard cap — no single-task budget may exceed this value |
 | `maxAttempts` | 3 | Maximum attempts per task before the daemon refuses resume |
 | `maxWorkerValidationRepairs` | 1 | Default finite same-Worker automatic repair rounds after an independently verified behavior failure (0 disables) |
 | `workerStopGraceMs` | 10,000 | Grace period for SIGINT before SIGKILL |
+
+### Execution preference
+
+A Worker Profile or Task may request `auto`, `single-run`, `persistent-session`, or
+`native-goal`. ForkLight freezes one resolved mode at Task admission from proven
+Runtime capability: native Goal first, then persistent Session, then a single
+run. Forced `persistent-session` and `native-goal` fail closed when the Runtime
+cannot prove that contract. A stored Task or Profile that omits the field keeps
+historical `single-run` semantics.
+
+Grok Build (`grok-build`) proves a native Goal contract. New `auto` Grok Tasks
+freeze `native-goal` and launch Grok CLI `/goal` on the Task Session. Forced
+`persistent-session` remains available and keeps `--session-id` then `--resume`.
+Historical omitted Grok records stay `single-run`. Codex CLI can also freeze
+`native-goal`. New default catalogs include model `xai-grok-4-6` (`grok-4.6`)
+and a saved-capable `grok-4-6-xhigh` Worker Profile (`grok-build` / `xai` /
+`grok-4.6` / `xhigh`). Persisted Profile arrays are not rewritten automatically.
 
 ### Worker Advanced policy
 
@@ -305,6 +363,10 @@ These are fixed by the implementation and cannot be changed through settings:
   passing preflight receipt plus explicit confirmation.
 - **Recovery**: Interrupted tasks are detected on daemon restart and queued
   for recovery. Orphaned worker processes are stopped.
+- **Home backup**: `forklight backup` copies only ForkLight Home data. Keychain
+  credentials, local Grok/Codex sign-in, and external Main client files are
+  never read or claimed as backed up. Restore refuses while Daemon or Hub owns
+  the Home and never stops those processes. Keep backup directories private.
 
 Start from [the safe example settings](../examples/settings.safe.yaml) and
 apply only the sections you intentionally want to override.

@@ -1,0 +1,62 @@
+version: 2
+name: M2-C audit CLI and MCP reclaim transport parity
+project: /Users/yijunwang/code/forklight
+taskClass: m2-storage-reclaim-cli-mcp-parity-audit
+taskFamily: forklight-storage-lifecycle
+workerProfileId: default
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 0
+  reason: Read-only deterministic shared-call-path audit changes no files and performs no reclaim.
+contract:
+  outcome: Verify integrated CLI and MCP confirmed reclaim routes both use the same corrected daemonRequest timeout policy and neither surface duplicates timeout logic, retries, cancellation, or storage semantics.
+  presentation: { summary: 只读核对 CLI 与 MCP 共用同一 Reclaim 观察路径。, language: zh-CN }
+  context:
+    - Starts only after the integrated timeout mapping audit passes.
+    - Read the accepted reclaim transport Work Item; real deletion is already complete and must not be replayed.
+  inScope:
+    - Inspect CLI and MCP confirmed reclaim call sites, shared daemonRequest usage, and focused transport tests.
+  outOfScope:
+    - No edits, real-home access, reclaim, retain, Store, daemon server, Integration, Judge, Hub, commit, or push.
+  executionSteps:
+    - Trace both user surfaces into shared daemonRequest and the corrected resolver.
+    - Confirm explicit confirmation and exact one-dispatch behavior remain unchanged.
+    - Run approved commands and return pass or one exact divergence.
+  deliverables: [One bounded CLI/MCP parity verdict.]
+  modules:
+    - name: Shared reclaim transports
+      responsibility: Audit CLI and MCP parity at the daemon client boundary.
+      consumes: [CLI call site, MCP call site, shared client, and tests.]
+      produces: [Pass or one exact divergence.]
+      boundaries: [No storage mutation, duplicated policy, replay, or UI.]
+  callChain:
+    - CLI and MCP require confirmation.
+    - Both call daemonRequest storage_reclaim once.
+    - Shared resolver owns observation; machine pass releases the final no-replay audit.
+  scenarios:
+    - name: Both surfaces share one correction
+      given: CLI and MCP invoke confirmed storage reclaim.
+      when: Their integrated call paths are traced.
+      then: Both reach the same resolver without a surface-specific timeout branch.
+    - name: Divergent or duplicate policy stops
+      given: A surface adds a retry, custom timeout, cancellation, or storage decision.
+      when: Source and focused tests are inspected.
+      then: The audit fails and the final boundary audit stays blocked.
+  risks: [A duplicated surface rule could drift; only the shared client may own the mapping.]
+  changeBudget: { maxFiles: 1, maxDiffLines: 20 }
+advancedPolicy: { maxDurationMs: null, observedTokenCeiling: null, noProgressTimeoutMs: null, fileLimit: null, fileLimitMode: warn, changedLineLimit: null, changedLineLimitMode: warn, baseMaxAttempts: 1, maxExtraAttempts: 0, maxMainCorrections: 0, maxMainReverifications: 0, maxConcurrency: 1, completionMode: warn, changeBudgetMode: warn, maxAdaptationRounds: 0 }
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: false
+  allowedCommands: []
+  focusPaths: [src/daemon/client.ts, src/cli.ts, src/mcp/server.ts, tests/daemon.test.ts, tests/daemon-cli.test.ts, tests/mcp.test.ts]
+acceptance:
+  criteria:
+    - Integrated CLI and MCP use the same corrected daemonRequest path and preserve one confirmed dispatch without source changes.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/daemon.test.ts tests/daemon-cli.test.ts tests/mcp.test.ts
+    - git diff --check

@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "name": "M2-A truthful Grok persistent-session delivery",
+  "objective": "Implement, safely integrate, and independently audit Grok 4.6 Xhigh persistent-session truth without generated-output contamination or native Goal overclaiming.",
+  "items": [
+    {
+      "id": "implement",
+      "task": "./01-implement.yaml",
+      "dependsOn": []
+    },
+    {
+      "id": "post-integration-truth",
+      "task": "./02-post-integration-truth.yaml",
+      "dependsOn": ["implement"]
+    },
+    {
+      "id": "compatibility-audit",
+      "task": "./03-compatibility-audit.yaml",
+      "dependsOn": ["post-integration-truth"]
+    },
+    {
+      "id": "scope-audit",
+      "task": "./04-scope-audit.yaml",
+      "dependsOn": ["compatibility-audit"]
+    }
+  ]
+}

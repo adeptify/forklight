@@ -1,0 +1,600 @@
+{
+  "schemaVersion": 1,
+  "method": "codex-terminal-result",
+  "requestedFamilies": [
+    "forklight-storage-lifecycle",
+    "worker-runtime",
+    "hub-product-comprehension"
+  ],
+  "requestedComparisons": [
+    "cmp-m4d-storage-lifecycle-20260818",
+    "cmp-m4d-worker-runtime-20260818",
+    "cmp-m4d-hub-product-comprehension-20260818",
+    "cmp-m4e-worker-runtime-checkpoint-20260818",
+    "cmp-m4e-storage-lifecycle-checkpoint-20260818",
+    "cmp-m4e-storage-host-staged-20260818",
+    "cmp-m4e-hub-current-graduation-20260818"
+  ],
+  "overall": "proven",
+  "reasons": [],
+  "confidence": "proven",
+  "families": [
+    {
+      "taskFamily": "forklight-storage-lifecycle",
+      "claim": "proven-lower",
+      "reasons": [],
+      "comparisons": [
+        {
+          "comparisonId": "cmp-m4d-storage-lifecycle-20260818",
+          "forklightTaskId": "ae76df01-44f7-4477-8c31-6e0c4f11d138",
+          "taskFamily": "forklight-storage-lifecycle",
+          "taskClass": "m4-calibration-storage-lifecycle",
+          "directCodexProfileId": "codex-main-gpt-5.6-sol-xhigh-v1",
+          "method": "codex-terminal-result",
+          "pairValidity": "cannot-determine",
+          "pairReasons": [
+            "incomplete-evidence"
+          ],
+          "listingStatus": "incomplete",
+          "contributesProvenLower": false,
+          "directGrossTokens": 103834,
+          "delegatedGrossTokens": 1575847,
+          "signedChange": -1472013,
+          "percentageChange": {
+            "available": true,
+            "value": -1417.6599187164127
+          },
+          "saving": {
+            "status": "unavailable"
+          },
+          "deliveryValue": {
+            "workerTokens": {
+              "status": "incomplete",
+              "reason": "worker-usage-incomplete",
+              "completeCount": 0,
+              "incompleteCount": 1,
+              "denominator": 1
+            },
+            "runtimeEstimate": {
+              "status": "complete",
+              "observedTotalUsd": 0.08528288,
+              "sampleCount": 1,
+              "missingCount": 0,
+              "denominator": 1
+            },
+            "officialCost": {
+              "status": "unavailable",
+              "reason": "official-cost-unavailable",
+              "totals": [],
+              "ranges": [],
+              "unavailableCount": 1,
+              "unavailableBreakdown": {
+                "usage:usage-missing": 1
+              }
+            },
+            "attemptElapsed": {
+              "status": "complete",
+              "totalMs": 384831,
+              "measuredCount": 1,
+              "unmeasuredCount": 0,
+              "denominator": 1
+            },
+            "corrections": {
+              "status": "complete",
+              "workerValidationRepairCount": 0,
+              "mainCorrectionCount": 0,
+              "mainReverificationCount": 0,
+              "handoffCount": 0,
+              "attemptCount": 1,
+              "eventCount": 1339
+            }
+          }
+        },
+        {
+          "comparisonId": "cmp-m4e-storage-host-staged-20260818",
+          "forklightTaskId": "214a49f1-87bf-4f41-b165-5a3ca4c68c12",
+          "taskFamily": "forklight-storage-lifecycle",
+          "taskClass": "m4-host-staged-storage-lifecycle-checkpoint",
+          "directCodexProfileId": "codex-main-gpt-5.6-sol-xhigh-v1",
+          "method": "codex-terminal-result",
+          "pairValidity": "accepted",
+          "pairReasons": [],
+          "listingStatus": "accepted",
+          "contributesProvenLower": true,
+          "directGrossTokens": 174536,
+          "delegatedGrossTokens": 63097,
+          "signedChange": 111439,
+          "percentageChange": {
+            "available": true,
+            "value": 63.848718888939814
+          },
+          "saving": {
+            "status": "saving",
+            "tokens": 111439
+          },
+          "qualityGates": {
+            "sameScope": true,
+            "sameAcceptance": true,
+            "delegatedQualityNotLower": true
+          },
+          "evidence": {
+            "directVerificationRef": {
+              "referenceId": "dv-m4e-storage-host-staged-01a012ee"
+            },
+            "delegatedIntegrationOperationId": "91dfa097-3ef3-41f1-918c-77166e128430"
+          },
+          "deliveryValue": {
+            "workerTokens": {
+              "status": "incomplete",
+              "reason": "worker-usage-incomplete",
+              "completeCount": 0,
+              "incompleteCount": 1,
+              "denominator": 1
+            },
+            "runtimeEstimate": {
+              "status": "complete",
+              "observedTotalUsd": 0.1043273,
+              "sampleCount": 1,
+              "missingCount": 0,
+              "denominator": 1
+            },
+            "officialCost": {
+              "status": "unavailable",
+              "reason": "official-cost-unavailable",
+              "totals": [],
+              "ranges": [],
+              "unavailableCount": 1,
+              "unavailableBreakdown": {
+                "usage:usage-missing": 1
+              }
+            },
+            "attemptElapsed": {
+              "status": "complete",
+              "totalMs": 377452,
+              "measuredCount": 1,
+              "unmeasuredCount": 0,
+              "denominator": 1
+            },
+            "corrections": {
+              "status": "complete",
+              "workerValidationRepairCount": 0,
+              "mainCorrectionCount": 0,
+              "mainReverificationCount": 0,
+              "handoffCount": 0,
+              "attemptCount": 1,
+              "eventCount": 1352
+            }
+          }
+        },
+        {
+          "comparisonId": "cmp-m4e-storage-lifecycle-checkpoint-20260818",
+          "forklightTaskId": "4709c1b1-e093-4465-bbb0-bbad221b34b7",
+          "taskFamily": "forklight-storage-lifecycle",
+          "taskClass": "m4-fresh-checkpoint-storage-lifecycle",
+          "directCodexProfileId": "codex-main-gpt-5.6-sol-xhigh-v1",
+          "method": "codex-terminal-result",
+          "pairValidity": "accepted",
+          "pairReasons": [],
+          "listingStatus": "accepted",
+          "contributesProvenLower": false,
+          "directGrossTokens": 154171,
+          "delegatedGrossTokens": 553038,
+          "signedChange": -398867,
+          "percentageChange": {
+            "available": true,
+            "value": -258.71726848758846
+          },
+          "saving": {
+            "status": "higher"
+          },
+          "qualityGates": {
+            "sameScope": true,
+            "sameAcceptance": true,
+            "delegatedQualityNotLower": true
+          },
+          "evidence": {
+            "directVerificationRef": {
+              "referenceId": "dv-m4e-storage-lifecycle-checkpoint-01a011b5"
+            },
+            "delegatedIntegrationOperationId": "faa5f1f6-b651-4c6b-9e98-f8863ac77122"
+          },
+          "deliveryValue": {
+            "workerTokens": {
+              "status": "incomplete",
+              "reason": "worker-usage-incomplete",
+              "completeCount": 0,
+              "incompleteCount": 1,
+              "denominator": 1
+            },
+            "runtimeEstimate": {
+              "status": "complete",
+              "observedTotalUsd": 0.10825362,
+              "sampleCount": 1,
+              "missingCount": 0,
+              "denominator": 1
+            },
+            "officialCost": {
+              "status": "unavailable",
+              "reason": "official-cost-unavailable",
+              "totals": [],
+              "ranges": [],
+              "unavailableCount": 1,
+              "unavailableBreakdown": {
+                "usage:usage-missing": 1
+              }
+            },
+            "attemptElapsed": {
+              "status": "complete",
+              "totalMs": 1195553,
+              "measuredCount": 1,
+              "unmeasuredCount": 0,
+              "denominator": 1
+            },
+            "corrections": {
+              "status": "complete",
+              "workerValidationRepairCount": 0,
+              "mainCorrectionCount": 0,
+              "mainReverificationCount": 0,
+              "handoffCount": 0,
+              "attemptCount": 1,
+              "eventCount": 1416
+            }
+          }
+        }
+      ],
+      "acceptedPairCount": 2,
+      "rejectedPairCount": 0,
+      "provenLowerPairCount": 1,
+      "mainDirectElapsed": {
+        "status": "unavailable",
+        "reason": "no-main-direct-episode",
+        "binding": "task-family",
+        "closedCount": 0,
+        "openCount": 0,
+        "unmeasuredCount": 0,
+        "denominator": 0
+      }
+    },
+    {
+      "taskFamily": "worker-runtime",
+      "claim": "proven-lower",
+      "reasons": [],
+      "comparisons": [
+        {
+          "comparisonId": "cmp-m4d-worker-runtime-20260818",
+          "forklightTaskId": "e4218692-0cac-409b-a998-378374b3553c",
+          "taskFamily": "worker-runtime",
+          "taskClass": "m4-calibration-worker-runtime",
+          "directCodexProfileId": "codex-main-gpt-5.6-sol-xhigh-v1",
+          "method": "codex-terminal-result",
+          "pairValidity": "accepted",
+          "pairReasons": [],
+          "listingStatus": "accepted",
+          "contributesProvenLower": false,
+          "directGrossTokens": 152271,
+          "delegatedGrossTokens": 2401089,
+          "signedChange": -2248818,
+          "percentageChange": {
+            "available": true,
+            "value": -1476.8524538487302
+          },
+          "saving": {
+            "status": "higher"
+          },
+          "qualityGates": {
+            "sameScope": true,
+            "sameAcceptance": true,
+            "delegatedQualityNotLower": true
+          },
+          "evidence": {
+            "directVerificationRef": {
+              "referenceId": "dv-m4d-worker-runtime-01a010b8"
+            },
+            "delegatedIntegrationOperationId": "aae1189c-dd73-4c2a-bc3b-c76e42def29c"
+          },
+          "deliveryValue": {
+            "workerTokens": {
+              "status": "incomplete",
+              "reason": "worker-usage-incomplete",
+              "completeCount": 0,
+              "incompleteCount": 1,
+              "denominator": 1
+            },
+            "runtimeEstimate": {
+              "status": "complete",
+              "observedTotalUsd": 0.1067498,
+              "sampleCount": 1,
+              "missingCount": 0,
+              "denominator": 1
+            },
+            "officialCost": {
+              "status": "unavailable",
+              "reason": "official-cost-unavailable",
+              "totals": [],
+              "ranges": [],
+              "unavailableCount": 1,
+              "unavailableBreakdown": {
+                "usage:usage-missing": 1
+              }
+            },
+            "attemptElapsed": {
+              "status": "complete",
+              "totalMs": 403073,
+              "measuredCount": 1,
+              "unmeasuredCount": 0,
+              "denominator": 1
+            },
+            "corrections": {
+              "status": "complete",
+              "workerValidationRepairCount": 0,
+              "mainCorrectionCount": 0,
+              "mainReverificationCount": 0,
+              "handoffCount": 0,
+              "attemptCount": 1,
+              "eventCount": 1795
+            }
+          }
+        },
+        {
+          "comparisonId": "cmp-m4e-worker-runtime-checkpoint-20260818",
+          "forklightTaskId": "da6a7615-2b2a-483b-bb1c-3b8a1269e65b",
+          "taskFamily": "worker-runtime",
+          "taskClass": "m4-fresh-checkpoint-worker-runtime",
+          "directCodexProfileId": "codex-main-gpt-5.6-sol-xhigh-v1",
+          "method": "codex-terminal-result",
+          "pairValidity": "accepted",
+          "pairReasons": [],
+          "listingStatus": "accepted",
+          "contributesProvenLower": true,
+          "directGrossTokens": 171984,
+          "delegatedGrossTokens": 155804,
+          "signedChange": 16180,
+          "percentageChange": {
+            "available": true,
+            "value": 9.407851893199368
+          },
+          "saving": {
+            "status": "saving",
+            "tokens": 16180
+          },
+          "qualityGates": {
+            "sameScope": true,
+            "sameAcceptance": true,
+            "delegatedQualityNotLower": true
+          },
+          "evidence": {
+            "directVerificationRef": {
+              "referenceId": "dv-m4e-worker-runtime-checkpoint-01a0119b"
+            },
+            "delegatedIntegrationOperationId": "09167633-ff29-4117-80a5-5f4372886760"
+          },
+          "deliveryValue": {
+            "workerTokens": {
+              "status": "incomplete",
+              "reason": "worker-usage-incomplete",
+              "completeCount": 0,
+              "incompleteCount": 1,
+              "denominator": 1
+            },
+            "runtimeEstimate": {
+              "status": "complete",
+              "observedTotalUsd": 0.11442632,
+              "sampleCount": 1,
+              "missingCount": 0,
+              "denominator": 1
+            },
+            "officialCost": {
+              "status": "unavailable",
+              "reason": "official-cost-unavailable",
+              "totals": [],
+              "ranges": [],
+              "unavailableCount": 1,
+              "unavailableBreakdown": {
+                "usage:usage-missing": 1
+              }
+            },
+            "attemptElapsed": {
+              "status": "complete",
+              "totalMs": 476227,
+              "measuredCount": 1,
+              "unmeasuredCount": 0,
+              "denominator": 1
+            },
+            "corrections": {
+              "status": "complete",
+              "workerValidationRepairCount": 0,
+              "mainCorrectionCount": 0,
+              "mainReverificationCount": 0,
+              "handoffCount": 0,
+              "attemptCount": 1,
+              "eventCount": 1819
+            }
+          }
+        }
+      ],
+      "acceptedPairCount": 2,
+      "rejectedPairCount": 0,
+      "provenLowerPairCount": 1,
+      "mainDirectElapsed": {
+        "status": "complete",
+        "binding": "task-family",
+        "totalMs": 5267001,
+        "closedCount": 4,
+        "openCount": 0,
+        "unmeasuredCount": 0,
+        "denominator": 4
+      }
+    },
+    {
+      "taskFamily": "hub-product-comprehension",
+      "claim": "proven-lower",
+      "reasons": [],
+      "comparisons": [
+        {
+          "comparisonId": "cmp-m4d-hub-product-comprehension-20260818",
+          "forklightTaskId": "db2caa85-e8e7-4fcd-aaf8-6dc84ca4660b",
+          "taskFamily": "hub-product-comprehension",
+          "taskClass": "m4-calibration-hub-product-comprehension",
+          "directCodexProfileId": "codex-main-gpt-5.6-sol-xhigh-v1",
+          "method": "codex-terminal-result",
+          "pairValidity": "accepted",
+          "pairReasons": [],
+          "listingStatus": "accepted",
+          "contributesProvenLower": false,
+          "directGrossTokens": 119202,
+          "delegatedGrossTokens": 2128876,
+          "signedChange": -2009674,
+          "percentageChange": {
+            "available": true,
+            "value": -1685.9398332242747
+          },
+          "saving": {
+            "status": "higher"
+          },
+          "qualityGates": {
+            "sameScope": true,
+            "sameAcceptance": true,
+            "delegatedQualityNotLower": true
+          },
+          "evidence": {
+            "directVerificationRef": {
+              "referenceId": "dv-m4d-hub-comprehension-01a010c9"
+            },
+            "delegatedIntegrationOperationId": "e4208850-e99b-4467-b673-82a3c35a8ab6"
+          },
+          "deliveryValue": {
+            "workerTokens": {
+              "status": "incomplete",
+              "reason": "worker-usage-incomplete",
+              "completeCount": 0,
+              "incompleteCount": 1,
+              "denominator": 1
+            },
+            "runtimeEstimate": {
+              "status": "complete",
+              "observedTotalUsd": 0.10320224,
+              "sampleCount": 1,
+              "missingCount": 0,
+              "denominator": 1
+            },
+            "officialCost": {
+              "status": "unavailable",
+              "reason": "official-cost-unavailable",
+              "totals": [],
+              "ranges": [],
+              "unavailableCount": 1,
+              "unavailableBreakdown": {
+                "usage:usage-missing": 1
+              }
+            },
+            "attemptElapsed": {
+              "status": "complete",
+              "totalMs": 431976,
+              "measuredCount": 1,
+              "unmeasuredCount": 0,
+              "denominator": 1
+            },
+            "corrections": {
+              "status": "complete",
+              "workerValidationRepairCount": 0,
+              "mainCorrectionCount": 0,
+              "mainReverificationCount": 0,
+              "handoffCount": 0,
+              "attemptCount": 1,
+              "eventCount": 1326
+            }
+          }
+        },
+        {
+          "comparisonId": "cmp-m4e-hub-current-graduation-20260818",
+          "forklightTaskId": "074084d4-4f13-4333-9f9d-52d7971a96ff",
+          "taskFamily": "hub-product-comprehension",
+          "taskClass": "m4-current-hub-product-comprehension",
+          "directCodexProfileId": "codex-main-gpt-5.6-sol-xhigh-v1",
+          "method": "codex-terminal-result",
+          "pairValidity": "accepted",
+          "pairReasons": [],
+          "listingStatus": "accepted",
+          "contributesProvenLower": true,
+          "directGrossTokens": 120989,
+          "delegatedGrossTokens": 75277,
+          "signedChange": 45712,
+          "percentageChange": {
+            "available": true,
+            "value": 37.78194711915959
+          },
+          "saving": {
+            "status": "saving",
+            "tokens": 45712
+          },
+          "qualityGates": {
+            "sameScope": true,
+            "sameAcceptance": true,
+            "delegatedQualityNotLower": true
+          },
+          "evidence": {
+            "directVerificationRef": {
+              "referenceId": "dv-m4e-hub-current-graduation-01a01346"
+            },
+            "delegatedIntegrationOperationId": "556105c5-95da-4b8a-b117-51f981c9d019"
+          },
+          "deliveryValue": {
+            "workerTokens": {
+              "status": "incomplete",
+              "reason": "worker-usage-incomplete",
+              "completeCount": 0,
+              "incompleteCount": 1,
+              "denominator": 1
+            },
+            "runtimeEstimate": {
+              "status": "complete",
+              "observedTotalUsd": 0.09025436,
+              "sampleCount": 1,
+              "missingCount": 0,
+              "denominator": 1
+            },
+            "officialCost": {
+              "status": "unavailable",
+              "reason": "official-cost-unavailable",
+              "totals": [],
+              "ranges": [],
+              "unavailableCount": 1,
+              "unavailableBreakdown": {
+                "usage:usage-missing": 1
+              }
+            },
+            "attemptElapsed": {
+              "status": "complete",
+              "totalMs": 356349,
+              "measuredCount": 1,
+              "unmeasuredCount": 0,
+              "denominator": 1
+            },
+            "corrections": {
+              "status": "complete",
+              "workerValidationRepairCount": 0,
+              "mainCorrectionCount": 0,
+              "mainReverificationCount": 0,
+              "handoffCount": 0,
+              "attemptCount": 1,
+              "eventCount": 1357
+            }
+          }
+        }
+      ],
+      "acceptedPairCount": 2,
+      "rejectedPairCount": 0,
+      "provenLowerPairCount": 1,
+      "mainDirectElapsed": {
+        "status": "complete",
+        "binding": "task-family",
+        "totalMs": 403769,
+        "closedCount": 1,
+        "openCount": 0,
+        "unmeasuredCount": 0,
+        "denominator": 1
+      }
+    }
+  ],
+  "createdWork": false
+}

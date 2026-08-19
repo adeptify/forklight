@@ -24,12 +24,28 @@ import {
   buildGrokWorkerEnv,
   GrokBuildAdapter,
   GROK_CONNECTIVITY_SAFE_ERROR,
+  GROK_NATIVE_FOREGROUND_BLOCK_BUDGET_MS,
   grokAllowTools,
   grokDisallowedTools,
+  grokLaunchEvidence,
+  grokNativeAllowTools,
+  grokNativeDenyArgs,
+  grokNativeDisallowedTools,
+  grokSessionArgs,
   isGrokConnectivityEvidence,
   sanitizeGrokConnectivityEvent,
   seedGrokHomeAuth,
 } from "../src/workers/grok.js";
+import {
+  evaluateGrokNativeGoalResult,
+  GROK_NATIVE_GOAL_FAILURE,
+  GROK_NATIVE_GOAL_PROMPT_PREFIX,
+  GROK_NATIVE_GOAL_RESUME_PROMPT,
+  grokNativeGoalObservation,
+  grokNativeGoalStatePath,
+  readGrokNativeGoalState,
+  resolveGrokNativeGoalLaunch,
+} from "../src/workers/grok-goal.js";
 import {
   buildCodexCliArgs,
   buildCodexWorkerEnv,
@@ -72,6 +88,10 @@ import {
   projectCodexAppServerWorkspaceChangeMilestone,
 } from "../src/events/codex-normalize.js";
 import type { AttemptRecord, TaskRecord, TaskSpec } from "../src/core/types.js";
+import {
+  buildCompactInspection,
+  humanCompactInspectionLines,
+} from "../src/cli/supervision.js";
 import { checkpointSatisfied } from "../src/core/checkpoint.js";
 import { mkdir, mkdtemp, readFile, realpath, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -204,8 +224,10 @@ test("registry dispatches Claude, Grok, and Codex adapters", () => {
   assert.equal(claude.capabilities().checkpoint, "supported");
   const grok = getWorkerAdapter("grok-build");
   assert.equal(grok.capabilities().checkpoint, "unsupported");
+  assert.equal(grok.capabilities().nativeGoal, "supported");
   const codex = getWorkerAdapter("codex-cli");
   assert.equal(codex.capabilities().sessionResume, "unsupported");
+  assert.equal(codex.capabilities().nativeGoal, "supported");
   assert.equal(codex.defaultExecutable, "codex");
   assert.ok(grokDisallowedTools().includes("run_terminal_cmd"));
   assert.throws(() => getWorkerAdapter("unknown"), /Unknown worker runtime/);
@@ -1879,6 +1901,941 @@ test("Grok CLI argv includes model, web disable, MCP deny, and respects allowEdi
   assert.equal(toolsValue, grokAllowTools(false));
   assert.ok(!toolsValue.includes("write"));
   assert.ok(!toolsValue.includes("search_replace"));
+});
+
+test("Grok first launch and resume use one Task session id", () => {
+  const sessionId = "11111111-1111-4111-8111-111111111111";
+  const first = grokSessionArgs(sessionId, false);
+  const resume = grokSessionArgs(sessionId, true);
+  assert.deepEqual(first, ["--session-id", sessionId]);
+  assert.deepEqual(resume, ["--resume", sessionId]);
+  const firstArgs = buildGrokCliArgs({
+    prompt: "do work",
+    workspace: "/ws",
+    model: "grok-4.6",
+    allowEdits: true,
+    grokHome: "/task/grok-home",
+    effort: "xhigh",
+    sessionId,
+    resuming: false,
+  });
+  const resumeArgs = buildGrokCliArgs({
+    prompt: "do work",
+    workspace: "/ws",
+    model: "grok-4.6",
+    allowEdits: true,
+    grokHome: "/task/grok-home",
+    effort: "xhigh",
+    sessionId,
+    resuming: true,
+  });
+  assert.equal(firstArgs[firstArgs.indexOf("-m") + 1], "grok-4.6");
+  assert.equal(firstArgs[firstArgs.indexOf("--effort") + 1], "xhigh");
+  assert.deepEqual(firstArgs.slice(-2), ["--session-id", sessionId]);
+  assert.deepEqual(resumeArgs.slice(-2), ["--resume", sessionId]);
+  assert.ok(!resumeArgs.includes("--session-id"));
+  const started = grokLaunchEvidence({
+    sessionId,
+    resuming: false,
+    executionMode: "persistent-session",
+  });
+  const resumed = grokLaunchEvidence({
+    sessionId,
+    resuming: true,
+    executionMode: "persistent-session",
+  });
+  assert.deepEqual(started, {
+    eventType: "worker.started",
+    sessionArg: "--session-id",
+    sessionId,
+    executionMode: "persistent-session",
+    nativeGoal: "unsupported",
+  });
+  assert.deepEqual(resumed, {
+    eventType: "worker.resumed",
+    sessionArg: "--resume",
+    sessionId,
+    executionMode: "persistent-session",
+    nativeGoal: "unsupported",
+  });
+  assert.equal(JSON.stringify(started).includes("native-goal"), false);
+  assert.equal(JSON.stringify(resumed).includes("native-goal"), false);
+});
+
+test("inspect projects frozen Grok native-goal for new auto work", () => {
+  const spec = parseTaskSpec(
+    {
+      version: 2,
+      name: "Inspect Grok",
+      project: "/tmp",
+      workerProfileId: "grok-4-6-xhigh",
+      contract: {
+        outcome: "A reasonable outcome description",
+        context: ["c"], inScope: ["i"], outOfScope: ["o"],
+        executionSteps: ["s"], deliverables: ["d"],
+        modules: [{
+          name: "m", responsibility: "long enough responsibility",
+          consumes: ["c"], produces: ["p"], boundaries: ["b"],
+        }],
+        callChain: ["a", "b"],
+        scenarios: [
+          { name: "normal", given: "g", when: "w", then: "t" },
+          { name: "edge", given: "g", when: "w", then: "t" },
+        ],
+        risks: ["r"],
+        changeBudget: { maxFiles: 4, maxDiffLines: 300 },
+      },
+      worker: { focusPaths: ["src"] },
+      acceptance: { criteria: ["c"], commands: ["true"] },
+    },
+    "/tmp",
+    {
+      contractQuality: cloneDefaults().contractQuality,
+      execution: cloneDefaults().execution,
+      providerDefaults: cloneDefaults().providerDefaults,
+      completionPolicy: cloneDefaults().completionPolicy,
+      workerProfiles: cloneDefaults().workerProfiles,
+      modelCatalog: cloneDefaults().modelCatalog,
+    },
+  );
+  const inspection = buildCompactInspection({
+    task: {
+      id: "inspect-grok",
+      name: spec.name,
+      status: "running",
+      sourcePath: "/tmp/project",
+      taskFile: "/tmp/task.yaml",
+      spec,
+      paths: {
+        root: "/tmp/run",
+        baseline: "/tmp/run/baseline",
+        workspace: "/tmp/run/workspace",
+        logs: "/tmp/run/logs",
+        claudeConfig: "/tmp/run/claude",
+        diff: "/tmp/run/result.diff",
+      },
+      sessionId: "11111111-1111-4111-8111-111111111111",
+      createdAt: "2026-07-29T00:00:00.000Z",
+      updatedAt: "2026-07-29T00:00:00.000Z",
+    },
+    attempts: [],
+    events: [],
+    diff: undefined,
+    eventLimit: 0,
+  });
+  assert.equal(inspection.task.executionPreference, "auto");
+  assert.equal(inspection.task.executionMode, "native-goal");
+  const human = humanCompactInspectionLines(inspection);
+  assert.match(human, /execution: requested=auto resolved=native-goal/);
+});
+
+test("inspect keeps a historically frozen Grok persistent-session Task unchanged", () => {
+  const spec = parseTaskSpec(
+    {
+      version: 2,
+      name: "Inspect historical Grok",
+      project: "/tmp",
+      workerProfileId: "grok-4-6-xhigh",
+      executionPreference: "persistent-session",
+      contract: {
+        outcome: "A reasonable outcome description",
+        context: ["c"], inScope: ["i"], outOfScope: ["o"],
+        executionSteps: ["s"], deliverables: ["d"],
+        modules: [{
+          name: "m", responsibility: "long enough responsibility",
+          consumes: ["c"], produces: ["p"], boundaries: ["b"],
+        }],
+        callChain: ["a", "b"],
+        scenarios: [
+          { name: "normal", given: "g", when: "w", then: "t" },
+          { name: "edge", given: "g", when: "w", then: "t" },
+        ],
+        risks: ["r"],
+        changeBudget: { maxFiles: 4, maxDiffLines: 300 },
+      },
+      worker: { focusPaths: ["src"] },
+      acceptance: { criteria: ["c"], commands: ["true"] },
+    },
+    "/tmp",
+    {
+      contractQuality: cloneDefaults().contractQuality,
+      execution: cloneDefaults().execution,
+      providerDefaults: cloneDefaults().providerDefaults,
+      completionPolicy: cloneDefaults().completionPolicy,
+      workerProfiles: cloneDefaults().workerProfiles,
+      modelCatalog: cloneDefaults().modelCatalog,
+    },
+  );
+  const historical = {
+    ...spec,
+    executionPreference: "auto" as const,
+    executionMode: "persistent-session" as const,
+  };
+  const inspection = buildCompactInspection({
+    task: {
+      id: "inspect-historical-grok",
+      name: historical.name,
+      status: "running",
+      sourcePath: "/tmp/project",
+      taskFile: "/tmp/task.yaml",
+      spec: historical,
+      paths: {
+        root: "/tmp/run",
+        baseline: "/tmp/run/baseline",
+        workspace: "/tmp/run/workspace",
+        logs: "/tmp/run/logs",
+        claudeConfig: "/tmp/run/claude",
+        diff: "/tmp/run/result.diff",
+      },
+      sessionId: "11111111-1111-4111-8111-111111111111",
+      createdAt: "2026-07-29T00:00:00.000Z",
+      updatedAt: "2026-07-29T00:00:00.000Z",
+    },
+    attempts: [],
+    events: [],
+    diff: undefined,
+    eventLimit: 0,
+  });
+  assert.equal(inspection.task.executionPreference, "auto");
+  assert.equal(inspection.task.executionMode, "persistent-session");
+  const human = humanCompactInspectionLines(inspection);
+  assert.match(human, /execution: requested=auto resolved=persistent-session/);
+});
+
+const GROK_NATIVE_SESSION = "11111111-1111-4111-8111-111111111111";
+const GROK_NATIVE_WORKSPACE = "/task/workspace";
+const GROK_NATIVE_CONTRACT = "Complete the Worker contract exactly as written.";
+const GROK_NATIVE_PLAN_TOOLS = [
+  "read_file",
+  "list_dir",
+  "grep",
+  "Agent",
+  "run_terminal_cmd",
+  "get_task_output",
+  "kill_task",
+  "wait_tasks",
+  "search_replace",
+  "write",
+] as const;
+
+function assertExactDenyPair(args: readonly string[], rule: string): void {
+  let count = 0;
+  for (let i = 0; i < args.length - 1; i += 1) {
+    if (args[i] === "--deny" && args[i + 1] === rule) count += 1;
+  }
+  assert.equal(count, 1, `expected exactly one adjacent --deny ${rule} pair`);
+}
+
+function assertNativePlanToolsOnce(tools: string): void {
+  const items = tools.split(",");
+  for (const name of GROK_NATIVE_PLAN_TOOLS) {
+    assert.equal(items.filter((item) => item === name).length, 1, `${name} exactly once`);
+  }
+}
+
+async function writeGrokNativeState(input: {
+  grokHome: string;
+  workspace?: string;
+  sessionId?: string;
+  state: Record<string, unknown>;
+  details?: { relativeName?: string; body?: string; absolutePath?: string };
+}): Promise<{ statePath: string; detailsPath?: string }> {
+  const workspace = input.workspace ?? GROK_NATIVE_WORKSPACE;
+  const sessionId = input.sessionId ?? GROK_NATIVE_SESSION;
+  const statePath = grokNativeGoalStatePath(input.grokHome, workspace, sessionId);
+  await mkdir(path.dirname(statePath), { recursive: true });
+  let detailsPath: string | undefined;
+  const state = { ...input.state };
+  if (input.details !== undefined) {
+    detailsPath = input.details.absolutePath
+      ?? path.join(path.dirname(statePath), input.details.relativeName ?? "goal-classifier-owned-1.md");
+    await mkdir(path.dirname(detailsPath), { recursive: true });
+    await writeFile(detailsPath, input.details.body ?? "owned classifier details", { mode: 0o600 });
+    state.last_classifier_details_path = detailsPath;
+  }
+  await writeFile(statePath, `${JSON.stringify(state)}\n`, { mode: 0o600 });
+  return detailsPath === undefined ? { statePath } : { statePath, detailsPath };
+}
+
+function achievedNativeState(goalId = "goal-complete-1"): Record<string, unknown> {
+  return {
+    goal_id: goalId,
+    objective: GROK_NATIVE_CONTRACT,
+    status: "complete",
+    phase: "Idle",
+    total_worker_rounds: 1,
+    classifier_runs_attempted: 1,
+    last_classifier_verdict: "achieved",
+    tokens_used_high_water: 12,
+    parent_tokens_spent: 3,
+    last_session_tokens_seen: 8,
+    token_baseline: 2,
+    first_final_response: "SECRET completion prose that must not leak",
+  };
+}
+
+test("Grok native-goal first launch uses /goal, same Session, frozen model, and bounded tools", () => {
+  const grokHome = "/task/grok-home";
+  const args = buildGrokCliArgs({
+    prompt: `${GROK_NATIVE_GOAL_PROMPT_PREFIX}${GROK_NATIVE_CONTRACT}`,
+    workspace: GROK_NATIVE_WORKSPACE,
+    model: "grok-4.6",
+    allowEdits: true,
+    grokHome,
+    effort: "xhigh",
+    sessionId: GROK_NATIVE_SESSION,
+    resuming: false,
+    executionMode: "native-goal",
+  });
+  assert.equal(args[0], "-p");
+  assert.ok(args[1]!.startsWith(GROK_NATIVE_GOAL_PROMPT_PREFIX));
+  assert.ok(args[1]!.includes(GROK_NATIVE_CONTRACT));
+  assert.equal(args[args.indexOf("-m") + 1], "grok-4.6");
+  assert.equal(args[args.indexOf("--effort") + 1], "xhigh");
+  assert.deepEqual(args.slice(-2), ["--session-id", GROK_NATIVE_SESSION]);
+  assert.equal(args.includes("--budget"), false);
+  assert.ok(!args.some((arg) => arg.startsWith("--budget")));
+  const tools = args[args.indexOf("--tools") + 1] ?? "";
+  assert.equal(tools, grokNativeAllowTools(true));
+  for (const name of ["Agent", "run_terminal_cmd", "get_task_output", "kill_task", "wait_tasks"]) {
+    assert.ok(tools.split(",").includes(name), `${name} must stay registered`);
+  }
+  const disallowed = args[args.indexOf("--disallowed-tools") + 1] ?? "";
+  assert.equal(disallowed, grokNativeDisallowedTools());
+  assert.ok(!disallowed.split(",").includes("Agent"));
+  assert.ok(!disallowed.split(",").includes("run_terminal_cmd"));
+  const denyJoined = args.join("\0");
+  assert.ok(denyJoined.includes(`Write(${path.join(grokHome, "auth.json")})`));
+  assert.ok(denyJoined.includes(`Write(${path.join(grokHome, "agent_id")})`));
+  assert.ok(denyJoined.includes(`Write(${path.join(grokHome, "config.toml")})`));
+  assert.ok(denyJoined.includes(
+    `Write(${grokNativeGoalStatePath(grokHome, GROK_NATIVE_WORKSPACE, GROK_NATIVE_SESSION)})`,
+  ));
+  const denyArgs = grokNativeDenyArgs(grokHome, GROK_NATIVE_WORKSPACE, GROK_NATIVE_SESSION, true);
+  const denyBashAt = denyArgs.indexOf("Bash");
+  assert.ok(denyBashAt > 0 && denyArgs[denyBashAt - 1] === "--deny", "native policy must emit the exact --deny Bash pair");
+  const argvBashAt = args.indexOf("Bash");
+  assert.ok(argvBashAt > 0 && args[argvBashAt - 1] === "--deny", "buildGrokCliArgs must keep the exact --deny Bash pair");
+  assert.equal(denyArgs.includes("run_terminal_cmd"), false);
+  assert.equal(denyArgs.includes("Agent"), false);
+  assert.ok(!denyJoined.includes(`Write(${grokHome}/**)`));
+  const env = buildGrokWorkerEnv("key", grokHome, { mode: "direct" }, { nativeGoal: true });
+  assert.equal(env.GROK_GOAL, "1");
+  assert.equal(env.GROK_WORKFLOWS, "1");
+  assert.equal(env.GROK_GOAL_USE_CURRENT_MODEL_ONLY, "1");
+  const started = grokLaunchEvidence({
+    sessionId: GROK_NATIVE_SESSION,
+    resuming: false,
+    executionMode: "native-goal",
+  });
+  assert.equal(started.nativeGoal, "supported");
+  assert.equal(started.executionMode, "native-goal");
+  assert.equal(started.sessionArg, "--session-id");
+});
+
+test("Grok native-goal resume keeps the Session and explicit persistent-session stays on --resume", () => {
+  const resumeArgs = buildGrokCliArgs({
+    prompt: GROK_NATIVE_GOAL_RESUME_PROMPT,
+    workspace: GROK_NATIVE_WORKSPACE,
+    model: "grok-4.6",
+    allowEdits: false,
+    grokHome: "/task/grok-home",
+    effort: "xhigh",
+    sessionId: GROK_NATIVE_SESSION,
+    resuming: true,
+    executionMode: "native-goal",
+  });
+  assert.equal(resumeArgs[1], GROK_NATIVE_GOAL_RESUME_PROMPT);
+  assert.deepEqual(resumeArgs.slice(-2), ["--resume", GROK_NATIVE_SESSION]);
+  assert.ok(!resumeArgs.includes("--session-id"));
+  const sessionArgs = buildGrokCliArgs({
+    prompt: "do work",
+    workspace: GROK_NATIVE_WORKSPACE,
+    model: "grok-4.6",
+    allowEdits: true,
+    grokHome: "/task/grok-home",
+    effort: "xhigh",
+    sessionId: GROK_NATIVE_SESSION,
+    resuming: true,
+    executionMode: "persistent-session",
+  });
+  assert.equal(sessionArgs[1], "do work");
+  assert.deepEqual(sessionArgs.slice(-2), ["--resume", GROK_NATIVE_SESSION]);
+  assert.ok(sessionArgs.join("\0").includes("Write(/task/grok-home/**)"));
+  const resumeEnv = buildGrokWorkerEnv("key", "/task/grok-home", { mode: "direct" }, { nativeGoal: true });
+  assert.equal(resumeEnv.GROK_GOAL, "1");
+  assert.equal(resumeEnv.GROK_WORKFLOWS, "1");
+  assert.equal(resumeEnv.GROK_GOAL_USE_CURRENT_MODEL_ONLY, "1");
+  const previousCurrentModelOnly = process.env.GROK_GOAL_USE_CURRENT_MODEL_ONLY;
+  process.env.GROK_GOAL_USE_CURRENT_MODEL_ONLY = "1";
+  try {
+    const sessionEnv = buildGrokWorkerEnv("", "/task/grok-home", undefined, { nativeGoal: false });
+    assert.equal(sessionEnv.GROK_GOAL, undefined);
+    assert.equal(sessionEnv.GROK_GOAL_USE_CURRENT_MODEL_ONLY, undefined);
+    assert.equal("GROK_GOAL_USE_CURRENT_MODEL_ONLY" in sessionEnv, false);
+  } finally {
+    if (previousCurrentModelOnly === undefined) delete process.env.GROK_GOAL_USE_CURRENT_MODEL_ONLY;
+    else process.env.GROK_GOAL_USE_CURRENT_MODEL_ONLY = previousCurrentModelOnly;
+  }
+});
+
+test("Grok native-goal read-only argv registers plan mutators and exact Workspace Write/Edit denials", () => {
+  const grokHome = "/task/grok-home";
+  const workspace = GROK_NATIVE_WORKSPACE;
+  assert.notEqual(workspace, grokHome);
+  assertNativePlanToolsOnce(grokNativeAllowTools(false));
+  assertNativePlanToolsOnce(grokNativeAllowTools(true));
+  const args = buildGrokCliArgs({
+    prompt: `${GROK_NATIVE_GOAL_PROMPT_PREFIX}${GROK_NATIVE_CONTRACT}`,
+    workspace,
+    model: "grok-4.6",
+    allowEdits: false,
+    grokHome,
+    effort: "xhigh",
+    sessionId: GROK_NATIVE_SESSION,
+    resuming: false,
+    executionMode: "native-goal",
+  });
+  const tools = args[args.indexOf("--tools") + 1] ?? "";
+  assert.equal(tools, grokNativeAllowTools(false));
+  assertNativePlanToolsOnce(tools);
+  assertExactDenyPair(args, `Write(${workspace}/**)`);
+  assertExactDenyPair(args, `Edit(${workspace}/**)`);
+  assert.equal(args.includes(`Write(${grokHome}/**)`), false);
+  assert.equal(args.includes(`Edit(${grokHome}/**)`), false);
+  assertExactDenyPair(args, `Write(${path.join(grokHome, "auth.json")})`);
+  assertExactDenyPair(args, `Edit(${path.join(grokHome, "auth.json")})`);
+  assertExactDenyPair(args, `Write(${path.join(grokHome, "agent_id")})`);
+  assertExactDenyPair(args, `Edit(${path.join(grokHome, "agent_id")})`);
+  assertExactDenyPair(args, `Write(${path.join(grokHome, "config.toml")})`);
+  assertExactDenyPair(args, `Edit(${path.join(grokHome, "config.toml")})`);
+  const statePath = grokNativeGoalStatePath(grokHome, workspace, GROK_NATIVE_SESSION);
+  assertExactDenyPair(args, `Write(${statePath})`);
+  assertExactDenyPair(args, `Edit(${statePath})`);
+  assertExactDenyPair(args, "MCPTool");
+  assertExactDenyPair(args, "Bash");
+  const denyArgs = grokNativeDenyArgs(grokHome, workspace, GROK_NATIVE_SESSION, false);
+  assertExactDenyPair(denyArgs, `Write(${workspace}/**)`);
+  assertExactDenyPair(denyArgs, `Edit(${workspace}/**)`);
+  assert.equal(denyArgs.includes(`Write(${grokHome}/**)`), false);
+  assert.equal(denyArgs.includes(`Edit(${grokHome}/**)`), false);
+});
+
+test("Grok native-goal editable argv keeps plan mutators without Workspace-wide Write/Edit denials", () => {
+  const grokHome = "/task/grok-home";
+  const workspace = GROK_NATIVE_WORKSPACE;
+  const args = buildGrokCliArgs({
+    prompt: `${GROK_NATIVE_GOAL_PROMPT_PREFIX}${GROK_NATIVE_CONTRACT}`,
+    workspace,
+    model: "grok-4.6",
+    allowEdits: true,
+    grokHome,
+    effort: "xhigh",
+    sessionId: GROK_NATIVE_SESSION,
+    resuming: false,
+    executionMode: "native-goal",
+  });
+  const tools = args[args.indexOf("--tools") + 1] ?? "";
+  assert.equal(tools, grokNativeAllowTools(true));
+  assertNativePlanToolsOnce(tools);
+  assert.equal(args.includes(`Write(${workspace}/**)`), false);
+  assert.equal(args.includes(`Edit(${workspace}/**)`), false);
+  const denyArgs = grokNativeDenyArgs(grokHome, workspace, GROK_NATIVE_SESSION, true);
+  assert.equal(denyArgs.includes(`Write(${workspace}/**)`), false);
+  assert.equal(denyArgs.includes(`Edit(${workspace}/**)`), false);
+  assertExactDenyPair(args, "Bash");
+  assertExactDenyPair(args, "MCPTool");
+});
+
+test("Grok persistent-session read-only argv still omits plan mutators and denies whole GROK_HOME", () => {
+  const grokHome = "/task/grok-home";
+  const args = buildGrokCliArgs({
+    prompt: "do work",
+    workspace: GROK_NATIVE_WORKSPACE,
+    model: "grok-4.6",
+    allowEdits: false,
+    grokHome,
+    effort: "high",
+    sessionId: GROK_NATIVE_SESSION,
+    resuming: false,
+    executionMode: "persistent-session",
+  });
+  const tools = args[args.indexOf("--tools") + 1] ?? "";
+  assert.equal(tools, grokAllowTools(false));
+  assert.equal(tools.includes("search_replace"), false);
+  assert.equal(tools.includes("write"), false);
+  assertExactDenyPair(args, `Write(${grokHome}/**)`);
+  assertExactDenyPair(args, `Edit(${grokHome}/**)`);
+});
+
+test("Grok native-goal child env freezes the foreground Planner budget", () => {
+  const previousBudget = process.env.GROK_FOREGROUND_BLOCK_BUDGET_MS;
+  assert.equal(GROK_NATIVE_FOREGROUND_BLOCK_BUDGET_MS, "86400000");
+  try {
+    delete process.env.GROK_FOREGROUND_BLOCK_BUDGET_MS;
+    const omitted = buildGrokWorkerEnv("key", "/task/grok-home", { mode: "direct" }, { nativeGoal: true });
+    assert.equal(omitted.GROK_FOREGROUND_BLOCK_BUDGET_MS, GROK_NATIVE_FOREGROUND_BLOCK_BUDGET_MS);
+    assert.equal(omitted.GROK_GOAL, "1");
+    assert.equal(omitted.GROK_WORKFLOWS, "1");
+    assert.equal(omitted.GROK_GOAL_USE_CURRENT_MODEL_ONLY, "1");
+
+    process.env.GROK_FOREGROUND_BLOCK_BUDGET_MS = "600000";
+    const overridden = buildGrokWorkerEnv("key", "/task/grok-home", { mode: "direct" }, { nativeGoal: true });
+    assert.equal(overridden.GROK_FOREGROUND_BLOCK_BUDGET_MS, GROK_NATIVE_FOREGROUND_BLOCK_BUDGET_MS);
+    assert.equal(overridden.GROK_GOAL, "1");
+    assert.equal(overridden.GROK_WORKFLOWS, "1");
+    assert.equal(overridden.GROK_GOAL_USE_CURRENT_MODEL_ONLY, "1");
+  } finally {
+    if (previousBudget === undefined) delete process.env.GROK_FOREGROUND_BLOCK_BUDGET_MS;
+    else process.env.GROK_FOREGROUND_BLOCK_BUDGET_MS = previousBudget;
+  }
+});
+
+test("Grok persistent-session child env drops inherited foreground Planner budget", () => {
+  const previousBudget = process.env.GROK_FOREGROUND_BLOCK_BUDGET_MS;
+  const previousCurrentModelOnly = process.env.GROK_GOAL_USE_CURRENT_MODEL_ONLY;
+  process.env.GROK_FOREGROUND_BLOCK_BUDGET_MS = "600000";
+  process.env.GROK_GOAL_USE_CURRENT_MODEL_ONLY = "1";
+  try {
+    const sessionEnv = buildGrokWorkerEnv("", "/task/grok-home", undefined, { nativeGoal: false });
+    assert.equal("GROK_FOREGROUND_BLOCK_BUDGET_MS" in sessionEnv, false);
+    assert.equal("GROK_GOAL_USE_CURRENT_MODEL_ONLY" in sessionEnv, false);
+  } finally {
+    if (previousBudget === undefined) delete process.env.GROK_FOREGROUND_BLOCK_BUDGET_MS;
+    else process.env.GROK_FOREGROUND_BLOCK_BUDGET_MS = previousBudget;
+    if (previousCurrentModelOnly === undefined) delete process.env.GROK_GOAL_USE_CURRENT_MODEL_ONLY;
+    else process.env.GROK_GOAL_USE_CURRENT_MODEL_ONLY = previousCurrentModelOnly;
+  }
+});
+
+test("Grok native-goal launch, resume, successor, and untyped completed resume stay fail-closed", async () => {
+  const grokHome = await mkdtemp(path.join(tmpdir(), "forklight-grok-native-launch-"));
+  try {
+    const first = resolveGrokNativeGoalLaunch({
+      resuming: false,
+      workerPrompt: GROK_NATIVE_CONTRACT,
+      prior: { ok: false, reason: GROK_NATIVE_GOAL_FAILURE.missing },
+    });
+    assert.equal(first.ok, true);
+    if (first.ok) {
+      assert.equal(first.kind, "create");
+      assert.ok(first.prompt.startsWith(GROK_NATIVE_GOAL_PROMPT_PREFIX));
+      assert.ok(first.prompt.includes(GROK_NATIVE_CONTRACT));
+    }
+
+    await writeGrokNativeState({
+      grokHome,
+      state: {
+        goal_id: "goal-paused-1",
+        objective: GROK_NATIVE_CONTRACT,
+        status: "user_paused",
+        phase: "Executing",
+        total_worker_rounds: 1,
+        classifier_runs_attempted: 0,
+      },
+    });
+    const priorPaused = readGrokNativeGoalState({
+      grokHome,
+      workspace: GROK_NATIVE_WORKSPACE,
+      sessionId: GROK_NATIVE_SESSION,
+    });
+    const resume = resolveGrokNativeGoalLaunch({
+      resuming: true,
+      workerPrompt: GROK_NATIVE_CONTRACT,
+      prior: priorPaused,
+    });
+    assert.equal(resume.ok, true);
+    if (resume.ok) {
+      assert.equal(resume.kind, "resume");
+      assert.equal(resume.prompt, GROK_NATIVE_GOAL_RESUME_PROMPT);
+      assert.equal(resume.expectedGoalId, "goal-paused-1");
+    }
+
+    await writeGrokNativeState({
+      grokHome,
+      state: achievedNativeState("goal-complete-1"),
+      details: { body: "owned details" },
+    });
+    const priorComplete = readGrokNativeGoalState({
+      grokHome,
+      workspace: GROK_NATIVE_WORKSPACE,
+      sessionId: GROK_NATIVE_SESSION,
+    });
+    const untyped = resolveGrokNativeGoalLaunch({
+      resuming: true,
+      workerPrompt: GROK_NATIVE_CONTRACT,
+      prior: priorComplete,
+    });
+    assert.equal(untyped.ok, false);
+    if (!untyped.ok) {
+      assert.equal(untyped.reason, GROK_NATIVE_GOAL_FAILURE.untypedCompletedResume);
+    }
+    const successor = resolveGrokNativeGoalLaunch({
+      resuming: true,
+      workerPrompt: "Fix the remaining acceptance gap.",
+      prior: priorComplete,
+      correctionIntent: { kind: "main-correction", authorizationEventSequence: 4 },
+    });
+    assert.equal(successor.ok, true);
+    if (successor.ok) {
+      assert.equal(successor.kind, "successor");
+      assert.ok(successor.prompt.startsWith(`${GROK_NATIVE_GOAL_PROMPT_PREFIX}Fix the remaining acceptance gap.`));
+      assert.equal(successor.predecessorGoalId, "goal-complete-1");
+      assert.equal(successor.reasonClass, "main-correction");
+      const successorEnv = buildGrokWorkerEnv("key", grokHome, { mode: "direct" }, { nativeGoal: true });
+      assert.equal(successorEnv.GROK_GOAL, "1");
+      assert.equal(successorEnv.GROK_WORKFLOWS, "1");
+      assert.equal(successorEnv.GROK_GOAL_USE_CURRENT_MODEL_ONLY, "1");
+    }
+    const repair = resolveGrokNativeGoalLaunch({
+      resuming: true,
+      workerPrompt: "Re-run the failed acceptance command.",
+      prior: priorComplete,
+      validationRepairIntent: {
+        kind: "worker-validation-repair",
+        authorizationEventSequence: 5,
+        round: 1,
+        attemptId: "attempt-repair-1",
+      },
+    });
+    assert.equal(repair.ok, true);
+    if (repair.ok) {
+      assert.equal(repair.kind, "successor");
+      assert.equal(repair.reasonClass, "worker-validation-repair");
+      assert.equal(repair.predecessorGoalId, "goal-complete-1");
+    }
+  } finally {
+    await rm(grokHome, { recursive: true, force: true });
+  }
+});
+
+test("Grok native Goal terminal mapper admits only complete plus achieved plus owned details", async () => {
+  const grokHome = await mkdtemp(path.join(tmpdir(), "forklight-grok-native-state-"));
+  try {
+    const missing = evaluateGrokNativeGoalResult({
+      grokHome,
+      workspace: GROK_NATIVE_WORKSPACE,
+      sessionId: GROK_NATIVE_SESSION,
+      launch: { ok: true, kind: "create", prompt: `${GROK_NATIVE_GOAL_PROMPT_PREFIX}${GROK_NATIVE_CONTRACT}` },
+      exitCode: 0,
+      completionProse: "I completed the goal.",
+    });
+    assert.equal(missing.status, "failed");
+    assert.equal(missing.error, GROK_NATIVE_GOAL_FAILURE.missing);
+
+    await writeGrokNativeState({ grokHome, state: { not: "a goal" } });
+    const malformed = readGrokNativeGoalState({
+      grokHome,
+      workspace: GROK_NATIVE_WORKSPACE,
+      sessionId: GROK_NATIVE_SESSION,
+    });
+    assert.equal(malformed.ok, false);
+    if (!malformed.ok) assert.equal(malformed.reason, GROK_NATIVE_GOAL_FAILURE.malformed);
+
+    for (const [status, expected] of [
+      ["user_paused", GROK_NATIVE_GOAL_FAILURE.paused],
+      ["infra_paused", GROK_NATIVE_GOAL_FAILURE.paused],
+      ["paused", GROK_NATIVE_GOAL_FAILURE.paused],
+      ["blocked", GROK_NATIVE_GOAL_FAILURE.blocked],
+      ["budget", GROK_NATIVE_GOAL_FAILURE.budgetLimited],
+      ["budget_limited", GROK_NATIVE_GOAL_FAILURE.budgetLimited],
+      ["budgetLimited", GROK_NATIVE_GOAL_FAILURE.budgetLimited],
+      ["active", GROK_NATIVE_GOAL_FAILURE.active],
+    ] as const) {
+      await writeGrokNativeState({
+        grokHome,
+        state: {
+          goal_id: `goal-${status}`,
+          objective: GROK_NATIVE_CONTRACT,
+          status,
+          phase: "Executing",
+          total_worker_rounds: 1,
+          classifier_runs_attempted: 0,
+        },
+      });
+      const mapped = evaluateGrokNativeGoalResult({
+        grokHome,
+        workspace: GROK_NATIVE_WORKSPACE,
+        sessionId: GROK_NATIVE_SESSION,
+        launch: { ok: true, kind: "create", prompt: "/goal x" },
+        exitCode: 0,
+        completionProse: "done",
+      });
+      assert.equal(mapped.status, "failed", status);
+      assert.equal(mapped.error, expected, status);
+    }
+
+    await writeGrokNativeState({
+      grokHome,
+      state: {
+        goal_id: "goal-unknown",
+        objective: GROK_NATIVE_CONTRACT,
+        status: "finished",
+        phase: "Idle",
+      },
+    });
+    const unknown = readGrokNativeGoalState({
+      grokHome,
+      workspace: GROK_NATIVE_WORKSPACE,
+      sessionId: GROK_NATIVE_SESSION,
+    });
+    assert.equal(unknown.ok, false);
+    if (!unknown.ok) assert.equal(unknown.reason, GROK_NATIVE_GOAL_FAILURE.unknownStatus);
+
+    await writeGrokNativeState({
+      grokHome,
+      state: {
+        goal_id: "goal-complete-no-verdict",
+        objective: GROK_NATIVE_CONTRACT,
+        status: "complete",
+        phase: "Idle",
+        classifier_runs_attempted: 1,
+      },
+    });
+    const noVerdict = evaluateGrokNativeGoalResult({
+      grokHome,
+      workspace: GROK_NATIVE_WORKSPACE,
+      sessionId: GROK_NATIVE_SESSION,
+      launch: { ok: true, kind: "create", prompt: "/goal x" },
+      exitCode: 0,
+    });
+    assert.equal(noVerdict.status, "failed");
+    assert.equal(noVerdict.error, GROK_NATIVE_GOAL_FAILURE.completeWithoutAchieved);
+
+    await writeGrokNativeState({
+      grokHome,
+      state: {
+        goal_id: "goal-complete-zero-attempts",
+        objective: GROK_NATIVE_CONTRACT,
+        status: "complete",
+        phase: "Idle",
+        classifier_runs_attempted: 0,
+        last_classifier_verdict: "achieved",
+      },
+    });
+    const zeroAttempts = evaluateGrokNativeGoalResult({
+      grokHome,
+      workspace: GROK_NATIVE_WORKSPACE,
+      sessionId: GROK_NATIVE_SESSION,
+      launch: { ok: true, kind: "create", prompt: "/goal x" },
+      exitCode: 0,
+    });
+    assert.equal(zeroAttempts.status, "failed");
+    assert.equal(zeroAttempts.error, GROK_NATIVE_GOAL_FAILURE.completeWithoutAchieved);
+
+    await writeGrokNativeState({
+      grokHome,
+      state: {
+        goal_id: "goal-complete-not-achieved",
+        objective: GROK_NATIVE_CONTRACT,
+        status: "complete",
+        phase: "Idle",
+        classifier_runs_attempted: 1,
+        last_classifier_verdict: "not_achieved",
+      },
+    });
+    const notAchieved = evaluateGrokNativeGoalResult({
+      grokHome,
+      workspace: GROK_NATIVE_WORKSPACE,
+      sessionId: GROK_NATIVE_SESSION,
+      launch: { ok: true, kind: "create", prompt: "/goal x" },
+      exitCode: 0,
+    });
+    assert.equal(notAchieved.status, "failed");
+    assert.equal(notAchieved.error, GROK_NATIVE_GOAL_FAILURE.completeWithoutAchieved);
+
+    await writeGrokNativeState({
+      grokHome,
+      state: {
+        goal_id: "goal-achieved-no-details",
+        objective: GROK_NATIVE_CONTRACT,
+        status: "complete",
+        phase: "Idle",
+        classifier_runs_attempted: 1,
+        last_classifier_verdict: "achieved",
+      },
+    });
+    const noDetails = evaluateGrokNativeGoalResult({
+      grokHome,
+      workspace: GROK_NATIVE_WORKSPACE,
+      sessionId: GROK_NATIVE_SESSION,
+      launch: { ok: true, kind: "create", prompt: "/goal x" },
+      exitCode: 0,
+    });
+    assert.equal(noDetails.status, "failed");
+    assert.equal(noDetails.error, GROK_NATIVE_GOAL_FAILURE.achievedWithoutDetails);
+
+    await writeGrokNativeState({
+      grokHome,
+      state: {
+        goal_id: "goal-missing-details-file",
+        objective: GROK_NATIVE_CONTRACT,
+        status: "complete",
+        phase: "Idle",
+        classifier_runs_attempted: 1,
+        last_classifier_verdict: "achieved",
+        last_classifier_details_path: path.join(grokHome, "sessions", "missing-details.md"),
+      },
+    });
+    const missingDetails = evaluateGrokNativeGoalResult({
+      grokHome,
+      workspace: GROK_NATIVE_WORKSPACE,
+      sessionId: GROK_NATIVE_SESSION,
+      launch: { ok: true, kind: "create", prompt: "/goal x" },
+      exitCode: 0,
+    });
+    assert.equal(missingDetails.status, "failed");
+    assert.equal(missingDetails.error, GROK_NATIVE_GOAL_FAILURE.missingDetails);
+
+    const outsideRoot = await mkdtemp(path.join(tmpdir(), "forklight-grok-native-outside-"));
+    const outsideDetails = path.join(outsideRoot, "leaked-classifier.md");
+    await writeFile(outsideDetails, "classifier prose outside the Task Runtime Home", { mode: 0o600 });
+    await writeGrokNativeState({
+      grokHome,
+      state: {
+        ...achievedNativeState("goal-escaping"),
+        last_classifier_details_path: outsideDetails,
+      },
+    });
+    const escaping = evaluateGrokNativeGoalResult({
+      grokHome,
+      workspace: GROK_NATIVE_WORKSPACE,
+      sessionId: GROK_NATIVE_SESSION,
+      launch: { ok: true, kind: "create", prompt: "/goal x" },
+      exitCode: 0,
+    });
+    await rm(outsideRoot, { recursive: true, force: true });
+    assert.equal(escaping.status, "failed");
+    assert.equal(escaping.error, GROK_NATIVE_GOAL_FAILURE.escapingDetails);
+
+    await rm(path.join(grokHome, "sessions"), { recursive: true, force: true });
+    await writeGrokNativeState({
+      grokHome,
+      workspace: "/other/workspace",
+      state: achievedNativeState("goal-wrong-root"),
+      details: { body: "other root" },
+    });
+    const wrongRoot = readGrokNativeGoalState({
+      grokHome,
+      workspace: GROK_NATIVE_WORKSPACE,
+      sessionId: GROK_NATIVE_SESSION,
+    });
+    assert.equal(wrongRoot.ok, false);
+    if (!wrongRoot.ok) assert.equal(wrongRoot.reason, GROK_NATIVE_GOAL_FAILURE.wrongRoot);
+
+    await writeGrokNativeState({
+      grokHome,
+      workspace: GROK_NATIVE_WORKSPACE,
+      state: achievedNativeState("goal-ambiguous-a"),
+      details: { relativeName: "a.md" },
+    });
+    await writeGrokNativeState({
+      grokHome,
+      workspace: "/second/workspace",
+      state: achievedNativeState("goal-ambiguous-b"),
+      details: { relativeName: "b.md" },
+    });
+    const ambiguous = readGrokNativeGoalState({
+      grokHome,
+      workspace: GROK_NATIVE_WORKSPACE,
+      sessionId: GROK_NATIVE_SESSION,
+    });
+    assert.equal(ambiguous.ok, false);
+    if (!ambiguous.ok) assert.equal(ambiguous.reason, GROK_NATIVE_GOAL_FAILURE.ambiguous);
+
+    await rm(path.join(grokHome, "sessions"), { recursive: true, force: true });
+    const { detailsPath } = await writeGrokNativeState({
+      grokHome,
+      state: achievedNativeState("goal-success-1"),
+      details: { body: "0 of 3 skeptics refuted" },
+    });
+    const success = evaluateGrokNativeGoalResult({
+      grokHome,
+      workspace: GROK_NATIVE_WORKSPACE,
+      sessionId: GROK_NATIVE_SESSION,
+      launch: { ok: true, kind: "create", prompt: "/goal x" },
+      exitCode: 0,
+      completionProse: "I completed the goal.",
+    });
+    assert.equal(success.status, "succeeded");
+    assert.equal(success.goalId, "goal-success-1");
+    assert.equal(success.observation?.status, "complete");
+    assert.equal(success.observation?.classifierVerdict, "achieved");
+    assert.equal(success.observation?.classifierRunsAttempted, 1);
+    const serialized = JSON.stringify(success.observation);
+    assert.equal(serialized.includes("SECRET"), false);
+    assert.equal(serialized.includes("skeptics"), false);
+    assert.equal(serialized.includes(detailsPath ?? "goal-classifier"), false);
+    assert.equal(serialized.includes("objective"), false);
+    assert.equal(serialized.includes("first_final_response"), false);
+    const observation = grokNativeGoalObservation({
+      goalId: "goal-success-1",
+      objective: GROK_NATIVE_CONTRACT,
+      status: "complete",
+      phase: "Idle",
+      lastClassifierVerdict: "achieved",
+      ...(detailsPath === undefined ? {} : { lastClassifierDetailsPath: detailsPath }),
+      totalWorkerRounds: 1,
+    });
+    assert.equal("objective" in observation, false);
+    assert.equal("lastClassifierDetailsPath" in observation, false);
+
+    const resumeMismatch = evaluateGrokNativeGoalResult({
+      grokHome,
+      workspace: GROK_NATIVE_WORKSPACE,
+      sessionId: GROK_NATIVE_SESSION,
+      launch: {
+        ok: true,
+        kind: "resume",
+        prompt: GROK_NATIVE_GOAL_RESUME_PROMPT,
+        expectedGoalId: "goal-other",
+      },
+      exitCode: 0,
+    });
+    assert.equal(resumeMismatch.status, "failed");
+    assert.equal(resumeMismatch.error, GROK_NATIVE_GOAL_FAILURE.resumeGoalMismatch);
+
+    const sameSuccessor = evaluateGrokNativeGoalResult({
+      grokHome,
+      workspace: GROK_NATIVE_WORKSPACE,
+      sessionId: GROK_NATIVE_SESSION,
+      launch: {
+        ok: true,
+        kind: "successor",
+        prompt: "/goal fix it",
+        predecessorGoalId: "goal-success-1",
+        reasonClass: "main-correction",
+      },
+      exitCode: 0,
+    });
+    assert.equal(sameSuccessor.status, "failed");
+    assert.equal(sameSuccessor.error, GROK_NATIVE_GOAL_FAILURE.successorNotDistinct);
+
+    await writeGrokNativeState({
+      grokHome,
+      state: achievedNativeState("goal-successor-2"),
+      details: { relativeName: "successor.md" },
+    });
+    const distinctSuccessor = evaluateGrokNativeGoalResult({
+      grokHome,
+      workspace: GROK_NATIVE_WORKSPACE,
+      sessionId: GROK_NATIVE_SESSION,
+      launch: {
+        ok: true,
+        kind: "successor",
+        prompt: "/goal fix it",
+        predecessorGoalId: "goal-success-1",
+        reasonClass: "main-correction",
+      },
+      exitCode: 1,
+      completionProse: "still claiming success",
+    });
+    assert.equal(distinctSuccessor.status, "succeeded");
+    assert.equal(distinctSuccessor.goalId, "goal-successor-2");
+    assert.equal(distinctSuccessor.predecessorGoalId, "goal-success-1");
+  } finally {
+    await rm(grokHome, { recursive: true, force: true });
+  }
 });
 
 test("Grok sandbox profile allows network, system.sb, and TMPDIR write roots", () => {

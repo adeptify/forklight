@@ -2004,6 +2004,383 @@ test("routingDecision taskFamily must match top-level taskFamily when both prese
   );
 });
 
+// --- M3-B frozen advisory relationship ---
+
+const DEEPSEEK_FROZEN = {
+  provider: "deepseek",
+  model: "deepseek-v4-flash",
+  runtime: "claude-code",
+  effort: "high",
+  workerProfileId: "default",
+};
+const QWEN_FROZEN = {
+  provider: "qwen",
+  model: "qwen3.7-plus",
+  runtime: "claude-code",
+  effort: "high",
+};
+const PRIVATE_ADVISORY_NOTE = "PRIVATE_M3B_NOTE_NEVER_PROJECT";
+
+function frozenSelectedExecution(overrides: Record<string, unknown> = {}) {
+  return {
+    resolvedExecutionMode: "single-run",
+    readinessState: "launchable",
+    canLaunch: true,
+    nextAction: "none",
+    ...overrides,
+  };
+}
+
+function advisoryRoutingDecision(overrides: Record<string, unknown> = {}) {
+  return {
+    shortlist: [DEEPSEEK_FROZEN, QWEN_FROZEN],
+    selectedWorker: DEEPSEEK_FROZEN,
+    selectedBecause: { code: "user-specified", note: PRIVATE_ADVISORY_NOTE },
+    competition: { intent: "none", triggers: [] },
+    evidenceSnapshot: {
+      scope: "none",
+      exactSampleCounts: {},
+      settingsDigest: "SECRET_M3B_SETTINGS_DIGEST",
+    },
+    ...overrides,
+  };
+}
+
+function parseAdvisoryDecision(routingDecision: Record<string, unknown>) {
+  return parseTaskSpec(
+    {
+      ...contractSpec(),
+      workerProfileId: "default",
+      routingDecision,
+    },
+    process.cwd(),
+  );
+}
+
+test("followed-recommendation stores the same recommended and selected identity with frozen confidence", () => {
+  const spec = parseAdvisoryDecision(advisoryRoutingDecision({
+    advisory: {
+      overallResult: "recommended",
+      selection: "followed-recommendation",
+      recommendedWorker: DEEPSEEK_FROZEN,
+      confidence: 0.91,
+      selectedExecution: frozenSelectedExecution(),
+    },
+  }));
+  const advisory = spec.routingDecision!.advisory!;
+  assert.equal(advisory.overallResult, "recommended");
+  assert.equal(advisory.selection, "followed-recommendation");
+  assert.deepEqual(advisory.recommendedWorker, DEEPSEEK_FROZEN);
+  assert.deepEqual(spec.routingDecision!.selectedWorker, DEEPSEEK_FROZEN);
+  assert.equal(advisory.confidence, 0.91);
+  assert.equal(advisory.cannotDetermineReasons, undefined);
+  assert.deepEqual(advisory.selectedExecution, frozenSelectedExecution());
+  assert.equal(spec.routingDecision!.selectedBecause.note, PRIVATE_ADVISORY_NOTE);
+});
+
+test("manual-override stores both identities, keeps confidence, and retains the private note on the Task", () => {
+  const spec = parseAdvisoryDecision(advisoryRoutingDecision({
+    selectedBecause: { code: "user-specified", note: PRIVATE_ADVISORY_NOTE },
+    advisory: {
+      overallResult: "recommended",
+      selection: "manual-override",
+      recommendedWorker: QWEN_FROZEN,
+      confidence: 0.84,
+      selectedExecution: frozenSelectedExecution({ readinessState: "ready" }),
+    },
+  }));
+  const advisory = spec.routingDecision!.advisory!;
+  assert.equal(advisory.selection, "manual-override");
+  assert.deepEqual(advisory.recommendedWorker, QWEN_FROZEN);
+  assert.deepEqual(spec.routingDecision!.selectedWorker, DEEPSEEK_FROZEN);
+  assert.equal(advisory.confidence, 0.84);
+  assert.equal(spec.routingDecision!.selectedBecause.note, PRIVATE_ADVISORY_NOTE);
+});
+
+test("cannot-determine stores Main selection without recommendation, confidence, or superiority", () => {
+  const spec = parseAdvisoryDecision(advisoryRoutingDecision({
+    advisory: {
+      overallResult: "cannot-determine",
+      selection: "selected-after-cannot-determine",
+      cannotDetermineReasons: ["insufficient-relevant-samples"],
+      selectedExecution: frozenSelectedExecution(),
+    },
+  }));
+  const advisory = spec.routingDecision!.advisory!;
+  assert.equal(advisory.overallResult, "cannot-determine");
+  assert.equal(advisory.selection, "selected-after-cannot-determine");
+  assert.equal(advisory.recommendedWorker, undefined);
+  assert.equal(advisory.confidence, undefined);
+  assert.deepEqual(advisory.cannotDetermineReasons, ["insufficient-relevant-samples"]);
+  assert.deepEqual(spec.routingDecision!.selectedWorker, DEEPSEEK_FROZEN);
+});
+
+test("historical-best-not-launchable with manual-override stays a recommendation relationship", () => {
+  const spec = parseAdvisoryDecision(advisoryRoutingDecision({
+    advisory: {
+      overallResult: "historical-best-not-launchable",
+      selection: "manual-override",
+      recommendedWorker: QWEN_FROZEN,
+      confidence: 0.7,
+      selectedExecution: frozenSelectedExecution({
+        readinessState: "launchable",
+        canLaunch: true,
+      }),
+    },
+  }));
+  assert.equal(spec.routingDecision!.advisory!.overallResult, "historical-best-not-launchable");
+  assert.equal(spec.routingDecision!.advisory!.selection, "manual-override");
+  assert.deepEqual(spec.routingDecision!.advisory!.recommendedWorker, QWEN_FROZEN);
+});
+
+test("legacy routingDecision without advisory remains readable and invents no relationship", () => {
+  const spec = parseAdvisoryDecision(advisoryRoutingDecision());
+  assert.ok(spec.routingDecision);
+  assert.equal(spec.routingDecision!.advisory, undefined);
+  assert.equal(spec.routingDecision!.selectedWorker.provider, "deepseek");
+});
+
+test("contradictory advisory shapes fail before a Task spec is produced", () => {
+  const cases: Array<{ name: string; advisory: Record<string, unknown>; pattern: RegExp }> = [
+    {
+      name: "recommended Worker outside shortlist",
+      advisory: {
+        overallResult: "recommended",
+        selection: "followed-recommendation",
+        recommendedWorker: {
+          provider: "xai",
+          model: "grok-4.6",
+          runtime: "grok-build",
+          effort: "xhigh",
+        },
+        confidence: 0.5,
+        selectedExecution: frozenSelectedExecution(),
+      },
+      pattern: /recommendedWorker must match an entry in the shortlist/,
+    },
+    {
+      name: "override that selects the recommendation",
+      advisory: {
+        overallResult: "recommended",
+        selection: "manual-override",
+        recommendedWorker: DEEPSEEK_FROZEN,
+        confidence: 0.5,
+        selectedExecution: frozenSelectedExecution(),
+      },
+      pattern: /cannot be manual-override when selectedWorker matches/,
+    },
+    {
+      name: "followed-recommendation with a different selected Worker",
+      advisory: {
+        overallResult: "recommended",
+        selection: "followed-recommendation",
+        recommendedWorker: QWEN_FROZEN,
+        confidence: 0.5,
+        selectedExecution: frozenSelectedExecution(),
+      },
+      pattern: /cannot be followed-recommendation unless the recommended Worker matches/,
+    },
+    {
+      name: "confidence without a recommendation",
+      advisory: {
+        overallResult: "cannot-determine",
+        selection: "selected-after-cannot-determine",
+        confidence: 0.4,
+        cannotDetermineReasons: ["insufficient-relevant-samples"],
+        selectedExecution: frozenSelectedExecution(),
+      },
+      pattern: /recommendedWorker and confidence must be present together/,
+    },
+    {
+      name: "cannot-determine claiming a recommended Worker",
+      advisory: {
+        overallResult: "cannot-determine",
+        selection: "selected-after-cannot-determine",
+        recommendedWorker: DEEPSEEK_FROZEN,
+        confidence: 0.4,
+        cannotDetermineReasons: ["insufficient-relevant-samples"],
+        selectedExecution: frozenSelectedExecution(),
+      },
+      pattern: /must not include a recommended Worker or confidence/,
+    },
+    {
+      name: "recommended overallResult with cannot-determine selection",
+      advisory: {
+        overallResult: "recommended",
+        selection: "selected-after-cannot-determine",
+        recommendedWorker: DEEPSEEK_FROZEN,
+        confidence: 0.4,
+        selectedExecution: frozenSelectedExecution(),
+      },
+      pattern: /must be followed-recommendation or manual-override/,
+    },
+    {
+      name: "unsupported advisory field",
+      advisory: {
+        overallResult: "recommended",
+        selection: "followed-recommendation",
+        recommendedWorker: DEEPSEEK_FROZEN,
+        confidence: 0.4,
+        selectedExecution: frozenSelectedExecution(),
+        note: PRIVATE_ADVISORY_NOTE,
+      },
+      pattern: /advisory contains an unsupported field/,
+    },
+  ];
+  for (const item of cases) {
+    assert.throws(
+      () => parseAdvisoryDecision(advisoryRoutingDecision({ advisory: item.advisory })),
+      (error: unknown) => {
+        assert.ok(error instanceof Error, item.name);
+        assert.match(error.message, item.pattern, item.name);
+        assert.ok(!error.message.includes(PRIVATE_ADVISORY_NOTE), `${item.name} must stay privacy-safe`);
+        assert.ok(!error.message.includes("SECRET_M3B_SETTINGS_DIGEST"), `${item.name} must not leak digest`);
+        return true;
+      },
+    );
+  }
+});
+
+test("advisory selected Worker still must match the resolved Task identity", () => {
+  assert.throws(
+    () => parseTaskSpec({
+      ...contractSpec(),
+      workerProfileId: "default",
+      routingDecision: advisoryRoutingDecision({
+        selectedWorker: QWEN_FROZEN,
+        shortlist: [DEEPSEEK_FROZEN, QWEN_FROZEN],
+        advisory: {
+          overallResult: "recommended",
+          selection: "manual-override",
+          recommendedWorker: DEEPSEEK_FROZEN,
+          confidence: 0.6,
+          selectedExecution: frozenSelectedExecution(),
+        },
+      }),
+    }, process.cwd()),
+    /does not match resolved Task provider/,
+  );
+});
+
+const DEEPSEEK_TWIN = {
+  ...DEEPSEEK_FROZEN,
+  workerProfileId: "default-twin",
+};
+
+test("advisory shortlist and relationship bind exact Profile when executable identity is shared", () => {
+  const sharedShortlist = [DEEPSEEK_FROZEN, DEEPSEEK_TWIN];
+  const forged = {
+    ...DEEPSEEK_FROZEN,
+    workerProfileId: "forged-default",
+  };
+  assert.throws(
+    () => parseAdvisoryDecision(advisoryRoutingDecision({
+      shortlist: sharedShortlist,
+      advisory: {
+        overallResult: "recommended",
+        selection: "followed-recommendation",
+        recommendedWorker: forged,
+        confidence: 0.5,
+        selectedExecution: frozenSelectedExecution(),
+      },
+    })),
+    /recommendedWorker must match an entry in the shortlist/,
+  );
+  assert.throws(
+    () => parseAdvisoryDecision(advisoryRoutingDecision({
+      shortlist: sharedShortlist,
+      advisory: {
+        overallResult: "recommended",
+        selection: "followed-recommendation",
+        recommendedWorker: DEEPSEEK_TWIN,
+        confidence: 0.5,
+        selectedExecution: frozenSelectedExecution(),
+      },
+    })),
+    /cannot be followed-recommendation unless the recommended Worker matches/,
+  );
+  assert.throws(
+    () => parseAdvisoryDecision(advisoryRoutingDecision({
+      shortlist: sharedShortlist,
+      advisory: {
+        overallResult: "recommended",
+        selection: "manual-override",
+        recommendedWorker: DEEPSEEK_FROZEN,
+        confidence: 0.5,
+        selectedExecution: frozenSelectedExecution(),
+      },
+    })),
+    /cannot be manual-override when selectedWorker matches/,
+  );
+
+  const followed = parseAdvisoryDecision(advisoryRoutingDecision({
+    shortlist: sharedShortlist,
+    advisory: {
+      overallResult: "recommended",
+      selection: "followed-recommendation",
+      recommendedWorker: DEEPSEEK_FROZEN,
+      confidence: 0.91,
+      selectedExecution: frozenSelectedExecution(),
+    },
+  }));
+  assert.equal(followed.routingDecision!.advisory!.selection, "followed-recommendation");
+  assert.equal(followed.routingDecision!.advisory!.recommendedWorker!.workerProfileId, "default");
+  assert.equal(followed.routingDecision!.selectedWorker.workerProfileId, "default");
+
+  const overridden = parseAdvisoryDecision(advisoryRoutingDecision({
+    shortlist: sharedShortlist,
+    advisory: {
+      overallResult: "recommended",
+      selection: "manual-override",
+      recommendedWorker: DEEPSEEK_TWIN,
+      confidence: 0.84,
+      selectedExecution: frozenSelectedExecution(),
+    },
+  }));
+  assert.equal(overridden.routingDecision!.advisory!.selection, "manual-override");
+  assert.equal(overridden.routingDecision!.advisory!.recommendedWorker!.workerProfileId, "default-twin");
+  assert.equal(overridden.routingDecision!.selectedWorker.workerProfileId, "default");
+});
+
+test("legacy selectedWorker shortlist membership stays four-field without advisory", () => {
+  const spec = parseAdvisoryDecision(advisoryRoutingDecision({
+    shortlist: [DEEPSEEK_TWIN],
+    selectedWorker: DEEPSEEK_FROZEN,
+  }));
+  assert.equal(spec.routingDecision!.advisory, undefined);
+  assert.equal(spec.routingDecision!.selectedWorker.workerProfileId, "default");
+  assert.equal(spec.routingDecision!.shortlist[0]!.workerProfileId, "default-twin");
+});
+
+test("advisory selected execution mode must match the resolved Task executionMode", () => {
+  assert.throws(
+    () => parseAdvisoryDecision(advisoryRoutingDecision({
+      advisory: {
+        overallResult: "cannot-determine",
+        selection: "selected-after-cannot-determine",
+        cannotDetermineReasons: ["insufficient-relevant-samples"],
+        selectedExecution: frozenSelectedExecution({ resolvedExecutionMode: "native-goal" }),
+      },
+    })),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /resolvedExecutionMode "native-goal" does not match resolved Task executionMode "single-run"/);
+      assert.ok(!error.message.includes(PRIVATE_ADVISORY_NOTE));
+      return true;
+    },
+  );
+  const spec = parseAdvisoryDecision(advisoryRoutingDecision({
+    advisory: {
+      overallResult: "cannot-determine",
+      selection: "selected-after-cannot-determine",
+      cannotDetermineReasons: ["insufficient-relevant-samples"],
+      selectedExecution: frozenSelectedExecution({ resolvedExecutionMode: "single-run" }),
+    },
+  }));
+  assert.equal(spec.executionMode, "single-run");
+  assert.equal(spec.routingDecision!.advisory!.selectedExecution.resolvedExecutionMode, "single-run");
+});
+
 // --- Bounded policy adaptation transition chain ---
 
 import {
@@ -2653,7 +3030,95 @@ test("forced native-goal on Codex freezes native-goal", () => {
 
 test("legacy Task without a preference freezes single-run", () => {
   const spec = parseTaskSpec(contractSpec(), process.cwd());
+  assert.equal(spec.executionPreference, "single-run");
   assert.equal(spec.executionMode, "single-run");
+});
+
+function grok46Policy(): TaskPolicy {
+  const d = cloneDefaults();
+  return {
+    contractQuality: d.contractQuality,
+    execution: d.execution,
+    providerDefaults: d.providerDefaults,
+    completionPolicy: d.completionPolicy,
+    workerProfiles: d.workerProfiles,
+    modelCatalog: d.modelCatalog,
+  };
+}
+
+test("Grok 4.6 Xhigh Profile materializes exact runtime, model, and effort", () => {
+  const spec = parseTaskSpec(
+    { ...contractSpec(), workerProfileId: "grok-4-6-xhigh" },
+    process.cwd(),
+    grok46Policy(),
+  );
+  assert.equal(spec.runtime.name, "grok-build");
+  assert.equal(spec.provider.name, "xai");
+  assert.equal(spec.provider.model, "grok-4.6");
+  assert.equal(spec.runtime.effort, "xhigh");
+  assert.equal(spec.workerProfileId, "grok-4-6-xhigh");
+});
+
+test("auto Grok Task freezes native-goal", () => {
+  const spec = parseTaskSpec(
+    { ...contractSpec(), workerProfileId: "grok-4-6-xhigh" },
+    process.cwd(),
+    grok46Policy(),
+  );
+  assert.equal(spec.executionPreference, "auto");
+  assert.equal(spec.executionMode, "native-goal");
+});
+
+test("omitted Grok Task without a Profile preference stays single-run", () => {
+  const spec = parseTaskSpec(
+    {
+      ...contractSpec(),
+      provider: { name: "xai", model: "grok-4.6", keychainService: "forklight.xai.api-key" },
+      runtime: { name: "grok-build", executable: "grok", effort: "xhigh", maxBudgetUsd: 0.5 },
+    },
+    process.cwd(),
+    grok46Policy(),
+  );
+  assert.equal(spec.executionPreference, "single-run");
+  assert.equal(spec.executionMode, "single-run");
+});
+
+test("forced persistent-session on Grok freezes persistent-session", () => {
+  const spec = parseTaskSpec(
+    {
+      ...contractSpec(),
+      workerProfileId: "grok-4-6-xhigh",
+      executionPreference: "persistent-session",
+    },
+    process.cwd(),
+    grok46Policy(),
+  );
+  assert.equal(spec.executionPreference, "persistent-session");
+  assert.equal(spec.executionMode, "persistent-session");
+});
+
+test("forced native-goal on Grok freezes native-goal", () => {
+  const spec = parseTaskSpec(
+    {
+      ...contractSpec(),
+      workerProfileId: "grok-4-6-xhigh",
+      executionPreference: "native-goal",
+    },
+    process.cwd(),
+    grok46Policy(),
+  );
+  assert.equal(spec.executionPreference, "native-goal");
+  assert.equal(spec.executionMode, "native-goal");
+});
+
+test("forced persistent-session on Claude fails closed", () => {
+  assert.throws(
+    () => parseTaskSpec(
+      { ...contractSpec(), executionPreference: "persistent-session" },
+      process.cwd(),
+    ),
+    /persistent-session/,
+  );
 });
 
 test("explicit Task preference override wins over the Worker profile", () => {
@@ -2836,4 +3301,72 @@ test("network policy is frozen per Task and later profile edits cannot rewrite h
     noProxy: "localhost,127.0.0.1",
   });
   assert.deepEqual(newSpec.networkPolicy, { mode: "direct" });
+});
+
+// --- M2-B review requirement admission ---
+
+test("new Tasks freeze requiredJudges 0, 1, or 2 with a bounded reason", () => {
+  for (const requiredJudges of [0, 1, 2] as const) {
+    const spec = parseTaskSpec(
+      contractSpec({
+        reviewRequirement: {
+          requiredJudges,
+          reason: requiredJudges === 0
+            ? "Mechanical check with complete deterministic commands"
+            : `Need ${requiredJudges} independent Judge(s)`,
+        },
+      }),
+      process.cwd(),
+    );
+    assert.deepEqual(spec.reviewRequirement, {
+      requiredJudges,
+      reason: requiredJudges === 0
+        ? "Mechanical check with complete deterministic commands"
+        : `Need ${requiredJudges} independent Judge(s)`,
+    });
+  }
+});
+
+test("legacy Tasks remain readable without an invented review requirement", () => {
+  const spec = parseTaskSpec(contractSpec(), process.cwd());
+  assert.equal(spec.reviewRequirement, undefined);
+});
+
+test("invalid review requirements fail closed", () => {
+  assert.throws(
+    () => parseTaskSpec(contractSpec({ reviewRequirement: { requiredJudges: 3, reason: "too many" } }), process.cwd()),
+    /requiredJudges must be 0, 1, or 2/,
+  );
+  assert.throws(
+    () => parseTaskSpec(contractSpec({ reviewRequirement: { requiredJudges: 1 } }), process.cwd()),
+    /must contain requiredJudges and reason/,
+  );
+  assert.throws(
+    () => parseTaskSpec(
+      contractSpec({ reviewRequirement: { requiredJudges: 1, reason: "ok", extra: true } }),
+      process.cwd(),
+    ),
+    /unsupported field/,
+  );
+  assert.throws(
+    () => parseTaskSpec(
+      contractSpec({ reviewRequirement: { requiredJudges: 1, reason: "x".repeat(301) } }),
+      process.cwd(),
+    ),
+    /1-300 characters/,
+  );
+  assert.throws(
+    () => parseTaskSpec(
+      contractSpec({ reviewRequirement: { requiredJudges: 1, reason: "line\nbreak" } }),
+      process.cwd(),
+    ),
+    /one trimmed line/,
+  );
+  assert.throws(
+    () => parseTaskSpec(
+      contractSpec({ reviewRequirement: { requiredJudges: 1, reason: "use Bearer sk-abcdefgh" } }),
+      process.cwd(),
+    ),
+    /must not contain credentials/,
+  );
 });

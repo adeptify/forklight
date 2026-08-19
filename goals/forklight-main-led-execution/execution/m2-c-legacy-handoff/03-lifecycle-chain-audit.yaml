@@ -1,0 +1,80 @@
+version: 2
+name: M2-C audit legacy handoff lifecycle read chain
+project: /Users/yijunwang/code/forklight
+taskClass: m2-storage-legacy-handoff-lifecycle-audit
+taskFamily: forklight-storage-lifecycle
+workerProfileId: grok-4-6-xhigh
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 0
+  reason: Read-only post-Integration call-chain audit changes no files and has deterministic decision/lifecycle checks.
+contract:
+  outcome: Verify from integrated source that authentic legacy handoff truth flows through projection, Main decision composition, storage audit, and all-eligible preview without TypeError, semantic drift, or read mutation.
+  presentation: { summary: 合入后只读核对 handoff 到 Main 决策与 Storage 预览的完整读取链。, language: zh-CN }
+  context:
+    - Starts only after the durable-read audit passes.
+    - Read the accepted real-store legacy handoff Work Item completely.
+  inScope:
+    - Inspect projectCandidateHandoff, resolveHandoffViewForTask, Main decision packet composition, auditStorage, previewStorage, and their focused temporary-Home tests.
+  outOfScope:
+    - No edits, real-home access, reclaim, migration, command-surface redesign, Integration, Judge, Hub, commit, or push.
+  executionSteps:
+    - Follow the exact previously failing call chain in integrated source.
+    - Confirm source and successor Task views remain truthful for current and authentic legacy Competition handoffs.
+    - Run the focused decision and lifecycle commands and return a bounded pass or exact mismatch.
+  deliverables: [A read-only end-to-end lifecycle compatibility verdict.]
+  modules:
+    - name: Integrated lifecycle read chain
+      responsibility: Confirm normalized handoff truth reaches Main decision and storage views without widening eligibility.
+      consumes: [Integrated handoff projection, Main packet, storage authority, and temporary-Home tests.]
+      produces: [Pass or one exact call-chain mismatch.]
+      boundaries: [No mutation, real Store, eligibility redesign, or inferred delivery.]
+  callChain:
+    - StateStore produces normalized in-memory handoff truth.
+    - Handoff projection and Main decision packet consume it.
+    - Storage audit and preview return bounded views; machine success releases mutation-boundary audit once.
+  scenarios:
+    - name: Prior failure chain is readable
+      given: A temporary authentic legacy Competition handoff is related to Store Tasks.
+      when: Main decision, audit, and preview consume it.
+      then: Every read completes, semantics stay Competition-specific, and no lifecycle state is written.
+  risks: [Fixing readability must not silently make an unresolved Task reclaimable.]
+  changeBudget: { maxFiles: 1, maxDiffLines: 20 }
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: false
+  allowedCommands: []
+  focusPaths:
+    - src/core/candidate-handoff.ts
+    - src/core/main-decision-packet.ts
+    - src/core/storage-lifecycle.ts
+    - src/state/store.ts
+    - tests/task-decision-view.test.ts
+    - tests/storage-lifecycle.test.ts
+acceptance:
+  criteria:
+    - The exact previously failing projection/decision/audit/preview chain completes against the authentic old shape without changing lifecycle authority.
+    - No source file changes.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/task-decision-view.test.ts tests/storage-lifecycle.test.ts
+    - git diff --check

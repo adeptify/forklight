@@ -1,0 +1,251 @@
+diff --git a/baseline/src/core/storage-lifecycle.ts b/workspace/src/core/storage-lifecycle.ts
+index e90dbef..9a655f4 100644
+--- a/baseline/src/core/storage-lifecycle.ts
++++ b/workspace/src/core/storage-lifecycle.ts
+@@ -528,8 +528,14 @@ function classifyKnownTask(input: TaskClassificationInput): {
+     || packet.integration?.resultStatus === "applied"
+     || store.getRemediationDisposition(task.id)?.status === "verified-repaired-delivered";
+ 
++  // A later valid Main resolution outranks only these stale Candidate wait
++  // packets. Active, mapping, and operation guards above still win, and
++  // reclaim still requires the existing resolvedReady proof below.
++  const suppressStaleCandidateWaits = resolution.status === "resolved";
++
+   if (
+     !alreadyDelivered
++    && !suppressStaleCandidateWaits
+     && (
+       packet.review.blocksIntegration
+       || packet.review.status === "missing"
+@@ -543,6 +549,7 @@ function classifyKnownTask(input: TaskClassificationInput): {
+   }
+   if (
+     !alreadyDelivered
++    && !suppressStaleCandidateWaits
+     && (
+       packet.workspaceDisposition === "protect-review"
+       || packet.nextActionCode === "await-required-review"
+@@ -553,6 +560,7 @@ function classifyKnownTask(input: TaskClassificationInput): {
+   }
+   if (
+     !alreadyDelivered
++    && !suppressStaleCandidateWaits
+     && (
+       packet.nextActionCode === "record-main-review"
+       || packet.nextActionCode === "record-fresh-main-review"
+@@ -563,6 +571,7 @@ function classifyKnownTask(input: TaskClassificationInput): {
+   }
+   if (
+     !alreadyDelivered
++    && !suppressStaleCandidateWaits
+     && (
+       packet.nextActionCode === "ready-for-integration"
+       || packet.nextActionCode === "wait-for-integration"
+diff --git a/baseline/tests/storage-lifecycle.test.ts b/workspace/tests/storage-lifecycle.test.ts
+index a9468ad..e21a23a 100644
+--- a/baseline/tests/storage-lifecycle.test.ts
++++ b/workspace/tests/storage-lifecycle.test.ts
+@@ -1,11 +1,12 @@
+ import assert from "node:assert/strict";
+-import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
++import { mkdirSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+ import { tmpdir } from "node:os";
+ import path from "node:path";
+ import { DatabaseSync } from "node:sqlite";
+ import test from "node:test";
+ import { taskPaths } from "../src/core/config.js";
++import { buildMainDecisionPacketForTask } from "../src/core/main-decision-packet.js";
+ import {
+   auditStorage,
+   createDefaultStorageLifecycleIo,
+@@ -18,6 +19,7 @@ import {
+   type StorageLifecycleIo,
+ } from "../src/core/storage-lifecycle.js";
+ import type {
++  AttemptRecord,
+   CandidateHandoffRecord,
+   EventRecord,
+   IntegrationReceiptRecord,
+@@ -148,6 +150,82 @@ function seedRevision(store: StateStore, task: TaskRecord): void {
+   });
+ }
+ 
++function makeZeroChangeAuditTask(home: string, id: string): TaskRecord {
++  const task = makeTask(home, id, "succeeded");
++  return {
++    ...task,
++    spec: {
++      ...task.spec,
++      reviewRequirement: {
++        requiredJudges: 0,
++        reason: "zero-change audit",
++      },
++    },
++  };
++}
++
++/** Authentic succeeded zero-change Candidate: passed verification, empty
++ *  Revision, Main accept, and the protect-candidate / ready-for-integration
++ *  packet those facts still project. */
++function seedSucceededZeroChangeCandidate(
++  store: StateStore,
++  task: TaskRecord,
++  options: { resolve?: boolean; writeRevisionArtifact?: boolean } = {},
++): void {
++  store.createTask(task);
++  store.addEvent(task.id, "attempt-1", "verification.completed", "verification completed", {
++    passed: true,
++    behaviorPassed: true,
++    policyPassed: true,
++    sourceCompatible: true,
++    commands: [],
++    diffPath: "result.diff",
++    sourceUnchanged: true,
++  });
++  store.addEvent(task.id, "attempt-1", "candidate.revision.captured", "revision captured", {
++    id: "rev-1",
++    taskId: task.id,
++    attemptId: "attempt-1",
++    attemptOrdinal: 1,
++    verificationEventSequence: 1,
++    patchDigest: "a".repeat(64),
++    affectedPaths: [],
++    filesChanged: 0,
++    changedLines: 0,
++    verificationPassed: true,
++    createdAt: STAMP,
++  });
++  store.addEvent(task.id, "attempt-1", "main-review.completed", "Main agent review: accept", {
++    decision: "accept",
++    reason: "zero-change audit accepted",
++    attemptId: "attempt-1",
++    verificationEventSequence: 1,
++    candidateRevisionId: "rev-1",
++    acceptedPatchDigest: "a".repeat(64),
++  });
++  if (options.resolve === true) {
++    store.addEvent(task.id, undefined, "task.resolution.completed", "attention resolved", {
++      kind: "resolve",
++      reason: "handled-elsewhere",
++      resolvedAt: STAMP,
++    });
++  }
++  seedRegenerableAndDurable(task);
++  if (options.writeRevisionArtifact === false) {
++    unlinkSync(path.join(task.paths.root, "revisions", "rev-1.patch"));
++  }
++}
++
++function assertStaleSucceededCandidatePacket(store: StateStore, taskId: string): void {
++  const packet = buildMainDecisionPacketForTask(store, taskId);
++  assert.equal(packet.workspaceDisposition, "protect-candidate");
++  assert.ok(
++    packet.nextActionCode === "ready-for-integration"
++    || packet.nextActionCode === "record-main-review"
++    || packet.nextActionCode === "record-fresh-main-review",
++  );
++}
++
+ function ioWithProcesses(processes: ObservedProcess[]): StorageLifecycleIo {
+   const base = createDefaultStorageLifecycleIo();
+   const alive = new Set(processes.map((item) => item.pid));
+@@ -510,6 +588,98 @@ test("main resolution makes a terminal failed Task reclaimable while keeping rev
+   }
+ });
+ 
++test("resolved succeeded Candidate becomes reclaimable while the unresolved equivalent stays protected", async () => {
++  const home = await mkdtemp(path.join(tmpdir(), "forklight-sl-resolved-succeeded-"));
++  const store = new StateStore(home);
++  try {
++    const unresolved = makeZeroChangeAuditTask(home, "task-unresolved-zero");
++    const resolved = makeZeroChangeAuditTask(home, "task-resolved-zero");
++    seedSucceededZeroChangeCandidate(store, unresolved);
++    seedSucceededZeroChangeCandidate(store, resolved, { resolve: true });
++    assertStaleSucceededCandidatePacket(store, unresolved.id);
++    assertStaleSucceededCandidatePacket(store, resolved.id);
++
++    const audit = auditStorage(store, home);
++    const unresolvedEntry = audit.entries.find((entry) => entry.taskId === unresolved.id);
++    const resolvedEntry = audit.entries.find((entry) => entry.taskId === resolved.id);
++    assert.equal(unresolvedEntry?.classification, "protected");
++    assert.ok(
++      unresolvedEntry?.reason === "awaiting-main-decision"
++      || unresolvedEntry?.reason === "awaiting-required-review"
++      || unresolvedEntry?.reason === "awaiting-integration",
++    );
++    assert.equal(resolvedEntry?.classification, "reclaimable");
++    assert.equal(resolvedEntry?.reason, "main-resolved-terminal");
++
++    const blocked = reclaimStorage(store, home, { taskId: unresolved.id, confirm: true });
++    assert.equal(blocked.results[0]?.applied, false);
++    assert.equal(blocked.results[0]?.classification, "protected");
++    assert.equal(await readFile(path.join(unresolved.paths.workspace, "src/app.ts"), "utf8"), "SECRET-WORKSPACE");
++
++    const preview = previewStorage(store, home, { taskId: resolved.id });
++    assert.ok(preview.targets.some((target) => target.name === "workspace"));
++    assert.ok(preview.preservedEntries.some((item) => item.name === "revisions"));
++    assert.ok(preview.preservedEntries.some((item) => item.name === "logs"));
++    assert.ok(preview.preservedEntries.some((item) => item.name === "mystery-cache"));
++
++    const result = reclaimStorage(store, home, { taskId: resolved.id, confirm: true });
++    assert.equal(result.results[0]?.applied, true);
++    assert.equal(result.results[0]?.reason, "main-resolved-terminal");
++    assert.equal(createDefaultStorageLifecycleIo().entryKind(resolved.paths.workspace), "missing");
++    assert.equal(createDefaultStorageLifecycleIo().entryKind(resolved.paths.baseline), "missing");
++    assert.equal(await readFile(path.join(resolved.paths.root, "revisions/rev-1.patch"), "utf8"), "SECRET-REV");
++    assert.equal(await readFile(path.join(resolved.paths.logs, "worker.log"), "utf8"), "SECRET-LOG");
++    assert.equal(await readFile(path.join(resolved.paths.root, "mystery-cache/extra"), "utf8"), "SECRET-UNKNOWN");
++    const after = auditStorage(store, home);
++    assert.equal(after.entries.find((entry) => entry.taskId === resolved.id)?.classification, "reclaimed");
++  } finally {
++    store.close();
++    await rm(home, { recursive: true, force: true });
++  }
++});
++
++test("terminal resolution does not outrank an active operation or missing Revision artifact", async () => {
++  const home = await mkdtemp(path.join(tmpdir(), "forklight-sl-resolved-safety-"));
++  const store = new StateStore(home);
++  try {
++    const active = makeZeroChangeAuditTask(home, "task-resolved-active");
++    const missing = makeZeroChangeAuditTask(home, "task-resolved-missing-rev");
++    seedSucceededZeroChangeCandidate(store, active, { resolve: true });
++    seedSucceededZeroChangeCandidate(store, missing, { resolve: true, writeRevisionArtifact: false });
++    const attempt: AttemptRecord = {
++      id: "attempt-1",
++      taskId: active.id,
++      ordinal: 1,
++      status: "running",
++      sessionId: active.sessionId,
++      rawLogPath: path.join(active.paths.logs, "attempt-1.log"),
++      startedAt: STAMP,
++    };
++    store.createAttempt(attempt);
++    assertStaleSucceededCandidatePacket(store, active.id);
++    assertStaleSucceededCandidatePacket(store, missing.id);
++
++    const audit = auditStorage(store, home);
++    const activeEntry = audit.entries.find((entry) => entry.taskId === active.id);
++    const missingEntry = audit.entries.find((entry) => entry.taskId === missing.id);
++    assert.equal(activeEntry?.classification, "protected");
++    assert.equal(activeEntry?.reason, "operation-active");
++    assert.equal(missingEntry?.classification, "protected");
++    assert.notEqual(missingEntry?.reason, "main-resolved-terminal");
++
++    const activeReclaim = reclaimStorage(store, home, { taskId: active.id, confirm: true });
++    assert.equal(activeReclaim.results[0]?.applied, false);
++    assert.equal(await readFile(path.join(active.paths.workspace, "src/app.ts"), "utf8"), "SECRET-WORKSPACE");
++    const missingReclaim = reclaimStorage(store, home, { taskId: missing.id, confirm: true });
++    assert.equal(missingReclaim.results[0]?.applied, false);
++    assert.equal(await readFile(path.join(missing.paths.workspace, "src/app.ts"), "utf8"), "SECRET-WORKSPACE");
++    assert.equal(createDefaultStorageLifecycleIo().entryKind(path.join(missing.paths.root, "revisions", "rev-1.patch")), "missing");
++  } finally {
++    store.close();
++    await rm(home, { recursive: true, force: true });
++  }
++});
++
+ test("ambiguous process stays visible and protects every implicated Task", async () => {
+   const home = await mkdtemp(path.join(tmpdir(), "forklight-sl-ambiguous-"));
+   const store = new StateStore(home);

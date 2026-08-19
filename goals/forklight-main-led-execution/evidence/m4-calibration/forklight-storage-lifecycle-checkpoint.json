@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "family": "forklight-storage-lifecycle",
+  "evidenceMode": "current-m4-e-read-only",
+  "tasks": [
+    {
+      "taskId": "2d774265-344f-43ea-8f69-79e2624765d3",
+      "taskStatus": "succeeded",
+      "mainDisposition": "rejected-reusable-partial",
+      "classification": "protected",
+      "reason": "unresolved-partial",
+      "nextAction": "protect-and-wait",
+      "reusablePartial": true,
+      "regenerableBytes": 142781211,
+      "durableBytes": 5515895,
+      "unknownBytes": 0,
+      "processCount": 0
+    },
+    {
+      "taskId": "3e2740eb-4c4e-4a55-9a80-86c51c35a5b5",
+      "taskStatus": "succeeded",
+      "mainDisposition": "accepted-integrated",
+      "classification": "reclaimable",
+      "reason": "integration-delivered",
+      "nextAction": "confirm-reclaim",
+      "reusablePartial": false,
+      "regenerableBytes": 144474276,
+      "durableBytes": 8187352,
+      "unknownBytes": 0,
+      "processCount": 0
+    },
+    {
+      "taskId": "da6a7615-2b2a-483b-bb1c-3b8a1269e65b",
+      "taskStatus": "succeeded",
+      "mainDisposition": "accepted-integrated",
+      "classification": "reclaimable",
+      "reason": "integration-delivered",
+      "nextAction": "confirm-reclaim",
+      "reusablePartial": false,
+      "regenerableBytes": 19842053,
+      "durableBytes": 923091,
+      "unknownBytes": 0,
+      "processCount": 0
+    }
+  ],
+  "decision": {
+    "protectedTaskIds": [
+      "2d774265-344f-43ea-8f69-79e2624765d3"
+    ],
+    "reclaimableTaskIds": [
+      "3e2740eb-4c4e-4a55-9a80-86c51c35a5b5",
+      "da6a7615-2b2a-483b-bb1c-3b8a1269e65b"
+    ],
+    "reclaimExecuted": false
+  },
+  "storeIntegrity": {
+    "quickCheck": "ok",
+    "foreignKeyViolationCount": 0
+  },
+  "sourceRefs": [
+    "goals/forklight-main-led-execution/evidence/m4-e-fresh-preflight-stop-decision-packet.md",
+    "goals/forklight-main-led-execution/evidence/m4-e-main-efficient-delivery.md",
+    "goals/forklight-main-led-execution/evidence/m4-e-fresh-worker-runtime-pair-delivery.md"
+  ]
+}

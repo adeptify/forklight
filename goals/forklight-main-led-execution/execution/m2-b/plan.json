@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "name": "M2-B risk-declared review and Main decision packet delivery",
+  "objective": "Implement, safely integrate, and independently audit explicit per-Task review depth plus one canonical privacy-safe Main decision packet without automatic action or duplicate authority.",
+  "items": [
+    { "id": "implement", "task": "./01-implement.yaml", "dependsOn": [] },
+    { "id": "review-gate-audit", "task": "./02-review-gate-audit.yaml", "dependsOn": ["implement"] },
+    { "id": "decision-packet-audit", "task": "./03-decision-packet-audit.yaml", "dependsOn": ["review-gate-audit"] },
+    { "id": "privacy-scope-audit", "task": "./04-privacy-scope-audit.yaml", "dependsOn": ["decision-packet-audit"] }
+  ]
+}

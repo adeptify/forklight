@@ -1,0 +1,65 @@
+version: 2
+name: M2 recover exact storage Candidate after bootstrap-only failure
+project: /Users/yijunwang/code/forklight
+taskClass: m2-resolved-terminal-storage-exact-recovery
+taskFamily: forklight-storage-lifecycle
+workerProfileId: grok-4-6-xhigh
+deliveryProfileId: forklight-self-upgrade
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 2
+  reason: Destructive storage eligibility and exact Candidate recovery require two fresh independent views on one Revision before Integration.
+runtime:
+  executable: /Users/yijunwang/code/forklight/goals/forklight-main-led-execution/execution/m2-resolved-terminal-storage-recovery/exact-candidate-native-bootstrap.mjs
+contract:
+  outcome: Materialize frozen Revision 172d6a80-bdd7-487a-9e97-b938a67f10c5 byte-for-byte in one isolated Workspace after the proven bootstrap-only failure, self-check it through Grok CLI 4.6 Xhigh native /goal, and return the independently verified two-path Candidate for exactly two fresh Judges.
+  presentation: { summary: 修复启动环境后原样恢复两路径 storage Candidate，以原生 /goal 自检并交给两位新 Judge。, language: zh-CN }
+  context:
+    - Read specs/m2-delivery-journeys/work-items/resolved-terminal-storage-review-cap-recovery/spec.md and the parent resolved-terminal-storage-disposition spec completely before acting.
+    - Prior Task 4ad6f4d6-7196-494d-9b94-6db118c7cbf5 stopped before Candidate materialization only because its Git subprocess could not read /Users/yijunwang/.gitconfig in the Worker sandbox.
+    - The operational materializer now ignores only that unavailable user-level Git config, then verifies and applies the exact seed before Grok starts; inspect only and never rewrite it.
+    - Seed sha256 is 48a73c6b6db1071fd62f2dfffa3799df81805cdc1e6d4a46cb163bb9ebdafcda; any mismatch or source drift is a terminal stop.
+    - ForkLight truth remains persistent-session because the native product Candidate was not integrated. The operational bootstrap invokes real Grok CLI /goal with grok-4.6 xhigh and current-model-only.
+    - No duration, Token or no-progress ceiling applies. Do not add locks, leases, manifests, version handshakes or duplicate state.
+  inScope: [Inspect exact two-path materialization, confirm parent behavior and safety boundaries, report bounded self-check evidence.]
+  outOfScope: [Any edit, rewrite, correction, additional test, product path, Hub, Store/schema/protocol, Integration, reclaim, commit, push, credentials, model switch, or distributed mechanism.]
+  executionSteps: [Read accepted specs and exact diff, verify the materialized behavior against the parent contract, inspect allowed paths and stop without editing if any mismatch exists.]
+  deliverables: [One byte-identical two-path Candidate and evidence-based self-check, or one exact stop reason.]
+  modules:
+    - name: Exact storage Candidate adoption
+      responsibility: Recreate one prior verified storage patch without changing its bytes or behavior.
+      consumes: [Frozen seed, full digest, current baseline, two allowed paths, parent spec, proven bootstrap failure.]
+      produces: [Exact Candidate or source/digest mismatch stop.]
+      boundaries: [No new lifecycle behavior, general integrity protocol, source mutation, or cleanup.]
+  callChain: [Operational materializer proves and applies exact seed in isolated Workspace, Grok native /goal performs read-only self-check, ForkLight independently verifies, two fresh Judges inspect one Revision, Main alone may integrate.]
+  scenarios:
+    - name: Exact recovery
+      given: Seed digest and current source base match.
+      when: Materializer applies once and Grok inspects.
+      then: Candidate is byte-identical and changes only the two allowed paths.
+    - name: Identity or source mismatch
+      given: Seed, source, paths or behavior differ.
+      when: Any check runs.
+      then: Stop without edit, correction, replacement review, reroute or Integration.
+  risks: [A wrong Candidate could make unsafe terminal Workspaces reclaimable; exact seed and reverse-apply checks prevent that concrete failure.]
+  changeBudget: { maxFiles: 2, maxDiffLines: 181 }
+advancedPolicy: { maxDurationMs: null, observedTokenCeiling: null, noProgressTimeoutMs: null, workerStopGraceMs: 60000, fileLimit: null, fileLimitMode: warn, changedLineLimit: null, changedLineLimitMode: warn, baseMaxAttempts: 1, maxExtraAttempts: 1, maxMainCorrections: 0, maxMainReverifications: 0, maxConcurrency: 1, completionMode: warn, changeBudgetMode: warn, maxAdaptationRounds: 0 }
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: false
+  allowedCommands: []
+  focusPaths: [goals/forklight-main-led-execution/execution/m2-resolved-terminal-storage-recovery/172d6a80-bdd7-487a-9e97-b938a67f10c5.patch, specs/m2-delivery-journeys/work-items/resolved-terminal-storage-review-cap-recovery/spec.md, specs/m2-delivery-journeys/work-items/resolved-terminal-storage-disposition/spec.md, src/core/storage-lifecycle.ts, tests/storage-lifecycle.test.ts]
+acceptance:
+  criteria:
+    - Seed digest and reverse-apply proof establish exact current-source materialization.
+    - Candidate changes exactly src/core/storage-lifecycle.ts and tests/storage-lifecycle.test.ts, 181 changed lines, and full digest equals the frozen Revision.
+    - Original build, focused storage/daemon/CLI/MCP suite and diff validation pass independently.
+  commands:
+    - test "$(shasum -a 256 goals/forklight-main-led-execution/execution/m2-resolved-terminal-storage-recovery/172d6a80-bdd7-487a-9e97-b938a67f10c5.patch | awk '{print $1}')" = "48a73c6b6db1071fd62f2dfffa3799df81805cdc1e6d4a46cb163bb9ebdafcda"
+    - git apply -p2 --reverse --check goals/forklight-main-led-execution/execution/m2-resolved-terminal-storage-recovery/172d6a80-bdd7-487a-9e97-b938a67f10c5.patch
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/storage-lifecycle.test.ts tests/daemon.test.ts tests/daemon-cli.test.ts tests/cli-supervision.test.ts tests/mcp.test.ts
+    - git diff --check

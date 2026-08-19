@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "name": "M2 Coding integrated-source audit recovery",
+  "objective": "Complete four serial zero-change integrated-source audits for the safely applied exact Coding Candidate through checkpoint-capable Runtimes, without reopening implementation or weakening the accepted machine gates.",
+  "planFile": "./plan.json",
+  "policy": {
+    "maxDurationMs": null,
+    "noProgressTimeoutMs": null,
+    "maxCorrectionRounds": 0,
+    "maxReviewRounds": 0,
+    "maxNoNewEvidenceCycles": 1
+  },
+  "milestones": [
+    { "itemId": "integrated-call-chain", "gate": "machine" },
+    { "itemId": "activated-runtime-boundary", "gate": "machine" },
+    { "itemId": "wrong-candidate-safety", "gate": "machine" },
+    { "itemId": "operation-surface", "gate": "machine" }
+  ]
+}

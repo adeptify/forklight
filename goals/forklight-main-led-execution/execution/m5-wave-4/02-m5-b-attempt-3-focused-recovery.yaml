@@ -1,0 +1,166 @@
+version: 2
+name: M5-B retained Candidate focused recovery
+project: /Users/yijunwang/code/forklight
+taskClass: m5-human-first-hub-redesign-recovery
+taskFamily: forklight-product-graduation
+workerProfileId: grok-4-6-xhigh
+executionPreference: auto
+routingDecision:
+  taskFamily: forklight-product-graduation
+  shortlist:
+    - provider: xai
+      model: grok-4.6
+      runtime: grok-build
+      effort: xhigh
+      workerProfileId: grok-4-6-xhigh
+  selectedWorker:
+    provider: xai
+    model: grok-4.6
+    runtime: grok-build
+    effort: xhigh
+    workerProfileId: grok-4-6-xhigh
+  selectedBecause:
+    code: user-specified
+    note: 一骏持续授权优先使用 Grok CLI 4.6 Xhigh 原生 Goal；本任务原样复用 M5-B 第三版 Candidate，只修独立验收已经精确证明的两个缺口。
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+reviewRequirement:
+  requiredJudges: 2
+  reason: Hub 信息架构、状态真实性、安全动作、双语内容和响应式体验仍是同一高风险交付；一个产品理解视角和一个交互技术视角必须检查最终同一 Revision。
+runtime:
+  name: grok-build
+  executable: /Users/yijunwang/code/forklight/goals/forklight-main-led-execution/execution/m5-wave-4/m5-b-attempt-3-recovery-bootstrap.mjs
+  effort: xhigh
+  maxBudgetUsd: null
+contract:
+  outcome: Preserve the retained seven-path M5-B redesign and close only the proven TypeScript fixture and narrow Goal-file top-position gaps so the unchanged full acceptance and final visual review can pass.
+  presentation:
+    summary: 保留已经完成的新版 Hub，只修一处测试类型和手机进入 Goal 时差 80 像素的定位问题。
+    language: zh-CN
+  context:
+    - Read AGENTS.md and specs/m5-product-graduation/work-items/hub-redesign/spec.md completely. That existing Spec, including its focused recovery section, is the sole accepted requirement; create no second spec or roadmap.
+    - Failed Task 24f8000a-5810-43e3-9f15-098ccf94203c stays immutable and protected. Do not resume, relabel, mutate or read its Workspace.
+    - The Workspace-local seed is exactly retained Candidate Revision df5bd185-ef5d-4982-843c-ddf7c73a9e17 across the accepted seven paths. The bootstrap validates the path set and apply feasibility before materializing it.
+    - "Attempt 3 already addressed the Decision Center route retention bug, compact mobile chrome, non-wrapping status, readable prose measure and four inherited thick side borders. Preserve those corrections."
+    - "Independent acceptance proved exactly two remaining failures: tests/hub-ui-assets.test.ts assigns null where the fixture contract requires an object with id, and the narrow Goal entry test observes content.scrollTop 80 instead of 0 after workApplyGoalFileStart."
+    - Fix the production cause of the 80-pixel offset. Do not weaken the expected zero, add timing sleeps or hide the failure in the test.
+    - The Impeccable detector has already run exactly once for this Work Item. Do not run it again.
+    - The product serves one local developer. Add no checksum, lock, lease, version handshake or coordination mechanism. The path-set and apply check exist only to prevent wrong-Candidate or wrong-source materialization.
+    - No absolute Worker duration, Token or no-progress limit applies. One base Attempt plus at most one automatic same-Worker validation repair is the complete recovery authority; no Main correction, extra Attempt, adaptation, fallback, reroute or model switch.
+  inScope:
+    - Materialize the retained seven-path Candidate on the matching fresh source base.
+    - Correct the invalid hub-ui-assets fixture value with the smallest type-correct representative object.
+    - Correct narrow deliberate Goal-file entry so the shared content container and Goal file begin at the Goal header with scrollTop exactly zero, while background refresh and Back continue to preserve reading context.
+    - Run the unchanged M5-B acceptance and return the complete seven-path redesign for visual QA, two Judges and Main serial Integration.
+  outOfScope:
+    - Any redesign, copy or feature expansion; backend, Core, Store, daemon, schema, API or mutation changes; GoalBoard writes; framework or dependency changes.
+    - Rewriting the five retained non-gap paths, weakening tests, changing acceptance commands, rerunning the detector, commit, push, reset or source-project Integration.
+    - A Main correction, extra Attempt, adaptation, Competition, third or replacement Judge, automatic model switch or another replacement.
+  executionSteps:
+    - Confirm the bootstrap materialized exactly the retained seven-path Candidate and read only the accepted Spec plus the two failing locations and their immediate call chain.
+    - Fix the fixture type in tests/hub-ui-assets.test.ts without changing its behavioral assertion.
+    - Fix workApplyGoalFileStart and its deliberate-selection call chain in src/hub/public/app.js so no later scrollIntoView or layout action reintroduces an 80-pixel offset.
+    - Run build, all six focused Hub test files, JavaScript and visible-dash validation, and diff validation. Inspect that no retained correction regressed.
+    - Return a concise handoff naming the two fixes, all preserved paths, exact checks and remaining Main browser/Judge gates.
+  deliverables:
+    - One complete seven-path M5-B Candidate preserving the retained redesign and all Attempt-3 corrections.
+    - A type-correct fixture and a production mobile Goal-entry behavior that passes the exact zero-scroll assertion.
+    - Passing unchanged independent acceptance and a handoff ready for bounded browser QA and two Judges.
+  modules:
+    - name: retained Candidate materialization
+      responsibility: Apply exactly the protected seven-path Candidate before Grok starts.
+      consumes: [Workspace-local Candidate patch, fresh isolated Workspace, exact path set]
+      produces: [Retained M5-B redesign and Task-local marker]
+      boundaries: [No sibling Workspace read, source mutation or extra integrity machinery]
+    - name: narrow Goal entry
+      responsibility: Start a deliberate mobile Goal-file transition at the document header without breaking refresh or Back continuity.
+      consumes: [mobile pane state, shared content scroll, Goal file host, deliberate selection event]
+      produces: [content and file scrollTop zero on entry; restored tree context on Back]
+      boundaries: [No timing workaround, no desktop regression, no background-refresh jump]
+    - name: focused fixture repair
+      responsibility: Keep the static asset behavior test type-correct without weakening what it proves.
+      consumes: [existing helper contract and current representative Task shape]
+      produces: [small valid fixture object and unchanged behavioral expectation]
+      boundaries: [No broad test rewrite or assertion deletion]
+  callChain:
+    - The bootstrap checks and applies the retained seven-path Candidate in the fresh Task Workspace, then launches one Grok native Goal.
+    - A deliberate narrow Goal selection renders the file, resets its scroll containers after any focus positioning and exposes the Goal header and result in the first viewport.
+    - Background refresh continues through the semantic DOM-retention path and does not call the deliberate-entry reset; Back returns to the tree and its own saved context.
+    - ForkLight independently runs the unchanged acceptance. Two different-view Judges inspect the final Revision; Main alone may accept and integrate it serially.
+  scenarios:
+    - name: deliberate narrow Goal entry
+      given: The 390px tree has a selected Goal and the shared content was previously scrolled.
+      when: The developer opens the Goal file.
+      then: The visible file starts at the Goal header and result with content.scrollTop 0 and a visible Back action.
+    - name: Back and refresh continuity
+      given: The developer reads a Goal file or returns to its tree.
+      when: Back is used or a semantic-no-change refresh occurs.
+      then: The appropriate tree or document context is preserved and no generic poll forces a jump.
+    - name: valid static fixture
+      given: The focused test constructs the helper input.
+      when: TypeScript builds and the test executes.
+      then: The required id-bearing object is present and the original behavior assertion remains meaningful.
+    - name: retained corrections stay present
+      given: The Candidate already fixed Decision Center routing, compact mobile chrome, status wrapping, prose measure and thick borders.
+      when: The two-gap recovery completes.
+      then: Those corrections remain byte-identical unless a directly required adjacent production line must change for zero-scroll behavior.
+  risks:
+    - Calling scrollIntoView after setting scrollTop can reintroduce the exact 80-pixel offset; order or remove the redundant focus scroll based on the actual container behavior.
+    - Editing the assertion instead of production behavior would hide the mobile failure; the exact zero expectation is fixed.
+    - Broad cleanup could regress an already usable redesign; only two gap paths are writable in substance.
+  changeBudget:
+    maxFiles: 7
+    maxDiffLines: 3200
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 60000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxWorkerValidationRepairs: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, coverage]
+  generatedPaths: [dist/**, coverage/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - DESIGN.md
+    - src/hub/public/index.html
+    - src/hub/public/app.css
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - tests/hub-ui-assets.test.ts
+    - tests/hub-responsive-layout.test.ts
+acceptance:
+  criteria:
+    - The exact retained seven-path Candidate is materialized on a matching source base; the failed Task stays immutable and no sibling Workspace is read by Grok.
+    - Build passes with a type-correct unchanged-behavior fixture, and the complete six-file Hub suite passes including content.scrollTop exactly zero on narrow Goal entry.
+    - Decision Center switches to its own body, mobile chrome is compact, status text does not break by character, Goal prose has a readable measure and the four inherited thick side borders are absent.
+    - Goal file entry, Back and semantic-no-change refresh preserve the intended independent scroll contexts on desktop and at 760px and below.
+    - No backend, Core, Store, daemon, API, mutation, GoalBoard, dependency or extra path change exists; the detector is not rerun and page-visible copy contains no em dash or en dash.
+    - ForkLight independently verifies the complete Candidate; exactly two different-view read-only Judges inspect its final Revision and Main alone decides serial Integration.
+  commands:
+    - node --check goals/forklight-main-led-execution/execution/m5-wave-4/m5-b-attempt-3-recovery-bootstrap.mjs
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/hub-ui-assets.test.ts tests/hub-responsive-layout.test.ts tests/hub-contract-quality.test.ts tests/hub-settings.test.ts tests/hub-operations.test.ts tests/hub-ops-mutations.test.ts
+    - node -e "const fs=require('fs'); const src=fs.readFileSync('src/hub/public/app.js','utf8'); new Function(src); const visible=[fs.readFileSync('src/hub/public/index.html','utf8'),src,fs.readFileSync('src/hub/public/i18n.js','utf8')].join('\\n'); if(/[—–]/.test(visible)) throw new Error('page-visible Hub source contains em/en dash');"
+    - git diff --check

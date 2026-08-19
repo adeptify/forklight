@@ -714,6 +714,294 @@ test("cleanup failure is not hidden behind the earlier verification error", asyn
   }
 });
 
+test("returned cleanup failure projects prior category and exact Hub/Daemon outcomes", async () => {
+  const realFsRoot = mkdtempSync(path.join(tmpdir(), "forklight-bundle-cleanup-diag-"));
+  try {
+    const { projectRoot } = fixtureProject(realFsRoot);
+    const outputDirectory = path.join(realFsRoot, "ForkLight-Clean-Run.cleanup-diag");
+    const { hooks } = makeFixtureHooks({
+      projectRoot,
+      failAfterHubStart: true,
+      failCleanup: true,
+    });
+
+    await assert.rejects(
+      () => buildCleanRunBundle({
+        argv: ["--output", outputDirectory],
+        projectRoot,
+        hooks,
+      }),
+      (error: unknown) => {
+        if (!(error instanceof BundleBuilderError)) return false;
+        assert.equal(error.category, "cleanup-failed");
+        assert.equal(
+          error.message,
+          "prior=daemon-identity-mismatch cleanup=returned hubGone=false daemonGone=true",
+        );
+        const formatted = formatBundleFailure(error);
+        assert.match(formatted, /\(cleanup-failed\): /);
+        assert.match(formatted, /prior=daemon-identity-mismatch/);
+        assert.match(formatted, /cleanup=returned/);
+        assert.match(formatted, /hubGone=false/);
+        assert.match(formatted, /daemonGone=true/);
+        return true;
+      },
+    );
+  } finally {
+    rmSync(realFsRoot, { recursive: true, force: true });
+  }
+});
+
+test("cleanup throw projects unknown outcomes without leaking private text", async () => {
+  const realFsRoot = mkdtempSync(path.join(tmpdir(), "forklight-bundle-cleanup-threw-"));
+  const privateMarker = "LEAK-MARKER-/Users/secret/forklight-home/.pid";
+  try {
+    const { projectRoot } = fixtureProject(realFsRoot);
+    const outputDirectory = path.join(realFsRoot, "ForkLight-Clean-Run.cleanup-threw");
+    const { hooks } = makeFixtureHooks({
+      projectRoot,
+      failAfterHubStart: true,
+      commands: (spec) => {
+        if (spec.args.includes("daemon") && spec.args.includes("stop")) {
+          throw new Error(`daemon stop exploded at ${privateMarker}`);
+        }
+        return undefined;
+      },
+    });
+
+    await assert.rejects(
+      () => buildCleanRunBundle({
+        argv: ["--output", outputDirectory],
+        projectRoot,
+        hooks,
+      }),
+      (error: unknown) => {
+        if (!(error instanceof BundleBuilderError)) return false;
+        assert.equal(error.category, "cleanup-failed");
+        assert.equal(
+          error.message,
+          "prior=daemon-identity-mismatch cleanup=threw hubGone=unknown daemonGone=unknown",
+        );
+        const formatted = formatBundleFailure(error);
+        assert.ok(!error.message.includes(privateMarker));
+        assert.ok(!formatted.includes(privateMarker));
+        assert.ok(!error.message.includes("exploded"));
+        assert.ok(!formatted.includes("/Users/secret"));
+        assert.ok(!formatted.includes(".pid"));
+        assert.match(formatted, /cleanup=threw/);
+        assert.match(formatted, /hubGone=unknown/);
+        assert.match(formatted, /daemonGone=unknown/);
+        return true;
+      },
+    );
+  } finally {
+    rmSync(realFsRoot, { recursive: true, force: true });
+  }
+});
+
+test("successful cleanup rethrows the original verification error unchanged", async () => {
+  const realFsRoot = mkdtempSync(path.join(tmpdir(), "forklight-bundle-cleanup-ok-"));
+  const original = new BundleBuilderError(
+    "hub-lifecycle-failed",
+    "installed Hub status is not current",
+  );
+  try {
+    const { projectRoot } = fixtureProject(realFsRoot);
+    const outputDirectory = path.join(realFsRoot, "ForkLight-Clean-Run.cleanup-ok");
+    const { hooks } = makeFixtureHooks({
+      projectRoot,
+      commands: (spec) => {
+        if (spec.args.includes("hub") && spec.args.includes("status")) {
+          throw original;
+        }
+        return undefined;
+      },
+    });
+
+    await assert.rejects(
+      () => buildCleanRunBundle({
+        argv: ["--output", outputDirectory],
+        projectRoot,
+        hooks,
+      }),
+      (error: unknown) => {
+        assert.equal(error, original);
+        assert.ok(error instanceof BundleBuilderError);
+        assert.equal(error.category, "hub-lifecycle-failed");
+        assert.equal(error.message, "installed Hub status is not current");
+        return true;
+      },
+    );
+  } finally {
+    rmSync(realFsRoot, { recursive: true, force: true });
+  }
+});
+
+test("untyped verification error projects prior=unexpected on returned cleanup failure", async () => {
+  const realFsRoot = mkdtempSync(path.join(tmpdir(), "forklight-bundle-cleanup-untyped-"));
+  try {
+    const { projectRoot } = fixtureProject(realFsRoot);
+    const outputDirectory = path.join(realFsRoot, "ForkLight-Clean-Run.cleanup-untyped");
+    const { hooks } = makeFixtureHooks({
+      projectRoot,
+      failCleanup: true,
+      commands: (spec) => {
+        if (spec.args.includes("hub") && spec.args.includes("status")) {
+          throw new Error("ENOENT /Users/secret/isolated-home/hub.log");
+        }
+        return undefined;
+      },
+    });
+
+    await assert.rejects(
+      () => buildCleanRunBundle({
+        argv: ["--output", outputDirectory],
+        projectRoot,
+        hooks,
+      }),
+      (error: unknown) => {
+        if (!(error instanceof BundleBuilderError)) return false;
+        assert.equal(error.category, "cleanup-failed");
+        assert.equal(
+          error.message,
+          "prior=unexpected cleanup=returned hubGone=false daemonGone=true",
+        );
+        const formatted = formatBundleFailure(error);
+        assert.ok(!error.message.includes("ENOENT"));
+        assert.ok(!error.message.includes("/Users/secret"));
+        assert.ok(!formatted.includes("hub.log"));
+        assert.ok(!formatted.includes("isolated-home"));
+        return true;
+      },
+    );
+  } finally {
+    rmSync(realFsRoot, { recursive: true, force: true });
+  }
+});
+
+test("authoritative daemon stop does not signal a reused numeric PID", async () => {
+  const realFsRoot = mkdtempSync(path.join(tmpdir(), "forklight-bundle-pid-reuse-"));
+  try {
+    const { projectRoot } = fixtureProject(realFsRoot);
+    const outputDirectory = path.join(realFsRoot, "ForkLight-Clean-Run.pid-reuse");
+    const daemonPid = 4243;
+    const { hooks, tracked } = makeFixtureHooks({
+      projectRoot,
+      processAlive: (pid) => pid === daemonPid,
+    });
+
+    const result = await buildCleanRunBundle({
+      argv: ["--output", outputDirectory],
+      projectRoot,
+      hooks,
+    });
+
+    assert.equal(result.evidence.status, "ready-for-clean-user-run");
+    assert.ok(
+      tracked.commands.some((spec) => spec.args.includes("daemon") && spec.args.includes("stop")),
+      "isolated-home daemon stop must run",
+    );
+    assert.equal(
+      tracked.signals.some((entry) => entry.pid === daemonPid),
+      false,
+      "reused daemon pid must not be probed or signalled after authoritative stop",
+    );
+    assert.equal(existsSync(outputDirectory), true);
+  } finally {
+    rmSync(realFsRoot, { recursive: true, force: true });
+  }
+});
+
+test("non-authoritative daemon stop still signals the recorded owned PID", async () => {
+  const realFsRoot = mkdtempSync(path.join(tmpdir(), "forklight-bundle-pid-fallback-"));
+  try {
+    const { projectRoot } = fixtureProject(realFsRoot);
+    const outputDirectory = path.join(realFsRoot, "ForkLight-Clean-Run.pid-fallback");
+    const daemonPid = 4243;
+    const { hooks, tracked } = makeFixtureHooks({
+      projectRoot,
+      failAfterHubStart: true,
+      processAlive: (pid) => pid === daemonPid,
+      commands: (spec) => {
+        if (spec.args.includes("daemon") && spec.args.includes("stop")) {
+          return okProcess(JSON.stringify({
+            stopped: true,
+            message: "Daemon was not running",
+          }));
+        }
+        return undefined;
+      },
+    });
+
+    await assert.rejects(
+      () => buildCleanRunBundle({
+        argv: ["--output", outputDirectory],
+        projectRoot,
+        hooks,
+      }),
+      (error: unknown) => error instanceof BundleBuilderError
+        && error.category === "cleanup-failed",
+    );
+    assert.ok(
+      tracked.signals.some((entry) => entry.pid === daemonPid && entry.signal === "SIGTERM"),
+      "owned daemon pid must receive the exact fallback SIGTERM",
+    );
+    assert.ok(
+      tracked.signals.some((entry) => entry.pid === daemonPid && entry.signal === "SIGKILL"),
+      "owned daemon pid must receive the exact fallback SIGKILL when it remains",
+    );
+    assert.equal(existsSync(outputDirectory), false);
+  } finally {
+    rmSync(realFsRoot, { recursive: true, force: true });
+  }
+});
+
+test("nonzero-exit daemon stop with stale authoritative stdout keeps PID fallback", async () => {
+  const realFsRoot = mkdtempSync(path.join(tmpdir(), "forklight-bundle-stale-stop-"));
+  try {
+    const { projectRoot } = fixtureProject(realFsRoot);
+    const outputDirectory = path.join(realFsRoot, "ForkLight-Clean-Run.stale-stop");
+    const daemonPid = 4243;
+    const { hooks, tracked } = makeFixtureHooks({
+      projectRoot,
+      processAlive: (pid) => pid === daemonPid,
+      commands: (spec) => {
+        if (spec.args.includes("daemon") && spec.args.includes("stop")) {
+          return {
+            exitCode: 1,
+            stdout: JSON.stringify({ stopped: true, message: "Daemon stopped" }),
+            stderr: "daemon stop failed",
+            durationMs: 1,
+            timedOut: false,
+          };
+        }
+        return undefined;
+      },
+    });
+
+    await assert.rejects(
+      () => buildCleanRunBundle({
+        argv: ["--output", outputDirectory],
+        projectRoot,
+        hooks,
+      }),
+      (error: unknown) => error instanceof BundleBuilderError
+        && error.category === "cleanup-failed",
+    );
+    assert.ok(
+      tracked.signals.some((entry) => entry.pid === daemonPid && entry.signal === "SIGTERM"),
+      "owned daemon pid must receive the exact fallback SIGTERM",
+    );
+    assert.ok(
+      tracked.signals.some((entry) => entry.pid === daemonPid && entry.signal === "SIGKILL"),
+      "owned daemon pid must receive the exact fallback SIGKILL when it remains",
+    );
+    assert.equal(existsSync(outputDirectory), false);
+  } finally {
+    rmSync(realFsRoot, { recursive: true, force: true });
+  }
+});
+
 test("sensitive package entry stops publication without leaking the filename", async () => {
   const realFsRoot = mkdtempSync(path.join(tmpdir(), "forklight-bundle-sensitive-"));
   try {
@@ -833,4 +1121,228 @@ test("package script declares bundle:clean operator command", async () => {
     scripts?: Record<string, string>;
   };
   assert.ok(pkg.scripts?.["bundle:clean"]?.includes("build-clean-run-bundle"));
+});
+
+function capturedForklightHomes(commands: CommandSpec[]): string[] {
+  return commands
+    .map((spec) => spec.env?.FORKLIGHT_HOME)
+    .filter((home): home is string => typeof home === "string" && home.length > 0);
+}
+
+function darwinSocketBytes(home: string): number {
+  return Buffer.byteLength(path.join(home, "forklight.sock"), "utf8") + 1;
+}
+
+function stagingDerivedSocketBytes(outputDirectory: string): number {
+  return darwinSocketBytes(path.join(
+    path.dirname(outputDirectory),
+    ".forklight-clean-run-staging.fixture1",
+    "work",
+    "home",
+  ));
+}
+
+test("long output path uses a distinct short FORKLIGHT_HOME", async () => {
+  const realFsRoot = mkdtempSync(path.join(tmpdir(), "forklight-bundle-long-out-"));
+  try {
+    const { projectRoot } = fixtureProject(realFsRoot);
+    const outputDirectory = path.join(realFsRoot, "L".repeat(90), "ForkLight-Clean-Run.long");
+    mkdirSync(path.dirname(outputDirectory), { recursive: true });
+    assert.ok(
+      stagingDerivedSocketBytes(outputDirectory) > 104,
+      "staging-derived socket must exceed the Darwin bound",
+    );
+    const { hooks, tracked } = makeFixtureHooks({ projectRoot });
+    const result = await buildCleanRunBundle({
+      argv: ["--output", outputDirectory],
+      projectRoot,
+      hooks,
+    });
+
+    assert.equal(result.outputDirectory, outputDirectory);
+    const homes = capturedForklightHomes(tracked.commands);
+    assert.ok(homes.length > 0);
+    const isolatedHome = homes[0]!;
+    assert.ok(homes.every((home) => home === isolatedHome));
+    assert.ok(!isolatedHome.startsWith(outputDirectory));
+    assert.ok(!isolatedHome.includes(".forklight-clean-run-staging."));
+    assert.ok(darwinSocketBytes(isolatedHome) <= 104);
+
+    const lifecycle = tracked.commands.filter((spec) =>
+      spec.args.includes("restart")
+      || (spec.args.includes("hub") && spec.args.includes("status"))
+      || (spec.args.includes("daemon") && spec.args.includes("status"))
+      || spec.args.includes("health")
+      || (spec.args.includes("daemon") && spec.args.includes("stop"))
+    );
+    assert.ok(lifecycle.length > 0);
+    assert.ok(lifecycle.every((spec) => spec.env?.FORKLIGHT_HOME === isolatedHome));
+
+    const pack = tracked.commands.find((spec) => spec.command === "npm" && spec.args[0] === "pack");
+    const install = tracked.commands.find((spec) =>
+      spec.command === "npm" && spec.args[0] === "install"
+    );
+    assert.ok(pack);
+    assert.ok(install);
+    assert.equal(pack.env?.FORKLIGHT_HOME, undefined);
+    assert.equal(install.env?.FORKLIGHT_HOME, undefined);
+    assert.ok(String(pack.env?.npm_config_cache).includes(".forklight-clean-run-staging."));
+    assert.ok(String(install.env?.npm_config_cache).includes(".forklight-clean-run-staging."));
+    const prefix = install.args[install.args.indexOf("--prefix") + 1];
+    assert.ok(String(prefix).includes(".forklight-clean-run-staging."));
+  } finally {
+    rmSync(realFsRoot, { recursive: true, force: true });
+  }
+});
+
+test("too-long injected temp root fails before lifecycle launch", async () => {
+  const realFsRoot = mkdtempSync(path.join(tmpdir(), "forklight-bundle-long-temp-"));
+  try {
+    const { projectRoot } = fixtureProject(realFsRoot);
+    const outputDirectory = path.join(realFsRoot, "ForkLight-Clean-Run.long-temp");
+    const injectedRoot = path.join(realFsRoot, "n".repeat(120), "rt");
+    mkdirSync(injectedRoot, { recursive: true, mode: 0o700 });
+    const wouldBeHome = path.join(injectedRoot, "home");
+    assert.ok(darwinSocketBytes(wouldBeHome) > 104);
+
+    const { hooks, tracked } = makeFixtureHooks({ projectRoot });
+    await assert.rejects(
+      () => buildCleanRunBundle({
+        argv: ["--output", outputDirectory],
+        projectRoot,
+        hooks: {
+          ...hooks,
+          createRuntimeRoot: () => injectedRoot,
+        },
+      }),
+      (error: unknown) => {
+        if (!(error instanceof BundleBuilderError)) return false;
+        assert.equal(error.category, "hub-lifecycle-failed");
+        assert.equal(error.message, "local socket path exceeds the platform limit");
+        const formatted = formatBundleFailure(error);
+        assert.ok(!error.message.includes(injectedRoot));
+        assert.ok(!formatted.includes(injectedRoot));
+        assert.ok(!formatted.includes(realFsRoot));
+        assert.ok(!formatted.includes(wouldBeHome));
+        assert.ok(!error.message.includes(path.sep));
+        return true;
+      },
+    );
+    assert.ok(
+      !tracked.commands.some((spec) => spec.args.includes("restart")),
+      "must not launch Hub when the socket cannot bind",
+    );
+    assert.equal(existsSync(injectedRoot), false);
+    assert.equal(existsSync(outputDirectory), false);
+    assert.equal(
+      existsSync(path.join(realFsRoot, ".forklight-clean-run-staging.fixture1")),
+      false,
+    );
+  } finally {
+    rmSync(realFsRoot, { recursive: true, force: true });
+  }
+});
+
+test("successful bundle removes the exact generated runtime root", async () => {
+  const realFsRoot = mkdtempSync(path.join(tmpdir(), "forklight-bundle-rt-ok-"));
+  try {
+    const { projectRoot } = fixtureProject(realFsRoot);
+    const outputDirectory = path.join(realFsRoot, "ForkLight-Clean-Run.rt-ok");
+    const { hooks, tracked } = makeFixtureHooks({ projectRoot });
+    let observedMode: number | undefined;
+    const innerRun = hooks.runCommand;
+    const result = await buildCleanRunBundle({
+      argv: ["--output", outputDirectory],
+      projectRoot,
+      hooks: {
+        ...hooks,
+        runCommand: async (spec) => {
+          const home = spec.env?.FORKLIGHT_HOME;
+          if (typeof home === "string" && existsSync(path.dirname(home))) {
+            observedMode = statSync(path.dirname(home)).mode & 0o777;
+          }
+          return innerRun(spec);
+        },
+      },
+    });
+
+    const isolatedHome = capturedForklightHomes(tracked.commands)[0];
+    assert.ok(isolatedHome);
+    assert.equal(existsSync(path.dirname(isolatedHome)), false);
+    assert.equal(observedMode, 0o700);
+    assert.equal(result.outputDirectory, outputDirectory);
+    assert.deepEqual(readdirSync(outputDirectory).sort(), [
+      BUNDLE_ARTIFACT_NAMES.buildIdentity,
+      BUNDLE_ARTIFACT_NAMES.evidence,
+      "forklight-0.2.0.tgz",
+      BUNDLE_ARTIFACT_NAMES.runbook,
+    ].sort());
+  } finally {
+    rmSync(realFsRoot, { recursive: true, force: true });
+  }
+});
+
+test("verification failure stops owned processes before removing the runtime root", async () => {
+  const realFsRoot = mkdtempSync(path.join(tmpdir(), "forklight-bundle-rt-fail-"));
+  try {
+    const { projectRoot } = fixtureProject(realFsRoot);
+    const outputDirectory = path.join(realFsRoot, "ForkLight-Clean-Run.rt-fail");
+    const { hooks, tracked } = makeFixtureHooks({
+      projectRoot,
+      failAfterHubStart: true,
+    });
+    const events: string[] = [];
+    let isolatedHome: string | undefined;
+    const innerRun = hooks.runCommand;
+    const innerRm = hooks.fs.rmSync;
+    await assert.rejects(
+      () => buildCleanRunBundle({
+        argv: ["--output", outputDirectory],
+        projectRoot,
+        hooks: {
+          ...hooks,
+          runCommand: async (spec) => {
+            if (typeof spec.env?.FORKLIGHT_HOME === "string") {
+              isolatedHome = spec.env.FORKLIGHT_HOME;
+            }
+            if (spec.args.includes("daemon") && spec.args.includes("stop")) {
+              events.push("owned-stop");
+            }
+            return innerRun(spec);
+          },
+          fs: {
+            ...hooks.fs,
+            rmSync: (target, options) => {
+              if (
+                isolatedHome !== undefined
+                && path.resolve(target) === path.resolve(path.dirname(isolatedHome))
+              ) {
+                events.push("runtime-root-removed");
+              }
+              innerRm(target, options);
+            },
+          },
+        },
+      }),
+      (error: unknown) => error instanceof BundleBuilderError
+        && error.category === "daemon-identity-mismatch"
+        && error.message === "installed daemon build identity does not match the tarball",
+    );
+
+    assert.ok(isolatedHome);
+    assert.equal(existsSync(path.dirname(isolatedHome)), false);
+    assert.equal(
+      existsSync(path.join(realFsRoot, ".forklight-clean-run-staging.fixture1")),
+      false,
+    );
+    assert.equal(existsSync(outputDirectory), false);
+    assert.ok(events.includes("owned-stop"));
+    assert.ok(events.includes("runtime-root-removed"));
+    assert.ok(events.indexOf("owned-stop") < events.indexOf("runtime-root-removed"));
+    assert.ok(
+      tracked.commands.some((spec) => spec.args.includes("daemon") && spec.args.includes("stop")),
+    );
+  } finally {
+    rmSync(realFsRoot, { recursive: true, force: true });
+  }
 });

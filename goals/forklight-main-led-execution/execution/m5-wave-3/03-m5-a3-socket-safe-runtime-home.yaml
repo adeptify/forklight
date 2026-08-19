@@ -1,0 +1,150 @@
+version: 2
+name: M5-A3 socket-safe clean-bundle runtime Home
+project: /Users/yijunwang/code/forklight
+taskClass: m5-clean-bundle-socket-safe-runtime-home
+taskFamily: forklight-product-graduation
+workerProfileId: grok-4-6-xhigh
+deliveryProfileId: forklight-self-upgrade
+executionPreference: auto
+routingDecision:
+  taskFamily: forklight-product-graduation
+  shortlist:
+    - provider: xai
+      model: grok-4.6
+      runtime: grok-build
+      effort: xhigh
+      workerProfileId: grok-4-6-xhigh
+    - provider: openai
+      model: gpt-5.6-luna
+      runtime: codex-cli
+      effort: max
+      workerProfileId: codex-luna-max
+  selectedWorker:
+    provider: xai
+    model: grok-4.6
+    runtime: grok-build
+    effort: xhigh
+    workerProfileId: grok-4-6-xhigh
+  selectedBecause:
+    code: user-specified
+    note: 一骏 authorizes continued Grok CLI 4.6 Xhigh native Goal work; closed diagnostics and local SDK truth now prove the sole A3 blocker is an overlong staging-derived Unix socket path.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+reviewRequirement:
+  requiredJudges: 2
+  reason: This cleanup and local IPC path owns temporary process state. Two read-only views inspect exact-root deletion, socket readability and no lifecycle widening before Main Integration.
+contract:
+  outcome: Give clean-bundle verification a unique short ephemeral ForkLight Home whose Unix socket fits macOS, while preserving staging/publication behavior and removing that exact root after owned-process cleanup.
+  presentation:
+    summary: 无论输出目录多长，临时 Daemon 都能建立本地通信；验证结束后只删除本次生成的短临时目录。
+    language: zh-CN
+  context:
+    - Read AGENTS.md, specs/m5-product-graduation/work-items/clean-bundle-short-runtime-home/spec.md, the parent clean-clone spec and the M5-A3 cleanup evidence completely before editing. The short-runtime-Home spec is the sole accepted implementation boundary.
+    - The accepted diagnostic run reported prior=daemon-identity-mismatch, cleanup=returned, hubGone=true and daemonGone=false. It published nothing.
+    - The real staging-derived forklight.sock path is 113 UTF-8 bytes. The installed macOS SDK declares sockaddr_un.sun_path[104], including the terminating null.
+    - The same packaged build passes immediate Hub/Daemon identity and authoritative stop from a 93-byte socket path. Hub intentionally reaches ready even when ensureDaemon fails, explaining the prior observation.
+    - Preserve all current source work. Do not run a real bundle, touch real ForkLight Home, edit Goal evidence, commit, push, reset or reclaim historical processes.
+  inScope:
+    - Create one unique owner-private OS temporary root and derive the ephemeral isolated ForkLight Home below it, separate from the long staging/work tree.
+    - On Darwin, fail before installed process launch if the UTF-8 forklight.sock path plus null does not fit the local 104-byte boundary.
+    - Keep npm prefix, npm Home/cache, tarball and publication staging unchanged.
+    - Stop exact owned processes before removing only this generated runtime root on success and failure.
+    - Add focused deterministic long-output, too-long-temp, success cleanup and failure cleanup regressions while preserving existing stale-PID/diagnostic tests.
+  outOfScope:
+    - Global socket location/config, Daemon/Hub behavior, retries, waits, timeout changes, process scans, symlinks, shared temp names, locks, leases, checksums, setup, backup, UI, docs, fixtures or public schemas.
+    - Deleting unrelated temp entries or the generated Home before owned process cleanup.
+  executionSteps:
+    - Trace only runtime Home construction, its existing CLI/MCP/lifecycle consumers, and the outer success/failure cleanup order.
+    - Introduce the smallest injectable/private temp-root creation seam needed for deterministic tests; default to the OS unique temp facility with private permissions.
+    - Add a bounded Darwin socket-byte guard with no path in its error.
+    - Route only FORKLIGHT_HOME to the short root, preserve all staging/npm paths, and delete the exact root after process cleanup.
+    - Add focused regressions and run every accepted command after the slice is complete.
+  deliverables:
+    - Exact two-path Candidate implementing socket-safe ephemeral Home and exact cleanup.
+    - Final response naming path-byte evidence, cleanup order, tests and uncertainty; no handoff file.
+  modules:
+    - name: Clean-bundle ephemeral runtime root
+      responsibility: Own one unique short ForkLight Home independent of the requested output path.
+      consumes: [OS temp facility, private staging work root, socket basename]
+      produces: [socket-safe isolated Home and exact owned cleanup target]
+      boundaries: [no shared name, global config, symlink, real Home or unrelated temp deletion]
+    - name: Focused runtime-root tests
+      responsibility: Prove long-output independence, Darwin guard and exact success/failure cleanup order.
+      consumes: [fixture filesystem/process hooks and captured command environments]
+      produces: [deterministic regressions preserving prior cleanup truth]
+      boundaries: [no real bundle, Provider, current Home or UI]
+  callChain:
+    - Bundle creates private publication staging and a separate unique short runtime root.
+    - Installed CLI/MCP/Hub/Daemon receive the short FORKLIGHT_HOME while npm and artifacts stay in staging.
+    - Lifecycle identity and shutdown complete through the readable local socket.
+    - Owned processes stop before the exact runtime root is removed; publication or original failure then proceeds unchanged.
+  scenarios:
+    - name: Long requested output path
+      given: The old staging-derived forklight.sock would exceed the macOS boundary.
+      when: Bundle plans installed lifecycle verification.
+      then: It uses a distinct short temporary Home and keeps the requested publication path unchanged.
+    - name: OS temp result is still too long
+      given: An injected temporary root would make forklight.sock plus null exceed 104 bytes on Darwin.
+      when: Lifecycle is about to launch.
+      then: Bundle fails before process launch with a bounded path-free error and removes the exact generated root.
+    - name: Successful lifecycle
+      given: Installed Hub/Daemon verification and owned shutdown pass.
+      when: Bundle prepares publication.
+      then: The exact runtime root is removed before final success and artifacts publish atomically.
+    - name: Verification failure
+      given: Installed verification fails after owning processes.
+      when: Existing cleanup runs.
+      then: Processes stop first, the exact runtime root is removed, staging is removed and the accepted closed error truth remains.
+  risks:
+    - Moving npm or artifact state would widen publication semantics. Move only FORKLIGHT_HOME.
+    - Removing Home before stop would destroy the control socket. Enforce process cleanup first.
+    - A predictable shared temp directory could collide. Use a unique OS-created directory with owner-only permissions.
+  changeBudget:
+    maxFiles: 2
+    maxDiffLines: 280
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 60000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxWorkerValidationRepairs: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, plans]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/clean-run/build-clean-run-bundle.ts
+    - tests/clean-run-bundle.test.ts
+acceptance:
+  criteria:
+    - Long output paths use a distinct unique short FORKLIGHT_HOME whose Darwin forklight.sock path plus null fits 104 bytes.
+    - The exact generated runtime root is private and absent after success and injected failure, only after owned process cleanup.
+    - A too-long injected temp root fails before lifecycle launch with no path disclosure.
+    - npm staging, atomic publication, stale-PID safety and closed diagnostic behavior remain unchanged.
+    - No retry, timeout, process scan, signal policy, global schema, Hub/UI or non-focused path change exists.
+    - Grok 4.6 Xhigh uses native Goal, ForkLight independently runs exact commands, two read-only Judges review the exact Revision and Main alone decides serial Integration.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/clean-run-bundle.test.ts
+    - git diff --check

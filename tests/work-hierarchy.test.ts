@@ -1195,6 +1195,8 @@ test("legacy handoffs without origin load safely and never claim one-off Tasks",
     // Legacy handoff cannot break the board or hide unrelated one-off Tasks.
     assert.ok(oneOffIds.has("legacy-src"), "legacy source stays one-off");
     assert.ok(oneOffIds.has("legacy-succ"), "legacy successor stays one-off");
+    assert.equal(store.getGoalByTaskId(legacySource.id), undefined);
+    assert.equal(store.getGoalByTaskId(legacySuccessor.id), undefined);
 
     // Current goal-task handoff keeps claiming source and successor.
     assert.ok(!oneOffIds.has("goal-src"), "goal source stays owned");

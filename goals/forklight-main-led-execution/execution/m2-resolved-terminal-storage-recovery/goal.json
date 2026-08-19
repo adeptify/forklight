@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "name": "M2 exact resolved-terminal storage Candidate recovery",
+  "objective": "Materialize the frozen two-path storage Candidate unchanged through a real Grok CLI 4.6 Xhigh native /goal self-check, independently verify it, obtain two fresh usable exact-Revision Judges, integrate only after Main accept, then complete three serial zero-change audits before the exact authorized reclaim.",
+  "planFile": "./plan.json",
+  "policy": {
+    "maxDurationMs": null,
+    "noProgressTimeoutMs": null,
+    "maxCorrectionRounds": 0,
+    "maxReviewRounds": 1,
+    "maxNoNewEvidenceCycles": 2
+  },
+  "milestones": [
+    { "itemId": "exact-candidate-recovery", "gate": "integration" },
+    { "itemId": "resolved-candidate-regression-audit", "gate": "machine" },
+    { "itemId": "public-storage-surface-audit", "gate": "machine" },
+    { "itemId": "scope-and-safety-audit", "gate": "machine" }
+  ]
+}

@@ -12,6 +12,7 @@ import { StateStore } from "../src/state/store.js";
 class MemoryKeychain implements SetupKeychainStore {
   readonly values = new Map<string, string>();
   reads = 0;
+  writes = 0;
   failWrite = false;
   failDelete = false;
 
@@ -22,6 +23,7 @@ class MemoryKeychain implements SetupKeychainStore {
     return this.values.get(this.id(service, account));
   }
   write(service: string, account: string, value: string): void {
+    this.writes += 1;
     if (this.failWrite) throw new Error(`write failed ${value}`);
     this.values.set(this.id(service, account), value);
   }
@@ -163,4 +165,89 @@ test("credential commit refuses unsupported environments", async () => {
     /Keychain is not available/,
   );
   assert.equal(keychain.values.size, 0);
+});
+
+test("local Grok sign-in marks xAI ready without a Keychain item", async () => {
+  const { service, keychain } = await fixture(inspector({
+    hasLocalGrokSignIn: () => true,
+  }));
+  const xai = service.describeProviders().find((item) => item.name === "xai");
+  assert.equal(xai?.configured, true);
+  assert.equal(xai?.authMode, "local-sign-in");
+  assert.equal(keychain.values.size, 0);
+  assert.equal(keychain.reads, 0);
+  const decided = service.resolveProviderSetup({ provider: "xai", variant: "default" });
+  assert.equal(decided.mode, "local-sign-in");
+});
+
+test("selecting signed-in Grok updates settings and never stores a key", async () => {
+  const { service, settings, keychain } = await fixture(inspector({
+    hasLocalGrokSignIn: () => true,
+  }));
+  assert.equal(settings.get().execution.defaultRuntime, "claude-code");
+  const result = service.selectSignedInProvider({ provider: "xai", variant: "default" });
+  assert.equal(result.authMode, "local-sign-in");
+  assert.equal(result.stored, false);
+  assert.equal(settings.get().execution.defaultProvider, "xai");
+  assert.equal(settings.get().execution.defaultRuntime, "grok-build");
+  assert.equal(keychain.values.size, 0);
+  assert.equal(keychain.reads, 0);
+  assert.equal(keychain.writes, 0);
+});
+
+test("selecting signed-in Codex updates settings and refuses an API key path", async () => {
+  const { service, settings, keychain } = await fixture(inspector({
+    hasLocalCodexSignIn: () => true,
+  }));
+  assert.equal(settings.get().execution.defaultRuntime, "claude-code");
+  const result = service.selectSignedInProvider({ provider: "openai", variant: "local-codex" });
+  assert.equal(result.authMode, "local-sign-in");
+  assert.equal(settings.get().execution.defaultProvider, "openai");
+  assert.equal(settings.get().execution.defaultRuntime, "codex-cli");
+  assert.equal(keychain.values.size, 0);
+  assert.equal(keychain.reads, 0);
+  assert.equal(keychain.writes, 0);
+  assert.throws(
+    () => service.commitProvider({ provider: "openai", variant: "local-codex" }, "should-not-store"),
+    /no OpenAI API key/,
+  );
+  assert.equal(keychain.values.size, 0);
+  assert.equal(keychain.reads, 0);
+  assert.equal(keychain.writes, 0);
+});
+
+test("xAI without local sign-in stays on the API-key path", async () => {
+  const { service } = await fixture(inspector({
+    hasLocalGrokSignIn: () => false,
+  }));
+  const decided = service.resolveProviderSetup({ provider: "xai", variant: "default" });
+  assert.equal(decided.mode, "api-key");
+  assert.throws(
+    () => service.selectSignedInProvider({ provider: "xai", variant: "default" }),
+    /API key on stdin/,
+  );
+});
+
+test("built-in Workers are listable and selectable without file editing", async () => {
+  const { service, settings } = await fixture();
+  const workers = service.listWorkers();
+  assert.ok(workers.some((item) => item.id === "grok-4-6-xhigh"));
+  const before = structuredClone(settings.get());
+  const selected = service.selectWorker("grok-4-6-xhigh");
+  assert.equal(selected.id, "grok-4-6-xhigh");
+  assert.equal(settings.get().workerProfiles.defaultProfileId, "grok-4-6-xhigh");
+  assert.equal(settings.get().execution.defaultProvider, "xai");
+  assert.notEqual(settings.get().workerProfiles.defaultProfileId, before.workerProfiles.defaultProfileId);
+});
+
+test("invalid Worker ids explain the choice and write no settings", async () => {
+  const { service, settings } = await fixture();
+  const beforeId = settings.get().workerProfiles.defaultProfileId;
+  const beforeProvider = settings.get().execution.defaultProvider;
+  assert.throws(
+    () => service.selectWorker("does-not-exist"),
+    /not in the current settings/,
+  );
+  assert.equal(settings.get().workerProfiles.defaultProfileId, beforeId);
+  assert.equal(settings.get().execution.defaultProvider, beforeProvider);
 });

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -9,7 +9,11 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { currentBuildIdentity } from "../src/core/build-identity.js";
 import type { RoutingAdvisoryResponse } from "../src/core/model-routing.js";
-import { daemonLogPath, daemonSocketPath } from "../src/core/config.js";
+import { buildTaskRecord, registerTaskFromSpec } from "../src/core/runner.js";
+import { parseTaskSpec } from "../src/core/task.js";
+import type { ProviderAuthInspector } from "../src/core/providers.js";
+import { DaemonCoordinator } from "../src/daemon/coordinator.js";
+import { daemonLogPath, daemonSocketPath, taskPaths } from "../src/core/config.js";
 import { sleepMs as sleep } from "../src/core/time.js";
 import { SELF_UPGRADE_DELIVERY_PROFILE_ID } from "../src/core/self-upgrade-evidence.js";
 import type {
@@ -29,7 +33,22 @@ import {
 } from "../src/daemon/client.js";
 import { ForkLightDaemon } from "../src/daemon/server.js";
 import { StateStore } from "../src/state/store.js";
+import { cloneDefaults, SettingsService } from "../src/core/settings.js";
+import { captureCandidateRevision } from "../src/core/candidate-revision.js";
+import {
+  createReviewGraph,
+  reconcileAllReviewGraphs,
+  reconcileReviewResultRepair,
+} from "../src/core/review-graph.js";
+import { prepareWorkspace } from "../src/workspace/copy.js";
+import { createPathPolicy } from "../src/workspace/path-policy.js";
+import { writeWorkspacePatchReport } from "../src/workspace/patch.js";
 import { formatRoutingAdviceHuman } from "../src/cli/routing-output.js";
+import { projectSafeRoutingExplanation } from "../src/core/routing-explanation.js";
+import {
+  buildTaskAdmissionPreview,
+  formatTaskAdmissionPreviewHuman,
+} from "../src/core/task-preview.js";
 import {
   APPLICABILITY_REASON_MAX,
   humanIntegrationPreflightLines,
@@ -215,6 +234,162 @@ test("routing CLI accepts full-identity legacy candidates with runtime and effor
   }
 });
 
+test("CLI validate/preview renders the frozen advisory relationship without private fields", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-cli-adv-"));
+  try {
+    await mkdir(path.join(home, "project"));
+    const deepseek = {
+      provider: "deepseek",
+      model: "deepseek-v4-flash",
+      runtime: "claude-code",
+      effort: "high",
+      workerProfileId: "default",
+    };
+    const qwen = {
+      provider: "qwen",
+      model: "qwen3.7-plus",
+      runtime: "claude-code",
+      effort: "high",
+    };
+    const routingDecision = {
+      taskFamily: "refactor",
+      shortlist: [deepseek, qwen],
+      selectedWorker: deepseek,
+      selectedBecause: { code: "user-specified", note: "PRIVATE_CLI_M3B_NOTE" },
+      competition: { intent: "none", triggers: [] },
+      evidenceSnapshot: {
+        scope: "none",
+        exactSampleCounts: { SECRET_CLI_SAMPLE_KEY: 0 },
+        settingsDigest: "SECRET_CLI_SETTINGS_DIGEST",
+      },
+      advisory: {
+        overallResult: "recommended",
+        selection: "followed-recommendation",
+        recommendedWorker: deepseek,
+        confidence: 0.91,
+        selectedExecution: {
+          resolvedExecutionMode: "single-run",
+          readinessState: "launchable",
+          canLaunch: true,
+          nextAction: "none",
+        },
+      },
+    };
+    const writeCliTask = async (fileName: string, decision: unknown): Promise<string> => {
+      const file = path.join(home, fileName);
+      await writeFile(
+        file,
+        `version: 2
+name: CLI Advisory Preview
+project: ./project
+workerProfileId: default
+taskFamily: refactor
+worker:
+  focusPaths: [src]
+contract:
+  outcome: CLI validate renders the frozen advisory relationship
+  context: [current settings]
+  inScope: [preview]
+  outOfScope: [mutation]
+  executionSteps: [validate]
+  deliverables: [safe preview]
+  modules:
+    - name: cli
+      responsibility: render the same safe routing explanation as Core
+      consumes: [task file]
+      produces: [preview]
+      boundaries: [no Task mutation]
+  callChain: [cli, preview]
+  scenarios:
+    - name: followed
+      given: advisory
+      when: validate
+      then: same facts
+    - name: private
+      given: note
+      when: validate
+      then: hidden
+  risks: [leak]
+  changeBudget:
+    maxFiles: 4
+    maxDiffLines: 80
+acceptance:
+  criteria: [safe]
+  commands:
+    - "true"
+routingDecision: ${JSON.stringify(decision)}
+`,
+      );
+      return file;
+    };
+    const taskFile = await writeCliTask("task.yaml", routingDecision);
+    const jsonResult = await runCli(home, ["validate", taskFile, "--json"], 20_000);
+    assert.ok(jsonResult.stdout.trim().length > 0, jsonResult.stderr || "CLI validate --json produced no preview");
+    const preview = JSON.parse(jsonResult.stdout) as {
+      routingExplanation: ReturnType<typeof projectSafeRoutingExplanation>;
+    };
+    assert.equal(preview.routingExplanation.advisory!.selection, "followed-recommendation");
+    assert.equal(preview.routingExplanation.advisory!.confidence, 0.91);
+    assert.deepEqual(preview.routingExplanation.advisory!.recommendedWorker, deepseek);
+
+    const settings = cloneDefaults();
+    const viaPreview = await buildTaskAdmissionPreview(taskFile, settings);
+    assert.deepEqual(viaPreview.routingExplanation, preview.routingExplanation);
+    assert.equal(viaPreview.routingExplanation.advisory!.selection, "followed-recommendation");
+    const humanResult = await runCli(home, ["validate", taskFile], 20_000);
+    assert.ok(humanResult.stdout.includes("Routing explanation:"), humanResult.stderr);
+    assert.match(humanResult.stdout, /Advisory result: recommended/);
+    assert.match(humanResult.stdout, /Selection: followed-recommendation/);
+    assert.match(humanResult.stdout, /Confidence: 0\.91/);
+    assert.equal(humanResult.stdout, formatTaskAdmissionPreviewHuman(viaPreview));
+    const serialized = `${jsonResult.stdout}\n${humanResult.stdout}`;
+    assert.ok(!serialized.includes("PRIVATE_CLI_M3B_NOTE"));
+    assert.ok(!serialized.includes("SECRET_CLI_SAMPLE_KEY"));
+    assert.ok(!serialized.includes("SECRET_CLI_SETTINGS_DIGEST"));
+
+    const twin = { ...deepseek, workerProfileId: "default-twin" };
+    const overrideFile = await writeCliTask("override.yaml", {
+      ...routingDecision,
+      shortlist: [deepseek, twin],
+      advisory: {
+        overallResult: "recommended",
+        selection: "manual-override",
+        recommendedWorker: twin,
+        confidence: 0.84,
+        selectedExecution: routingDecision.advisory.selectedExecution,
+      },
+    });
+    const overrideJson = await runCli(home, ["validate", overrideFile, "--json"], 20_000);
+    const overridePreview = JSON.parse(overrideJson.stdout) as {
+      routingExplanation: { advisory?: { selection?: string; recommendedWorker?: { workerProfileId?: string } } };
+    };
+    assert.equal(overridePreview.routingExplanation.advisory?.selection, "manual-override");
+    assert.equal(
+      overridePreview.routingExplanation.advisory?.recommendedWorker?.workerProfileId,
+      "default-twin",
+    );
+
+    const mismatchFile = await writeCliTask("mismatch.yaml", {
+      ...routingDecision,
+      advisory: {
+        ...routingDecision.advisory,
+        selectedExecution: {
+          ...routingDecision.advisory.selectedExecution,
+          resolvedExecutionMode: "native-goal",
+        },
+      },
+    });
+    const mismatchResult = await runCli(home, ["validate", mismatchFile, "--json"], 20_000);
+    assert.notEqual(mismatchResult.code, 0);
+    assert.match(
+      `${mismatchResult.stderr}\n${mismatchResult.stdout}`,
+      /does not match resolved Task executionMode/,
+    );
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test("routing CLI human output explains an evidence-ready subset without judging missing history", () => {
   const evidence = {
     relevantSampleCount: 8,
@@ -276,9 +451,12 @@ test("routing CLI human output explains an evidence-ready subset without judging
     totalCandidateCount: 3,
     excludedCandidateCount: 1,
     recommendationCoverage: "evidence-ready-subset",
+    overallResult: "recommended",
+    cannotDetermineReasons: [],
   } as unknown as RoutingAdvisoryResponse;
 
   const output = formatRoutingAdviceHuman(advisory);
+  assert.match(output, /Overall result: recommended/);
   assert.match(output, /Comparison: 2 of 3 candidate\(s\).*1 not included yet/);
   assert.match(output, /\[not compared yet: insufficient evidence\]/);
   assert.doesNotMatch(output, /excluded|failed|scored as zero/i);
@@ -409,6 +587,8 @@ test("routing CLI JSON output includes canonical cohort coverage facts", async (
     assert.equal(result.code, 0, `routing must succeed: ${result.stderr}`);
     const advisory = JSON.parse(result.stdout) as Record<string, unknown>;
     // Canonical coverage facts must be present in the JSON response.
+    assert.ok("overallResult" in advisory, "must include overallResult");
+    assert.ok("cannotDetermineReasons" in advisory, "must include cannotDetermineReasons");
     assert.ok("allCandidatesCompared" in advisory, "must include allCandidatesCompared");
     assert.ok("cohortCandidateCount" in advisory, "must include cohortCandidateCount");
     assert.ok("distinctIdentityCount" in advisory, "must include distinctIdentityCount");
@@ -1694,5 +1874,1436 @@ test("upgrade status stays 3/3 when newer ordinary Elsewhere Integration is appl
   } finally {
     await daemon.close();
     await rm(home, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test("storage reclaim rejects missing confirm before daemon contact", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-cli-storage-noconfirm-"));
+  try {
+    const result = await runCli(home, ["storage", "reclaim", "--task", "task-1"]);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /requires explicit --confirm/);
+    assert.equal(existsSync(daemonSocketPath(home)), false);
+  } finally {
+    await rm(home, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test("storage CLI audit, preview, and reclaim share lifecycle semantics", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-cli-storage-"));
+  const taskId = "cli-storage-delivered";
+  const store = new StateStore(home);
+  const timestamp = "2026-08-14T00:00:00.000Z";
+  const paths = taskPaths(home, taskId);
+  store.createTask({
+    id: taskId,
+    name: taskId,
+    status: "succeeded",
+    sourcePath: "/source",
+    taskFile: "/task.yaml",
+    spec: {
+      provider: { name: "deepseek", model: "deepseek-v4-pro[1M]" },
+      runtime: { name: "claude-code" },
+    } as TaskRecord["spec"],
+    paths,
+    sessionId: "session-cli-storage",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    startedAt: timestamp,
+    finishedAt: timestamp,
+  });
+  store.addEvent(taskId, undefined, "integration.operation.started", "started", {
+    operationId: "cli-storage-op",
+    taskId,
+    receiptId: "cli-storage-receipt",
+  });
+  store.saveIntegrationReceipt({
+    id: "cli-storage-receipt",
+    taskId,
+    patchDigest: "d".repeat(64),
+    affectedFiles: ["src/cli.ts"],
+    rejectionReasons: [],
+    sourceEvidence: {},
+    createdAt: timestamp,
+    expiresAt: "2099-01-01T00:00:00.000Z",
+    consumed: true,
+  });
+  store.saveIntegrationResult({
+    id: "cli-storage-op",
+    receiptId: "cli-storage-receipt",
+    taskId,
+    status: "applied",
+    appliedAt: timestamp,
+    createdAt: timestamp,
+    stages: [
+      { stage: "source-applied", status: "passed" },
+      { stage: "source-verified", status: "passed" },
+      { stage: "artifact-built", status: "not-applicable" },
+      { stage: "runtime-activated", status: "not-applicable" },
+    ],
+  });
+  store.close();
+  await mkdir(paths.workspace, { recursive: true });
+  await writeFile(path.join(paths.workspace, "gone.ts"), "workspace");
+  await mkdir(paths.logs, { recursive: true });
+  await writeFile(path.join(paths.logs, "worker.log"), "durable");
+
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    const audit = await runCli(home, ["storage", "audit", "--json"]);
+    assert.equal(audit.code, 0, audit.stderr);
+    const auditBody = JSON.parse(audit.stdout) as {
+      kind?: string;
+      nextAction?: string;
+      entries?: Array<{ taskId?: string; classification?: string }>;
+    };
+    assert.equal(auditBody.kind, "storage-audit");
+    assert.equal(
+      auditBody.entries?.find((entry) => entry.taskId === taskId)?.classification,
+      "reclaimable",
+    );
+
+    const human = await runCli(home, ["storage", "preview", "--task", taskId]);
+    assert.equal(human.code, 0, human.stderr);
+    assert.match(human.stdout, /nextAction: confirm-reclaim/);
+    assert.match(human.stdout, /reason: integration-delivered/);
+
+    const reclaim = await runCli(home, [
+      "storage", "reclaim", "--task", taskId, "--confirm", "--json",
+    ]);
+    assert.equal(reclaim.code, 0, reclaim.stderr);
+    const reclaimBody = JSON.parse(reclaim.stdout) as {
+      kind?: string;
+      results?: Array<{ applied?: boolean }>;
+    };
+    assert.equal(reclaimBody.kind, "storage-reclaim");
+    assert.equal(reclaimBody.results?.[0]?.applied, true);
+    await assert.rejects(() => readFile(path.join(paths.workspace, "gone.ts"), "utf8"));
+    assert.equal(await readFile(path.join(paths.logs, "worker.log"), "utf8"), "durable");
+  } finally {
+    await daemon.close();
+    await rm(home, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test("storage audit and preview write no CLI exchange receipts", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-cli-storage-noreceipt-"));
+  const taskId = "cli-storage-preview-task";
+  const store = new StateStore(home);
+  const timestamp = "2026-08-14T00:00:00.000Z";
+  const paths = taskPaths(home, taskId);
+  store.createTask({
+    id: taskId,
+    name: taskId,
+    status: "succeeded",
+    sourcePath: "/source",
+    taskFile: "/task.yaml",
+    spec: {
+      provider: { name: "deepseek", model: "deepseek-v4-pro[1M]" },
+      runtime: { name: "claude-code" },
+    } as TaskRecord["spec"],
+    paths,
+    sessionId: "session-cli-storage-preview",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    startedAt: timestamp,
+    finishedAt: timestamp,
+  });
+  store.addEvent(taskId, undefined, "integration.operation.started", "started", {
+    operationId: "cli-storage-preview-op",
+    taskId,
+    receiptId: "cli-storage-preview-receipt",
+  });
+  store.saveIntegrationReceipt({
+    id: "cli-storage-preview-receipt",
+    taskId,
+    patchDigest: "d".repeat(64),
+    affectedFiles: ["src/cli.ts"],
+    rejectionReasons: [],
+    sourceEvidence: {},
+    createdAt: timestamp,
+    expiresAt: "2099-01-01T00:00:00.000Z",
+    consumed: true,
+  });
+  store.saveIntegrationResult({
+    id: "cli-storage-preview-op",
+    receiptId: "cli-storage-preview-receipt",
+    taskId,
+    status: "applied",
+    appliedAt: timestamp,
+    createdAt: timestamp,
+    stages: [
+      { stage: "source-applied", status: "passed" },
+      { stage: "source-verified", status: "passed" },
+      { stage: "artifact-built", status: "not-applicable" },
+      { stage: "runtime-activated", status: "not-applicable" },
+    ],
+  });
+  store.close();
+
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    const audit = await runCli(home, ["storage", "audit", "--json"]);
+    assert.equal(audit.code, 0, audit.stderr);
+    const preview = await runCli(home, ["storage", "preview", "--task", taskId, "--json"]);
+    assert.equal(preview.code, 0, preview.stderr);
+    const after = new StateStore(home);
+    try {
+      assert.equal(after.listExchangeReceipts(taskId).length, 0);
+    } finally {
+      after.close();
+    }
+    const cliSource = await readFile(new URL("../src/cli.ts", import.meta.url), "utf8");
+    // Anchor inside the storage command block so adaptation preview/apply
+    // (earlier in the file) cannot satisfy or poison the zero-receipt check.
+    const storageIdx = cliSource.indexOf('if (command === "storage")');
+    assert.ok(storageIdx > 0, "storage command block must exist");
+    const storageBlockEnd = cliSource.indexOf(
+      "throw new Error(`Unknown storage subcommand:",
+      storageIdx,
+    );
+    assert.ok(storageBlockEnd > storageIdx, "storage command block must have a closed end");
+    const storageBlock = cliSource.slice(storageIdx, storageBlockEnd);
+    const auditIdx = storageBlock.indexOf('if (subcommand === "audit")');
+    const previewIdx = storageBlock.indexOf('if (subcommand === "preview")');
+    const reclaimIdx = storageBlock.indexOf('if (subcommand === "reclaim")');
+    assert.ok(auditIdx >= 0 && previewIdx > auditIdx && reclaimIdx > previewIdx);
+    assert.ok(!storageBlock.slice(auditIdx, reclaimIdx).includes("withCliExchangeReceipt"));
+  } finally {
+    await daemon.close();
+    await rm(home, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+async function seedTwoJudgeOverlimitGraph(home: string, taskId: string): Promise<{
+  assignmentId: string;
+  revisionId: string;
+}> {
+  const sourceDir = path.join(home, "source");
+  await mkdir(path.join(sourceDir, "src"), { recursive: true });
+  await writeFile(path.join(sourceDir, "readme.md"), "# hello\n\nOriginal.\n");
+  await writeFile(path.join(sourceDir, "src/app.ts"), "export const n = 1;\n");
+  const store = new StateStore(home);
+  const settings = new SettingsService(store);
+  const paths = taskPaths(home, taskId);
+  const spec = {
+    version: 1 as const,
+    name: "CLI repair fixture",
+    project: sourceDir,
+    goal: "Ship a small change",
+    constraints: [],
+    provider: {
+      name: "deepseek" as const,
+      model: "deepseek-v4-flash",
+      keychainService: "forklight.deepseek.api-key",
+    },
+    runtime: {
+      name: "claude-code" as const,
+      executable: "claude",
+      effort: "low" as const,
+      maxBudgetUsd: 0.1,
+    },
+    workspace: { exclude: [".git", "node_modules"] },
+    worker: { allowEdits: true, allowedCommands: [], focusPaths: ["src", "readme.md"] },
+    acceptance: { commands: ["true"] },
+  };
+  await prepareWorkspace(spec, paths);
+  await mkdir(path.join(paths.workspace, "src"), { recursive: true });
+  await writeFile(path.join(paths.workspace, "readme.md"), "# hello\n\nChanged.\n");
+  await writeFile(path.join(paths.workspace, "src/app.ts"), "export const n = 2;\n");
+  await writeWorkspacePatchReport(paths, createPathPolicy(spec));
+  const now = new Date().toISOString();
+  store.createTask({
+    id: taskId,
+    name: spec.name,
+    status: "succeeded",
+    sourcePath: sourceDir,
+    taskFile: "forklight://test/cli-repair",
+    spec,
+    paths,
+    sessionId: "session-cli-repair",
+    currentAttemptId: "attempt-cli-repair",
+    createdAt: now,
+    updatedAt: now,
+  });
+  store.createAttempt({
+    id: "attempt-cli-repair",
+    taskId,
+    ordinal: 1,
+    status: "succeeded",
+    sessionId: "session-cli-repair",
+    rawLogPath: path.join(paths.logs, "attempt-1.jsonl"),
+    startedAt: now,
+    finishedAt: now,
+    exitCode: 0,
+  });
+  const verEvent = store.addEvent(taskId, "attempt-cli-repair", "verification.completed", "passed", {
+    passed: true,
+    behaviorPassed: true,
+    policyPassed: true,
+    sourceCompatible: true,
+    commands: [{ command: "true", exitCode: 0, stdout: "", stderr: "", durationMs: 1, timedOut: false }],
+    diffPath: paths.diff,
+    sourceUnchanged: true,
+  });
+  const revision = await captureCandidateRevision(
+    store,
+    store.getTask(taskId),
+    store.getAttempt("attempt-cli-repair"),
+    verEvent.sequence,
+    true,
+    ["readme.md", "src/app.ts"],
+    2,
+    4,
+  );
+  const profileA = settings.get().workerProfiles.defaultProfileId;
+  const profileB = settings.get().workerProfiles.profiles.find((profile) => profile.id !== profileA)!.id;
+  const created = await createReviewGraph(store, settings.get(), {
+    candidateTaskId: taskId,
+    reviewerWorkerProfileIds: [profileA, profileB],
+    reason: "CLI repair fixture",
+    confirm: true,
+  });
+  const [usable, failed] = store.listReviewAssignments(created.graph.id);
+  const finish = (reviewerTaskId: string, resultText: string) => {
+    const task = store.getTask(reviewerTaskId);
+    store.createAttempt({
+      id: `att-${reviewerTaskId}`,
+      taskId: reviewerTaskId,
+      ordinal: 1,
+      status: "succeeded",
+      sessionId: task.sessionId,
+      rawLogPath: path.join(task.paths.logs, "attempt-1.jsonl"),
+      startedAt: now,
+      finishedAt: now,
+      exitCode: 0,
+      resultText,
+    });
+    store.setTaskStatus(reviewerTaskId, "succeeded", {
+      finishedAt: now,
+      currentAttemptId: `att-${reviewerTaskId}`,
+    });
+  };
+  finish(usable!.reviewerTaskId, JSON.stringify({
+    schemaVersion: 1,
+    reviewedRevisionId: revision.id,
+    proposedDisposition: "accept",
+    summary: "Usable first opinion",
+    findings: [],
+  }));
+  finish(failed!.reviewerTaskId, JSON.stringify({
+    schemaVersion: 1,
+    reviewedRevisionId: revision.id,
+    proposedDisposition: "accept",
+    summary: "s".repeat(507),
+    findings: [],
+  }));
+  reconcileAllReviewGraphs(store);
+  const assignmentId = failed!.id;
+  store.close();
+  return { assignmentId, revisionId: revision.id };
+}
+
+test("CLI review-graph repair-result requires confirm, is one-shot, and stays privacy-safe", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-cli-repair-"));
+  const taskId = "cli-repair-candidate";
+  const seeded = await seedTwoJudgeOverlimitGraph(home, taskId);
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    const missing = await runCli(home, [
+      "review-graph", "repair-result", taskId,
+      "--assignment", seeded.assignmentId,
+      "--reason", "shorten summary",
+    ]);
+    assert.notEqual(missing.code, 0);
+    assert.match(`${missing.stderr}\n${missing.stdout}`, /confirm/i);
+
+    const first = await runCli(home, [
+      "review-graph", "repair-result", taskId,
+      "--assignment", seeded.assignmentId,
+      "--reason", "shorten summary",
+      "--confirm",
+      "--json",
+    ]);
+    assert.equal(first.code, 0, first.stderr);
+    const body = JSON.parse(first.stdout) as Record<string, unknown>;
+    const graph = body.graph as Record<string, unknown>;
+    assert.equal(body.created, true);
+    assert.equal(body.originalFailureCode, "schema-violation");
+    assert.equal((graph.assignments as unknown[]).length, 2);
+    assert.equal(graph.requiresFreshMainReview === true || graph.nextActionCode === "wait-for-result-repair", true);
+    const leakText = `${first.stdout}\n${first.stderr}`;
+    assert.ok(!leakText.includes("privatePacketPath"));
+    assert.ok(!leakText.includes("packet.json"));
+    assert.ok(!leakText.includes("s".repeat(507)));
+    assert.ok(!leakText.includes("keychain"));
+    assert.ok(!/\/Users\//.test(leakText));
+
+    const second = await runCli(home, [
+      "review-graph", "repair-result", taskId,
+      "--assignment", seeded.assignmentId,
+      "--reason", "shorten summary again",
+      "--confirm",
+      "--json",
+    ]);
+    assert.notEqual(second.code, 0);
+    assert.match(`${second.stderr}\n${second.stdout}`, /already consumed|one-shot/i);
+
+    const human = await runCli(home, [
+      "review-graph", "repair-result", taskId,
+      "--assignment", seeded.assignmentId,
+      "--reason", "human path also closed",
+      "--confirm",
+    ]);
+    assert.notEqual(human.code, 0);
+  } finally {
+    await daemon.close();
+    await rm(home, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test("CLI review-graph status shows resultRepair lifecycle and stays privacy-safe", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-cli-repair-status-"));
+  const taskId = "cli-repair-status-candidate";
+  const seeded = await seedTwoJudgeOverlimitGraph(home, taskId);
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    const created = await runCli(home, [
+      "review-graph", "repair-result", taskId,
+      "--assignment", seeded.assignmentId,
+      "--reason", "shorten summary",
+      "--confirm",
+      "--json",
+    ]);
+    assert.equal(created.code, 0, created.stderr);
+    const createdBody = JSON.parse(created.stdout) as Record<string, unknown>;
+    const repairTaskId = String(createdBody.repairTaskId);
+
+    const queuedHuman = await runCli(home, ["review-graph", "status", taskId]);
+    const queuedJson = await runCli(home, ["review-graph", "status", taskId, "--json"]);
+    assert.equal(queuedHuman.code, 0, queuedHuman.stderr);
+    assert.equal(queuedJson.code, 0, queuedJson.stderr);
+    const queuedGraph = JSON.parse(queuedJson.stdout) as {
+      assignments: Array<{
+        id: string;
+        resultRepair?: { status?: string; resultUsable?: boolean; failureCode?: string };
+      }>;
+    };
+    const queuedRepair = queuedGraph.assignments.find((row) => row.id === seeded.assignmentId)?.resultRepair;
+    assert.ok(queuedRepair);
+    assert.match(
+      queuedHuman.stdout,
+      new RegExp(`repair: status=${String(queuedRepair.status)} usable=${String(queuedRepair.resultUsable)}`),
+    );
+    assert.equal(queuedHuman.stdout.includes("failure="), false);
+
+    await daemon.close();
+    const store = new StateStore(home);
+    const now = new Date().toISOString();
+    const repairTask = store.getTask(repairTaskId);
+    store.createAttempt({
+      id: `att-${repairTaskId}`,
+      taskId: repairTaskId,
+      ordinal: 1,
+      status: "succeeded",
+      sessionId: repairTask.sessionId,
+      rawLogPath: path.join(repairTask.paths.logs, "attempt-1.jsonl"),
+      startedAt: now,
+      finishedAt: now,
+      exitCode: 0,
+      resultText: JSON.stringify({
+        schemaVersion: 1,
+        reviewedRevisionId: seeded.revisionId,
+        proposedDisposition: "reject",
+        summary: "Drifted disposition",
+        findings: [],
+      }),
+    });
+    store.setTaskStatus(repairTaskId, "succeeded", {
+      finishedAt: now,
+      currentAttemptId: `att-${repairTaskId}`,
+    });
+    reconcileReviewResultRepair(store, seeded.assignmentId);
+    store.close();
+
+    const restarted = new ForkLightDaemon(home, 0);
+    await restarted.start();
+    try {
+      const failedHuman = await runCli(home, ["review-graph", "status", taskId]);
+      const failedJson = await runCli(home, ["review-graph", "status", taskId, "--json"]);
+      assert.equal(failedHuman.code, 0, failedHuman.stderr);
+      assert.equal(failedJson.code, 0, failedJson.stderr);
+      const failedGraph = JSON.parse(failedJson.stdout) as {
+        assignments: Array<{
+          id: string;
+          resultRepair?: { status?: string; resultUsable?: boolean; failureCode?: string };
+        }>;
+      };
+      const failedRepair = failedGraph.assignments.find((row) => row.id === seeded.assignmentId)?.resultRepair;
+      assert.ok(failedRepair);
+      assert.equal(failedRepair.status, "failed");
+      assert.equal(failedRepair.resultUsable, false);
+      assert.ok(failedRepair.failureCode);
+      assert.match(
+        failedHuman.stdout,
+        new RegExp(
+          `repair: status=${String(failedRepair.status)} usable=${String(failedRepair.resultUsable)} failure=${String(failedRepair.failureCode)}`,
+        ),
+      );
+      const leakText = `${failedHuman.stdout}\n${failedHuman.stderr}\n${queuedHuman.stdout}`;
+      assert.ok(!leakText.includes("privatePacketPath"));
+      assert.ok(!leakText.includes("packet.json"));
+      assert.ok(!leakText.includes("s".repeat(507)));
+      assert.ok(!leakText.includes("keychain"));
+      assert.ok(!/\/Users\//.test(leakText));
+    } finally {
+      await restarted.close();
+    }
+  } finally {
+    await daemon.close().catch(() => undefined);
+    await rm(home, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+function routingAuthInspector(ready: boolean): ProviderAuthInspector {
+  return {
+    hasReadableKeychainValue: () => ready,
+    hasLocalGrokSignIn: () => ready,
+    hasLocalCodexSignIn: () => ready,
+  };
+}
+
+function seedExecutableRoutingProfiles(settings: SettingsService): void {
+  settings.update({
+    workerProfiles: {
+      defaultProfileId: "deepseek-primary",
+      profiles: [
+        {
+          id: "deepseek-primary",
+          label: "DeepSeek Primary",
+          runtime: "claude-code",
+          modelConfigId: "deepseek-flash",
+          effort: "high",
+        },
+        {
+          id: "qwen-secondary",
+          label: "Qwen Secondary",
+          runtime: "claude-code",
+          modelConfigId: "qwen-plus",
+          effort: "medium",
+        },
+      ],
+    },
+  });
+}
+
+function seedComparableRoutingHistory(
+  store: StateStore,
+  taskClass: string,
+): void {
+  const now = new Date().toISOString();
+  const seed = (
+    provider: "deepseek" | "qwen",
+    model: string,
+    effort: "high" | "medium",
+    passed: boolean,
+  ): void => {
+    const task = registerTaskFromSpec(store, {
+      version: 1,
+      name: `${provider}-${effort}-${passed}-${Math.random()}`,
+      project: "/src",
+      goal: "Executable routing evidence",
+      constraints: [],
+      provider: { name: provider, model, keychainService: "forklight.test" },
+      runtime: { name: "claude-code", executable: "claude", effort, maxBudgetUsd: 0.5 },
+      workspace: { exclude: [] },
+      worker: { allowEdits: true, allowedCommands: [], focusPaths: [] },
+      acceptance: { commands: ["npm test"] },
+      taskClass,
+    }, `forklight://test/exec-route-${Date.now()}-${Math.random()}`);
+    store.setTaskStatus(task.id, passed ? "succeeded" : "failed", {
+      finishedAt: now, workerPid: null,
+      ...(passed ? {} : { error: "Independent verification failed" }),
+    });
+    store.createAttempt({
+      id: `${task.id}-a1`, taskId: task.id, ordinal: 1,
+      status: passed ? "succeeded" : "failed",
+      sessionId: task.sessionId, rawLogPath: "/dev/null", startedAt: now, finishedAt: now,
+      ...(passed ? {} : { exitCode: 1 }),
+    });
+    store.addEvent(task.id, undefined, "verification.completed",
+      passed ? "Verification passed" : "Verification failed",
+      {
+        passed,
+        behaviorPassed: passed,
+        policyPassed: true,
+        sourceCompatible: true,
+        commands: passed
+          ? [{ command: "npm test", exitCode: 0, stdout: "", stderr: "", durationMs: 1, timedOut: false }]
+          : [{ command: "npm test", exitCode: 1, stdout: "", stderr: "failed", durationMs: 1, timedOut: false }],
+      });
+  };
+  for (let i = 0; i < 6; i += 1) seed("deepseek", "deepseek-v4-flash", "high", true);
+  for (let i = 0; i < 6; i += 1) seed("qwen", "qwen3.7-plus", "medium", false);
+}
+
+test("routing CLI help documents --profiles, --family, and Competition flags", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-routing-help-"));
+  try {
+    const result = await runCli(home, []);
+    assert.match(result.stdout, /--profiles <json-array>/);
+    assert.match(result.stdout, /--family <family>/);
+    assert.match(result.stdout, /--comp-intent none\|consider\|required/);
+    assert.match(result.stdout, /--comp-triggers <json>/);
+    const helpLines = result.stdout.split("\n");
+    const routingStart = helpLines.findIndex((line) => /^\s*forklight routing\b/.test(line));
+    assert.ok(routingStart >= 0, "top-level help must document the routing command");
+    const routingHelp: string[] = [];
+    for (let index = routingStart; index < helpLines.length; index += 1) {
+      const line = helpLines[index]!;
+      if (index > routingStart && /^\s*forklight\b/.test(line)) break;
+      routingHelp.push(line);
+    }
+    // Routing-only internals stay banned; public setup labels live in other stanzas.
+    assert.doesNotMatch(routingHelp.join("\n"), /endpoint|api[_-]?key|keychain/i);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("routing CLI human output renders a launchable Profile recommendation", () => {
+  const advisory = {
+    taskClass: "coding:ready",
+    evidenceScope: "exact-class",
+    knowledge: "recommendation",
+    overallResult: "recommended",
+    cannotDetermineReasons: [],
+    candidates: [{
+      provider: "deepseek",
+      model: "v4",
+      runtime: "claude-code",
+      effort: "high",
+      workerProfileId: "deepseek-primary",
+      workerLabel: "DeepSeek Primary",
+      resolvedExecutionMode: "single-run",
+      executionPreference: "auto",
+      readinessState: "launchable",
+      canLaunch: true,
+      nextAction: "run-smoke-check",
+      eligible: true,
+      evidence: { relevantSampleCount: 8, modelQualityFailureCount: 0, acceptedDeliveryRate: 1, ignoredNonModelFailures: {} },
+      comparisonEvidence: { relevantSampleCount: 8, modelQualityFailureCount: 0, acceptedDeliveryRate: 1, ignoredNonModelFailures: {} },
+      sampleCoverage: { exactTerminalCount: 8, exactRelevantCount: 8, exactMinRelevantSamples: 5 },
+      cohortParticipation: "compared",
+      factors: [],
+      totalScore: 2,
+      uncertainty: {
+        insufficientSamples: false,
+        insufficientGap: false,
+        incompatibleCost: false,
+        incompatibleCurrency: false,
+        reasons: [],
+      },
+    }],
+    recommendation: {
+      provider: "deepseek",
+      model: "v4",
+      runtime: "claude-code",
+      effort: "high",
+      workerProfileId: "deepseek-primary",
+      workerLabel: "DeepSeek Primary",
+      confidence: 0.5,
+      reasoning: "clear-score-gap:0.5000",
+      coverage: "all-candidates",
+      resolvedExecutionMode: "single-run",
+      executionPreference: "auto",
+      readinessState: "launchable",
+      canLaunch: true,
+      nextAction: "run-smoke-check",
+    },
+    competition: {
+      shouldRunCompetition: false,
+      intent: "none",
+      evaluatedTriggers: [],
+      matchingTriggers: [],
+      suggestedCandidates: 0,
+    },
+    shouldRunCompetition: false,
+    resolvedPolicy: {},
+    omittedFactors: [],
+    allCandidatesCompared: true,
+    cohortCandidateCount: 1,
+    distinctIdentityCount: 1,
+    totalCandidateCount: 1,
+    excludedCandidateCount: 0,
+    recommendationCoverage: "all-candidates",
+  } as unknown as RoutingAdvisoryResponse;
+  const output = formatRoutingAdviceHuman(advisory);
+  assert.match(output, /Overall result: recommended/);
+  assert.match(output, /Runtime: claude-code \| effort: high/);
+  assert.match(output, /Execution: auto -> single-run/);
+  assert.match(output, /Readiness: launchable \[canLaunch=true\]/);
+  assert.match(output, /Next action: run-smoke-check/);
+  assert.doesNotMatch(output, /endpoint|api[_-]?key|keychain|\/Users\//i);
+});
+
+test("routing CLI human output renders cannot determine with stable reasons", () => {
+  const advisory = {
+    taskClass: "coding:unknown",
+    evidenceScope: "none",
+    knowledge: "unknown",
+    overallResult: "cannot-determine",
+    cannotDetermineReasons: ["insufficient-relevant-samples", "no-active-factors"],
+    candidates: [],
+    competition: {
+      shouldRunCompetition: false,
+      intent: "none",
+      evaluatedTriggers: [],
+      matchingTriggers: [],
+      suggestedCandidates: 0,
+    },
+    shouldRunCompetition: false,
+    resolvedPolicy: {},
+    omittedFactors: [],
+    allCandidatesCompared: false,
+    cohortCandidateCount: 0,
+    distinctIdentityCount: 0,
+    totalCandidateCount: 0,
+    excludedCandidateCount: 0,
+    recommendationCoverage: null,
+  } as unknown as RoutingAdvisoryResponse;
+  const output = formatRoutingAdviceHuman(advisory);
+  assert.match(output, /Overall result: cannot determine/);
+  assert.match(output, /Cannot determine because: not enough comparable Tasks; no active comparison factors/);
+  assert.match(output, /Recommendation: cannot determine/);
+  assert.doesNotMatch(output, /endpoint|api[_-]?key|keychain|\/Users\//i);
+});
+
+test("routing CLI human output states strategy and policy without implying auto-start", () => {
+  const advisory = {
+    taskClass: "coding:strategy",
+    evidenceScope: "none",
+    knowledge: "unknown",
+    overallResult: "cannot-determine",
+    cannotDetermineReasons: ["insufficient-relevant-samples"],
+    candidates: [],
+    competition: {
+      shouldRunCompetition: false,
+      intent: "none",
+      evaluatedTriggers: [],
+      matchingTriggers: [],
+      suggestedCandidates: 0,
+    },
+    shouldRunCompetition: false,
+    resolvedPolicy: {},
+    omittedFactors: [],
+    allCandidatesCompared: false,
+    cohortCandidateCount: 0,
+    distinctIdentityCount: 0,
+    totalCandidateCount: 0,
+    excludedCandidateCount: 0,
+    recommendationCoverage: null,
+    strategyPolicy: {
+      strategy: {
+        determination: "cannot-determine",
+        reasons: ["insufficient-relevant-samples"],
+        evidenceScope: "none",
+        rows: [{
+          provider: "deepseek",
+          model: "v4",
+          runtime: "claude-code",
+          effort: "high",
+          executionMode: "single-run",
+          terminalTaskCount: 1,
+          relevantSampleCount: 1,
+          acceptedDeliveryCount: 0,
+          modelQualityFailureCount: 0,
+          ignoredNonModelTaskCount: 0,
+          ambiguousFailureCount: 0,
+          score: 0,
+          compared: false,
+        }],
+        createsWork: false,
+      },
+      competitionPolicy: {
+        determination: "not-advised",
+        reasons: ["intent-none"],
+        intent: "none",
+        shouldRunCompetition: false,
+        validTriggers: [],
+        matchingCompetitionCount: 0,
+        admission: { completed: 0, running: 0, pending: 0, legacyUnknownReason: 0 },
+        outcomes: { accept: 0, reject: 0, revise: 0, noDecision: 0 },
+        createsWork: false,
+        historyCanOverrideIntentNone: false,
+      },
+      judgePolicy: {
+        determination: "cannot-determine",
+        reasons: ["requirement-absent"],
+        declaredRequiredJudges: { present: false, depths: [], mixed: false },
+        usableOutcomeCount: 0,
+        unusableOutcomeCount: 0,
+        distinctUnderlyingIdentityCount: 0,
+        votes: false,
+        infersRequirement: false,
+        assignsOrReplacesJudge: false,
+        changesIntegrationAuthority: false,
+      },
+      mainDirectHistory: {
+        present: true,
+        recordCount: 1,
+        openCount: 0,
+        completedCount: 1,
+        abandonedCount: 0,
+        reasonDistribution: { "small-clear-change": 1 },
+        comparedAsWorkerEvidence: false,
+      },
+    },
+  } as unknown as RoutingAdvisoryResponse;
+  const output = formatRoutingAdviceHuman(advisory);
+  assert.match(output, /Execution strategy: cannot determine/);
+  assert.match(output, /Strategy deepseek\/v4 claude-code\/high single-run: samples=1/);
+  assert.match(output, /Competition policy: not advised \(Main intent is none\)/);
+  assert.match(output, /History does not start a Competition/);
+  assert.doesNotMatch(output, /\d+ matching/);
+  assert.match(output, /Judge policy: cannot determine/);
+  assert.match(output, /No vote and no inferred requirement/);
+  assert.match(output, /Main-direct history: 1 record\(s\) in this scope/);
+  assert.doesNotMatch(output, /automatically start|majority vote|replace a Judge/i);
+});
+
+test("coordinator modelRouting keeps historical scores independent of current readiness", () => {
+  const store = new StateStore(path.join(tmpdir(), `fl-mr-exec-${Date.now()}-${Math.random()}`));
+  const settings = new SettingsService(store);
+  seedExecutableRoutingProfiles(settings);
+  seedComparableRoutingHistory(store, "coding:exec-ready");
+  const launchable = new DaemonCoordinator(store, settings, 0, routingAuthInspector(true));
+  const blocked = new DaemonCoordinator(store, settings, 0, routingAuthInspector(false));
+  try {
+    const ready = launchable.modelRouting(
+      "coding:exec-ready",
+      undefined, undefined, "none", undefined,
+      ["deepseek-primary", "qwen-secondary"],
+    );
+    const unavailable = blocked.modelRouting(
+      "coding:exec-ready",
+      undefined, undefined, "none", undefined,
+      ["deepseek-primary", "qwen-secondary"],
+    );
+    assert.equal(ready.knowledge, "recommendation");
+    assert.equal(unavailable.knowledge, "recommendation");
+    assert.equal(ready.recommendation?.workerProfileId, "deepseek-primary");
+    assert.equal(unavailable.recommendation?.workerProfileId, "deepseek-primary");
+    assert.notEqual(unavailable.recommendation?.workerProfileId, "qwen-secondary");
+    assert.equal(ready.shouldRunCompetition, false);
+    assert.equal(unavailable.shouldRunCompetition, false);
+    assert.deepEqual(
+      ready.candidates.map((c) => ({ id: c.workerProfileId, score: c.totalScore })),
+      unavailable.candidates.map((c) => ({ id: c.workerProfileId, score: c.totalScore })),
+    );
+    if (ready.recommendation?.canLaunch === true) {
+      assert.equal(ready.overallResult, "recommended");
+      assert.equal(ready.recommendation?.runtime, "claude-code");
+      assert.equal(ready.recommendation?.effort, "high");
+      assert.ok(ready.recommendation?.resolvedExecutionMode);
+      assert.ok(ready.recommendation?.nextAction);
+    } else {
+      assert.equal(ready.overallResult, "historical-best-not-launchable");
+    }
+    assert.equal(unavailable.recommendation?.canLaunch, false);
+    assert.equal(unavailable.overallResult, "historical-best-not-launchable");
+    const blockedHuman = formatRoutingAdviceHuman(unavailable);
+    assert.match(blockedHuman, /Overall result: historical best not launchable/);
+    assert.match(blockedHuman, /No substitute Worker was selected/);
+    if (ready.overallResult === "recommended") {
+      const readyHuman = formatRoutingAdviceHuman(ready);
+      assert.match(readyHuman, /Overall result: recommended/);
+      assert.match(readyHuman, /Runtime: claude-code \| effort: high/);
+      assert.match(readyHuman, /canLaunch=true/);
+    }
+    const serialized = JSON.stringify(ready) + JSON.stringify(unavailable);
+    assert.doesNotMatch(serialized, /endpoint|api[_-]?key|keychain|\/Users\/|auth\.json/i);
+  } finally {
+    store.close();
+  }
+});
+
+test("coordinator legacy modelRouting omits Profile execution and readiness", () => {
+  const store = new StateStore(path.join(tmpdir(), `fl-mr-legacy-${Date.now()}-${Math.random()}`));
+  const settings = new SettingsService(store);
+  const coordinator = new DaemonCoordinator(store, settings);
+  try {
+    const result = coordinator.modelRouting("coding:legacy-exec", [
+      { provider: "deepseek", model: "v4" },
+      { provider: "qwen", model: "plus" },
+    ], undefined, "none");
+    assert.equal(result.overallResult, "cannot-determine");
+    assert.equal(result.shouldRunCompetition, false);
+    for (const candidate of result.candidates) {
+      assert.equal(candidate.workerProfileId, undefined);
+      assert.equal(candidate.resolvedExecutionMode, undefined);
+      assert.equal(candidate.canLaunch, undefined);
+    }
+    assert.ok(result.strategyPolicy);
+    const human = formatRoutingAdviceHuman(result);
+    assert.match(human, /Execution strategy: cannot determine/);
+    assert.match(human, /Competition policy: not advised/);
+    assert.match(human, /History does not start a Competition/);
+    assert.doesNotMatch(human, /\d+ matching/);
+    assert.match(human, /Judge policy: cannot determine/);
+    assert.match(human, /no inferred requirement/);
+    assert.match(human, /Main-direct history:/);
+    assert.doesNotMatch(human, /automatically start|majority vote|replace a Judge/i);
+  } finally {
+    store.close();
+  }
+});
+
+// --- Complete Main usage CLI (M4-A) ---
+
+const MU_CLI_USAGE = {
+  type: "turn.completed",
+  usage: {
+    input_tokens: 4000, cached_input_tokens: 1000, cache_write_input_tokens: 0,
+    output_tokens: 500, reasoning_output_tokens: 100,
+  },
+};
+
+function runMainTokenCli(home: string, arguments_: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  return new Promise((resolve) => {
+    execFile(process.execPath, cliArgs(...arguments_), {
+      cwd: root, encoding: "utf8", env: { ...process.env, FORKLIGHT_HOME: home },
+    }, (error, stdout, stderr) => {
+      const code = (error as (Error & { code?: unknown }) | null)?.code;
+      resolve({
+        stdout: String(stdout), stderr: String(stderr),
+        exitCode: error === null ? 0 : typeof code === "number" ? code : 1,
+      });
+    });
+  });
+}
+
+test("main-token CLI capture and status share count-only JSON with no saving field", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-m4a-cli-"));
+  const store = new StateStore(home);
+  const spec = parseTaskSpec({
+    version: 1, name: "cli-mu", project: "/tmp", goal: "T",
+    taskClass: "edit-task", taskFamily: "forklight-storage-lifecycle",
+    directCodexProfileId: "codex-main-v1", acceptance: { commands: ["true"] },
+  }, "/tmp");
+  store.createTask(buildTaskRecord({
+    spec, taskFile: "/tmp/cli-mu.yaml", home, id: "cli-mu",
+    sessionId: "s-cli-mu", createdAt: "2026-08-17T12:00:00.000Z",
+  }));
+  store.close();
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    const empty = await runMainTokenCli(home, [
+      "main-token", "status", "--task-id", "cli-mu", "--comparison-id", "cmp-cli", "--json",
+    ]);
+    assert.equal(empty.exitCode, 0, empty.stderr);
+    const emptyJson = JSON.parse(empty.stdout) as Record<string, unknown>;
+    assert.deepEqual(emptyJson.missingRoles, ["direct-main", "delegated-main"]);
+    assert.equal(emptyJson.countComplete, false);
+    assert.equal("saving" in emptyJson, false);
+    assert.equal("change" in emptyJson, false);
+
+    const capture = await runMainTokenCli(home, [
+      "main-token", "capture", "--task-id", "cli-mu", "--comparison-id", "cmp-cli",
+      "--role", "direct-main", "--run-ref", "codex-run:cli-direct",
+      "--usage", JSON.stringify(MU_CLI_USAGE), "--json",
+    ]);
+    assert.equal(capture.exitCode, 0, capture.stderr);
+    const sample = JSON.parse(capture.stdout) as Record<string, unknown>;
+    assert.equal(sample.inputTokens, 3000);
+    assert.equal(sample.grossTokens, 4500);
+    assert.equal(sample.source, "codex-terminal-result");
+    assert.equal(sample.taskFamily, "forklight-storage-lifecycle");
+    assert.equal("saving" in sample, false);
+
+    const status1 = await runMainTokenCli(home, [
+      "main-token", "status", "--task-id", "cli-mu", "--comparison-id", "cmp-cli", "--json",
+    ]);
+    const status2 = await runMainTokenCli(home, [
+      "main-token", "status", "--task-id", "cli-mu", "--comparison-id", "cmp-cli", "--json",
+    ]);
+    assert.equal(status1.exitCode, 0, status1.stderr);
+    assert.equal(status2.stdout, status1.stdout);
+    const statusJson = JSON.parse(status1.stdout) as Record<string, unknown>;
+    assert.deepEqual(statusJson.capturedRoles, ["direct-main"]);
+    assert.deepEqual(statusJson.missingRoles, ["delegated-main"]);
+    assert.equal("saving" in statusJson, false);
+    assert.equal("directCodexSavings" in statusJson, false);
+
+    const human = await runMainTokenCli(home, [
+      "main-token", "status", "--task-id", "cli-mu", "--comparison-id", "cmp-cli",
+    ]);
+    assert.equal(human.exitCode, 0, human.stderr);
+    assert.match(human.stdout, /missingRoles: delegated-main/);
+    assert.doesNotMatch(human.stdout, /saving|change|quality|familyValue/i);
+
+    const tokens = await runMainTokenCli(home, ["tokens", "cli-mu", "--json"]);
+    assert.equal(tokens.exitCode, 0, tokens.stderr);
+    const tokenReport = JSON.parse(tokens.stdout) as { report?: Record<string, unknown> };
+    assert.equal("directCodexSavings" in (tokenReport.report ?? {}), true);
+
+    const check = new StateStore(home);
+    const afterStatus = check.countMainUsageSamples();
+    assert.equal(afterStatus, 1);
+    assert.equal(check.listExchangeReceipts("cli-mu").length, 0);
+    check.close();
+  } finally {
+    await daemon.close();
+  }
+});
+
+test("main-token CLI capture-episode shares count-only JSON with status", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-m4e-cli-ep-"));
+  const store = new StateStore(home);
+  const spec = parseTaskSpec({
+    version: 1, name: "cli-ep", project: "/tmp", goal: "T",
+    taskClass: "edit-task", taskFamily: "forklight-storage-lifecycle",
+    directCodexProfileId: "codex-main-v1", acceptance: { commands: ["true"] },
+  }, "/tmp");
+  store.createTask(buildTaskRecord({
+    spec, taskFile: "/tmp/cli-ep.yaml", home, id: "cli-ep",
+    sessionId: "s-cli-ep", createdAt: "2026-08-17T12:00:00.000Z",
+  }));
+  store.close();
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  const first = {
+    type: "turn.completed",
+    usage: {
+      input_tokens: 4000, cached_input_tokens: 1000, cache_write_input_tokens: 200,
+      output_tokens: 500, reasoning_output_tokens: 100,
+    },
+  };
+  const second = {
+    type: "turn.completed",
+    usage: {
+      input_tokens: 2500, cached_input_tokens: 800, cache_write_input_tokens: 100,
+      output_tokens: 400, reasoning_output_tokens: 80,
+    },
+  };
+  const segments = [
+    { runRef: "codex-run:cli-ep-a", usage: first },
+    { runRef: "codex-run:cli-ep-b", usage: second },
+  ];
+  try {
+    const capture = await runMainTokenCli(home, [
+      "main-token", "capture-episode", "--task-id", "cli-ep", "--comparison-id", "cmp-cli-ep",
+      "--role", "delegated-main", "--run-ref", "codex-run:cli-episode",
+      "--segments", JSON.stringify(segments), "--json",
+    ]);
+    assert.equal(capture.exitCode, 0, capture.stderr);
+    const sample = JSON.parse(capture.stdout) as Record<string, unknown>;
+    assert.equal(sample.schemaVersion, 2);
+    assert.equal(sample.source, "codex-terminal-result");
+    assert.equal("saving" in sample, false);
+    const sampleSegments = sample.segments as Array<Record<string, unknown>>;
+    assert.equal(sampleSegments.length, 2);
+    assert.equal(sampleSegments[0]?.runRef, "codex-run:cli-ep-a");
+    assert.equal(
+      sample.inputTokens,
+      (sampleSegments[0]?.inputTokens as number) + (sampleSegments[1]?.inputTokens as number),
+    );
+    assert.equal(
+      sample.grossTokens,
+      (sampleSegments[0]?.grossTokens as number) + (sampleSegments[1]?.grossTokens as number),
+    );
+    const status1 = await runMainTokenCli(home, [
+      "main-token", "status", "--task-id", "cli-ep", "--comparison-id", "cmp-cli-ep", "--json",
+    ]);
+    const status2 = await runMainTokenCli(home, [
+      "main-token", "status", "--task-id", "cli-ep", "--comparison-id", "cmp-cli-ep", "--json",
+    ]);
+    assert.equal(status1.exitCode, 0, status1.stderr);
+    assert.equal(status2.stdout, status1.stdout);
+    const statusJson = JSON.parse(status1.stdout) as Record<string, unknown>;
+    assert.deepEqual(statusJson.capturedRoles, ["delegated-main"]);
+    assert.equal("saving" in statusJson, false);
+    const statusSample = (statusJson.samples as Array<Record<string, unknown>>)[0];
+    assert.equal(statusSample?.inputTokens, sample.inputTokens);
+    assert.equal(statusSample?.grossTokens, sample.grossTokens);
+    assert.equal((statusSample?.segments as unknown[]).length, 2);
+    const human = await runMainTokenCli(home, [
+      "main-token", "status", "--task-id", "cli-ep", "--comparison-id", "cmp-cli-ep",
+    ]);
+    assert.equal(human.exitCode, 0, human.stderr);
+    assert.match(human.stdout, /segments: 2/);
+    assert.match(human.stdout, /codex-run:cli-ep-a/);
+    assert.doesNotMatch(human.stdout, /saving|prompt|SECRET/i);
+  } finally {
+    await daemon.close();
+  }
+});
+
+function seedCliComparablePair(home: string): void {
+  const store = new StateStore(home);
+  const spec = parseTaskSpec({
+    version: 1, name: "cli-pair", project: "/tmp", goal: "T",
+    taskClass: "edit-task", taskFamily: "forklight-storage-lifecycle",
+    directCodexProfileId: "codex-main-v1", acceptance: { commands: ["true"] },
+  }, "/tmp");
+  store.createTask(buildTaskRecord({
+    spec, taskFile: "/tmp/cli-pair.yaml", home, id: "cli-pair",
+    sessionId: "s-cli-pair", createdAt: "2026-08-17T12:00:00.000Z",
+  }));
+  store.saveMainUsageSample({
+    sampleId: "clipaird", forklightTaskId: "cli-pair", comparisonId: "cmp-cli-pair",
+    role: "direct-main", taskClass: "edit-task", taskFamily: "forklight-storage-lifecycle",
+    directCodexProfileId: "codex-main-v1", inputTokens: 4000, outputTokens: 500,
+    cacheReadInputTokens: 0, cacheCreationInputTokens: 0, grossTokens: 4500,
+    source: "codex-terminal-result", runRef: "codex-run:cli-pair-d",
+    capturedAt: "2026-08-17T12:00:00.000Z", schemaVersion: 1,
+  });
+  store.saveMainUsageSample({
+    sampleId: "clipairg", forklightTaskId: "cli-pair", comparisonId: "cmp-cli-pair",
+    role: "delegated-main", taskClass: "edit-task", taskFamily: "forklight-storage-lifecycle",
+    directCodexProfileId: "codex-main-v1", inputTokens: 1200, outputTokens: 300,
+    cacheReadInputTokens: 0, cacheCreationInputTokens: 0, grossTokens: 1500,
+    source: "codex-terminal-result", runRef: "codex-run:cli-pair-g",
+    capturedAt: "2026-08-17T12:00:00.000Z", schemaVersion: 1,
+  });
+  const digest = "a".repeat(64);
+  const verification = store.addEvent("cli-pair", "att-cli-pair", "verification.completed", "passed", { passed: true });
+  store.addEvent("cli-pair", "att-cli-pair", "main-review.completed", "accept", {
+    decision: "accept", reason: "accepted", attemptId: "att-cli-pair",
+    verificationEventSequence: verification.sequence,
+    candidateRevisionId: "rev-cli-pair", acceptedPatchDigest: digest,
+  });
+  store.saveIntegrationReceipt({
+    id: "rcpt-cli-int", taskId: "cli-pair", patchDigest: digest, affectedFiles: ["src/cli.ts"],
+    rejectionReasons: [], sourceEvidence: {}, createdAt: "2026-08-17T12:00:00.000Z",
+    expiresAt: "2099-01-01T00:00:00.000Z", consumed: true,
+  });
+  store.saveIntegrationResult({
+    id: "intopcli", receiptId: "rcpt-cli-int", taskId: "cli-pair", status: "applied",
+    appliedAt: "2026-08-17T12:00:00.000Z", createdAt: "2026-08-17T12:00:00.000Z",
+    stages: [
+      { stage: "source-applied", status: "passed" },
+      { stage: "source-verified", status: "passed" },
+      { stage: "artifact-built", status: "passed" },
+      { stage: "runtime-activated", status: "passed" },
+    ],
+  });
+  store.close();
+}
+
+test("main-token CLI assess and pair-report launch twice with matching report JSON", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-m4b-cli-"));
+  seedCliComparablePair(home);
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  const assessArgs = [
+    "main-token", "assess", "--task-id", "cli-pair", "--comparison-id", "cmp-cli-pair",
+    "--same-scope", "true", "--same-acceptance", "true", "--delegated-quality-not-lower", "true",
+    "--direct-verification-ref", "dvref1", "--delegated-integration-id", "intopcli",
+    "--reviewer", "main-codex", "--assessed-at", "2026-08-17T12:30:00.000Z",
+    "--schema-version", "1", "--confirm", "--json",
+  ];
+  try {
+    const assess1 = await runMainTokenCli(home, assessArgs);
+    assert.equal(assess1.exitCode, 0, assess1.stderr);
+    const assessJson1 = JSON.parse(assess1.stdout) as Record<string, unknown>;
+    assert.equal(assessJson1.outcome, "accepted");
+    const assess2 = await runMainTokenCli(home, assessArgs);
+    assert.equal(assess2.exitCode, 0, assess2.stderr);
+    const assessJson2 = JSON.parse(assess2.stdout) as Record<string, unknown>;
+    assert.deepEqual(assessJson2.reasons, ["duplicate-evidence"]);
+
+    const reportArgs = [
+      "main-token", "pair-report", "--task-id", "cli-pair", "--comparison-id", "cmp-cli-pair", "--json",
+    ];
+    const report1 = await runMainTokenCli(home, reportArgs);
+    const report2 = await runMainTokenCli(home, reportArgs);
+    assert.equal(report1.exitCode, 0, report1.stderr);
+    assert.equal(report2.exitCode, 0, report2.stderr);
+    assert.equal(report1.stdout, report2.stdout);
+    const reportJson = JSON.parse(report1.stdout) as Record<string, unknown>;
+    assert.equal(reportJson.validity, "accepted");
+    assert.equal(reportJson.directGrossTokens, 4500);
+    assert.equal(reportJson.delegatedGrossTokens, 1500);
+    assert.equal(reportJson.signedChange, 3000);
+    assert.equal(reportJson.method, "codex-terminal-result");
+    assert.equal((reportJson.saving as { status?: string }).status, "saving");
+    for (const key of ["change", "savings", "directCodexSavings", "calibration", "workerTokens", "cost"]) {
+      assert.equal(key in reportJson, false);
+    }
+
+    const status = await runMainTokenCli(home, [
+      "main-token", "status", "--task-id", "cli-pair", "--comparison-id", "cmp-cli-pair", "--json",
+    ]);
+    const statusJson = JSON.parse(status.stdout) as Record<string, unknown>;
+    assert.equal("change" in statusJson, false);
+    assert.equal("saving" in statusJson, false);
+  } finally {
+    await daemon.close();
+  }
+});
+
+test("value-report CLI empty and seeded launches agree and stay read-only", async () => {
+  const emptyHome = await mkdtemp(path.join(tmpdir(), "fl-m4c-cli-empty-"));
+  const emptyDaemon = new ForkLightDaemon(emptyHome, 0);
+  await emptyDaemon.start();
+  try {
+    const emptyArgs = ["value-report", "--families", JSON.stringify(["forklight-storage-lifecycle"]), "--json"];
+    const empty1 = await runMainTokenCli(emptyHome, emptyArgs);
+    const empty2 = await runMainTokenCli(emptyHome, emptyArgs);
+    assert.equal(empty1.exitCode, 0, empty1.stderr);
+    assert.equal(empty2.stdout, empty1.stdout);
+    const emptyJson = JSON.parse(empty1.stdout) as Record<string, unknown>;
+    assert.equal(emptyJson.overall, "cannot-determine");
+    assert.ok((emptyJson.reasons as string[]).includes("empty-store"));
+    assert.ok((emptyJson.reasons as string[]).includes("uncovered-family"));
+    assert.equal(emptyJson.createdWork, false);
+    const emptyStore = new StateStore(emptyHome);
+    assert.equal(emptyStore.listTasks().length, 0);
+    emptyStore.close();
+  } finally {
+    await emptyDaemon.close();
+  }
+
+  const home = await mkdtemp(path.join(tmpdir(), "fl-m4c-cli-seed-"));
+  seedCliComparablePair(home);
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    const assess = await runMainTokenCli(home, [
+      "main-token", "assess", "--task-id", "cli-pair", "--comparison-id", "cmp-cli-pair",
+      "--same-scope", "true", "--same-acceptance", "true", "--delegated-quality-not-lower", "true",
+      "--direct-verification-ref", "dvref1", "--delegated-integration-id", "intopcli",
+      "--reviewer", "main-codex", "--assessed-at", "2026-08-17T12:30:00.000Z",
+      "--schema-version", "1", "--confirm", "--json",
+    ]);
+    assert.equal(assess.exitCode, 0, assess.stderr);
+    const reportArgs = ["value-report", "--families", JSON.stringify(["forklight-storage-lifecycle"]), "--json"];
+    const report1 = await runMainTokenCli(home, reportArgs);
+    const report2 = await runMainTokenCli(home, reportArgs);
+    assert.equal(report1.exitCode, 0, report1.stderr);
+    assert.equal(report2.stdout, report1.stdout);
+    const reportJson = JSON.parse(report1.stdout) as Record<string, unknown>;
+    assert.equal(reportJson.overall, "proven");
+    const families = reportJson.families as Array<Record<string, unknown>>;
+    assert.equal(families[0]?.claim, "proven-lower");
+    const comparisons = families[0]?.comparisons as Array<Record<string, unknown>>;
+    assert.equal(comparisons[0]?.signedChange, 3000);
+    assert.equal(comparisons[0]?.contributesProvenLower, true);
+    for (const key of ["change", "savings", "directCodexSavings", "averagePercentage", "bestPair", "prompt"]) {
+      assert.equal(key in reportJson, false);
+    }
+    const human = await runMainTokenCli(home, [
+      "value-report", "--families", JSON.stringify(["forklight-storage-lifecycle"]),
+    ]);
+    assert.equal(human.exitCode, 0, human.stderr);
+    assert.match(human.stdout, /overall: proven/);
+    assert.match(human.stdout, /claim: proven-lower/);
+    assert.match(human.stdout, /signedChange: 3000/);
+    assert.match(human.stdout, /unavailable \(no-attempts\)/);
+    assert.doesNotMatch(human.stdout, /averagePercentage|bestPair|directCodexSavings/);
+  } finally {
+    await daemon.close();
+  }
+});
+
+test("CLI delivery prepare and decide return the canonical checkpoint twice", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "fl-cli-delivery-"));
+  const sourceDir = path.join(home, "source");
+  await mkdir(path.join(sourceDir, "src"), { recursive: true });
+  await writeFile(path.join(sourceDir, "readme.md"), "# hello\n\nOriginal.\n");
+  await writeFile(path.join(sourceDir, "src/app.ts"), "export const n = 1;\n");
+  const store = new StateStore(home);
+  const taskId = "cli-delivery-1";
+  const paths = taskPaths(home, taskId);
+  const spec = {
+    version: 1,
+    name: "CLI delivery",
+    project: sourceDir,
+    goal: "Ship a small change",
+    constraints: [],
+    provider: {
+      name: "deepseek",
+      model: "deepseek-v4-flash",
+      keychainService: "forklight.deepseek.api-key",
+    },
+    runtime: { name: "claude-code", executable: "claude", effort: "low", maxBudgetUsd: 0.1 },
+    workspace: { exclude: [".git", "node_modules"] },
+    worker: { allowEdits: true, allowedCommands: [], focusPaths: ["src", "readme.md"] },
+    acceptance: { commands: ["true"] },
+    reviewRequirement: { requiredJudges: 0, reason: "Explicit skip for CLI fixture" },
+  } as TaskRecord["spec"];
+  await prepareWorkspace(spec, paths);
+  await mkdir(path.join(paths.workspace, "src"), { recursive: true });
+  await writeFile(path.join(paths.workspace, "readme.md"), "# hello\n\nChanged.\n");
+  await writeFile(path.join(paths.workspace, "src/app.ts"), "export const n = 2;\n");
+  await writeWorkspacePatchReport(paths, createPathPolicy(spec));
+  const now = new Date().toISOString();
+  store.createTask({
+    id: taskId,
+    name: spec.name,
+    status: "succeeded",
+    sourcePath: sourceDir,
+    taskFile: "forklight://test/cli-delivery",
+    spec,
+    paths,
+    sessionId: "session-1",
+    currentAttemptId: "attempt-1",
+    createdAt: now,
+    updatedAt: now,
+  });
+  store.createAttempt({
+    id: "attempt-1",
+    taskId,
+    ordinal: 1,
+    status: "succeeded",
+    sessionId: "session-1",
+    rawLogPath: path.join(paths.logs, "attempt-1.jsonl"),
+    startedAt: now,
+    finishedAt: now,
+    exitCode: 0,
+  });
+  const verEvent = store.addEvent(taskId, "attempt-1", "verification.completed", "passed", {
+    passed: true,
+    behaviorPassed: true,
+    policyPassed: true,
+    sourceCompatible: true,
+    commands: [{ command: "true", exitCode: 0, stdout: "", stderr: "", durationMs: 1, timedOut: false }],
+    diffPath: paths.diff,
+    sourceUnchanged: true,
+  });
+  const revision = await captureCandidateRevision(
+    store, store.getTask(taskId), store.getAttempt("attempt-1"), verEvent.sequence, true,
+    ["readme.md", "src/app.ts"], 2, 4,
+  );
+  store.close();
+
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  try {
+    const prepareArgs = [
+      "delivery", "prepare", "--task", taskId, "--reason", "Explicit skip",
+      "--timeout-ms", "2000", "--confirm", "--json",
+    ];
+    const first = await runCli(home, prepareArgs, 20_000);
+    assert.equal(first.code, 0, first.stderr);
+    const firstJson = JSON.parse(first.stdout) as {
+      kind?: string;
+      candidate?: { revisionId?: string; digest?: string };
+      nextActionCode?: string;
+      observation?: { outcome?: string };
+    };
+    assert.equal(firstJson.kind, "main-delivery-checkpoint");
+    assert.equal(firstJson.observation?.outcome, "ready");
+    assert.equal(firstJson.candidate?.revisionId, revision.id);
+    assert.equal(firstJson.candidate?.digest, revision.patchDigest);
+    assert.equal(firstJson.nextActionCode, "record-main-review");
+
+    const second = await runCli(home, prepareArgs, 20_000);
+    assert.equal(second.code, 0, second.stderr);
+    const secondJson = JSON.parse(second.stdout) as { candidate?: { revisionId?: string } };
+    assert.equal(secondJson.candidate?.revisionId, revision.id);
+
+    const human = await runCli(home, [
+      "delivery", "prepare", "--task", taskId, "--reason", "Explicit skip",
+      "--timeout-ms", "2000", "--confirm",
+    ], 20_000);
+    assert.equal(human.code, 0, human.stderr);
+    assert.match(human.stdout, /delivery: prepare ready/);
+    assert.match(human.stdout, /next: record-main-review/);
+
+    const decideArgs = [
+      "delivery", "decide", taskId, "--decision", "accept",
+      "--revision", revision.id, "--digest", revision.patchDigest,
+      "--reason", "Exact Candidate is acceptable", "--timeout-ms", "20000", "--confirm", "--json",
+    ];
+    const decide1 = await runCli(home, decideArgs, 30_000);
+    assert.equal(decide1.code, 0, decide1.stderr);
+    const decideJson = JSON.parse(decide1.stdout) as {
+      mainDecision?: { decision?: string };
+      integration?: { operationId?: string; status?: string; resultStatus?: string };
+      preflight?: { passed?: boolean };
+      nextActionCode?: string;
+    };
+    assert.equal(decideJson.mainDecision?.decision, "accept");
+    assert.equal(decideJson.preflight?.passed, true);
+    assert.ok(decideJson.integration?.operationId);
+    assert.equal(decideJson.integration?.resultStatus, "applied");
+
+    const decide2 = await runCli(home, decideArgs, 30_000);
+    assert.equal(decide2.code, 0, decide2.stderr);
+    const decide2Json = JSON.parse(decide2.stdout) as {
+      mainDecision?: { decision?: string };
+      integration?: { operationId?: string; resultStatus?: string };
+    };
+    assert.equal(decide2Json.mainDecision?.decision, "accept");
+    assert.equal(decide2Json.integration?.operationId, decideJson.integration?.operationId);
+    assert.equal(decide2Json.integration?.resultStatus, "applied");
+
+    const decideHuman = await runCli(home, [
+      "delivery", "decide", taskId, "--decision", "accept",
+      "--revision", revision.id, "--digest", revision.patchDigest,
+      "--reason", "Exact Candidate is acceptable", "--timeout-ms", "20000", "--confirm",
+    ], 30_000);
+    assert.equal(decideHuman.code, 0, decideHuman.stderr);
+    assert.match(decideHuman.stdout, /delivery: decide ready/);
+    assert.match(decideHuman.stdout, /mainDecision: accept/);
+    assert.match(decideHuman.stdout, /integration: operation=/);
+  } finally {
+    await daemon.close();
+  }
+});
+
+test("backup CLI requires confirm for create and never starts a daemon", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-cli-backup-"));
+  const dest = path.join(path.dirname(home), `backup-${path.basename(home)}`);
+  try {
+    const store = new StateStore(home);
+    store.close();
+    const missingConfirm = await runCli(home, ["backup", "create", "--destination", dest]);
+    assert.notEqual(missingConfirm.code, 0);
+    assert.match(missingConfirm.stderr, /--confirm/);
+    assert.equal(existsSync(daemonSocketPath(home)), false);
+
+    const preview = await runCli(home, ["backup", "preview", "--destination", dest, "--json"]);
+    assert.equal(preview.code, 0, preview.stderr);
+    const parsed = JSON.parse(preview.stdout) as {
+      included?: string[];
+      excluded?: string[];
+      integrity?: { quickCheck?: string };
+      impact?: string;
+      nextAction?: string;
+      credentials?: { keychain?: string };
+      privacy?: string;
+    };
+    assert.ok(Array.isArray(parsed.included));
+    assert.ok(Array.isArray(parsed.excluded));
+    assert.equal(parsed.integrity?.quickCheck, "ok");
+    assert.ok((parsed.impact ?? "").length > 0);
+    assert.equal(parsed.nextAction, "create-with-confirm");
+    assert.equal(parsed.credentials?.keychain, "not-included");
+    assert.equal(parsed.privacy, "keep-private");
+    assert.equal(existsSync(daemonSocketPath(home)), false);
+
+    const created = await runCli(home, [
+      "backup", "create", "--destination", dest, "--confirm", "--json",
+    ]);
+    assert.equal(created.code, 0, created.stderr);
+    assert.equal(existsSync(daemonSocketPath(home)), false);
+    const inspected = await runCli(home, ["backup", "inspect", dest, "--json"]);
+    assert.equal(inspected.code, 0, inspected.stderr);
+    const restorePreview = await runCli(home, ["backup", "restore", dest, "--json"]);
+    assert.equal(restorePreview.code, 0, restorePreview.stderr);
+    assert.equal(existsSync(daemonSocketPath(home)), false);
+    const cliSource = await readFile(new URL("../src/cli/backup.ts", import.meta.url), "utf8");
+    assert.doesNotMatch(cliSource, /ensureDaemon|stopDaemon|restartDaemon|replaceHubOwner/);
+  } finally {
+    await rm(home, { recursive: true, force: true }).catch(() => undefined);
+    await rm(dest, { recursive: true, force: true }).catch(() => undefined);
   }
 });

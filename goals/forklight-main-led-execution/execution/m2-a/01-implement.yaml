@@ -1,0 +1,161 @@
+version: 2
+name: M2-A implement truthful Grok 4.6 persistent-session execution
+project: /Users/yijunwang/code/forklight
+taskClass: m2-grok-46-persistent-session-truth
+taskFamily: forklight-runtime-recovery
+workerProfileId: local-grok-builder
+deliveryProfileId: forklight-self-upgrade
+
+provider:
+  name: xai
+  model: grok-4.6
+  keychainService: forklight.xai.api-key
+runtime:
+  name: grok-build
+  executable: grok
+  effort: xhigh
+  maxBudgetUsd: null
+
+contract:
+  outcome: >-
+    ForkLight provides a saved Grok 4.6 Xhigh Worker path whose new-Task execution mode is
+    truthfully persistent-session, resumes one Task with its original Grok session id, preserves
+    omitted legacy single-run and Codex native-goal behavior, and never labels Grok as native Goal.
+  presentation:
+    summary: 把 Grok 4.6 Xhigh 的同一 Session 恢复能力如实命名为 persistent-session，不虚标 native Goal。
+    language: zh-CN
+  context:
+    - The sole accepted Work Item spec is specs/m2-a-grok-execution-truth/spec.md; read it before editing.
+    - This replacement is explicitly authorized after the prior ordinary Task admitted verifier-created dist output into its Candidate.
+    - This Task is a real ForkLight Goal milestone and freezes dist/** as generated before Worker launch.
+    - The current Grok adapter already launches with --session-id and resumes with --resume using task.sessionId, but public execution truth is single-run.
+    - The live host already launched grok-4.6 at xhigh. Grok nativeGoal remains unsupported.
+    - ForkLight serves one local developer; do not add locks, leases, checksums, content addressing, version handshakes, or distributed coordination.
+    - Preserve all source work. Edit only the isolated Workspace. Never commit, push, change remotes, access credentials, or edit Hub.
+  inScope:
+    - Add persistent-session as a closed execution preference and resolved mode with capability-aware validation.
+    - Resolve new Grok auto execution to persistent-session while forced Grok native-goal remains rejected.
+    - Preserve omitted legacy preference as single-run and preserve Codex native-goal behavior.
+    - Project requested and resolved mode consistently through Task parsing, preview, readiness, health, inspection, and Grok start/resume evidence.
+    - Add an exact Grok 4.6 Xhigh model configuration and saved-capable Worker Profile without rewriting persisted Profile arrays.
+    - Prove first launch and resume use one Task session id and update only narrow configuration/client documentation.
+  outOfScope:
+    - Native Grok Goal implementation or any native Goal claim.
+    - Review policy, decision packets, storage lifecycle, routing, Competition, economics, Hub/UI, or unrelated Runtime adapters.
+    - Automatic fallback, retry loops, Task recreation, distributed coordination, credentials, Integration, commit, or push.
+  executionSteps:
+    - Trace execution types/resolution, Task parsing, Profiles/catalog, Grok argv/events, and read projections before editing.
+    - Implement the smallest coherent persistent-session path and exact Grok 4.6 Xhigh Profile.
+    - Add focused new/forced/legacy/Codex, argv/event, preview/readiness/health, model, and effort tests.
+    - Self-check the actual business diff against the accepted spec and exclude generated dist output from delivery.
+  deliverables:
+    - Truthful persistent-session types, admission, and public projections.
+    - Exact Grok 4.6 Xhigh model/Profile path.
+    - Same-session first-launch/resume behavior with durable content-free evidence.
+    - Focused regressions and only strictly necessary documentation.
+  modules:
+    - name: Execution mode authority
+      responsibility: Validate and freeze single-run, persistent-session, or native-goal from proven Runtime capability.
+      consumes:
+        - Task or Profile execution preference.
+        - Runtime capability facts.
+      produces:
+        - Frozen requested preference, resolved mode, or unsupported-mode error.
+      boundaries:
+        - No Provider inference, native Goal claim for session resume, or reinterpretation of omitted legacy preference.
+    - name: Grok persistent Session adapter
+      responsibility: Launch and resume one Task through the same Grok session and emit truthful mode evidence.
+      consumes:
+        - Task session id, resume intent, model, effort, isolated Workspace, and Runtime Home.
+      produces:
+        - --session-id or --resume argv and worker.started or worker.resumed evidence.
+      boundaries:
+        - nativeGoal unsupported; no credential output or source-tree writes.
+    - name: Grok 4.6 Xhigh identity and truth surfaces
+      responsibility: Materialize and expose one exact model/runtime/effort selection while preserving saved legacy Profiles.
+      consumes:
+        - Model catalog, Worker Profiles, frozen Task spec, and Runtime capabilities.
+      produces:
+        - Grok 4.6 Xhigh Profile plus preview, health, readiness, and inspection facts.
+      boundaries:
+        - No silent persisted-array rewrite, fallback, Hub work, or second resolver.
+  callChain:
+    - Main submits this Task as the first milestone of a durable ForkLight Goal.
+    - Admission freezes grok-build, xai, grok-4.6, xhigh, the pre-change execution truth, and dist/** as generated.
+    - Grok executes in an isolated Workspace using one Task session id and produces a Candidate.
+    - ForkLight independently runs the unchanged acceptance suite and captures the exact source-only Candidate Revision.
+    - Main assigns two read-only Judges, records the final decision, and uses safe Integration before Goal dependents proceed.
+  scenarios:
+    - name: New Grok persistent Task
+      given: A valid Grok 4.6 Xhigh Profile and proven session-resume capability.
+      when: A new Task requests auto or persistent-session after this Candidate is integrated.
+      then: The Task freezes persistent-session, launches with --session-id, and no surface says native Goal.
+    - name: Resume same Task
+      given: A Grok Task retains its original session id, Workspace, and Runtime Home.
+      when: ForkLight continues it after interruption or evidence-based repair.
+      then: The adapter uses --resume with that session id and records worker.resumed without a replacement Task.
+    - name: Legacy and unsupported modes
+      given: A stored Task omits preference or a Runtime lacks a forced execution capability.
+      when: Admission or read projection resolves execution.
+      then: Omitted legacy stays single-run and unsupported forced modes fail closed without fallback.
+  risks:
+    - Auto resolution could reinterpret legacy records; omitted legacy preference must remain single-run.
+    - Session resume could be mislabeled native Goal; keep nativeGoal unsupported in code, events, and docs.
+    - Persisted Profile arrays do not receive new defaults automatically; Main performs one explicit settings update after Integration.
+    - Acceptance builds recreate dist; generatedPaths must keep those files outside Candidate and Integration evidence.
+  changeBudget:
+    maxFiles: 18
+    maxDiffLines: 1800
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .runtime
+    - .forklight
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core
+    - src/workers/grok.ts
+    - src/cli
+    - src/cli.ts
+    - tests
+    - docs/configuration.md
+    - docs/main-clients/grok-build.md
+acceptance:
+  criteria:
+    - A Grok 4.6 Xhigh Profile materializes exactly grok-build, xai, grok-4.6, and xhigh.
+    - New supported Grok Tasks freeze persistent-session; Grok native-goal stays rejected, omitted legacy stays single-run, and Codex native-goal is unchanged.
+    - First launch and resume use one Task session id with --session-id then --resume, and public/durable evidence agrees.
+    - The Candidate contains only source, tests, and narrow docs; dist/** remains generated evidence and no Hub or unrelated change appears.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/task.test.ts tests/task-preview.test.ts tests/worker-profiles.test.ts tests/worker-readiness.test.ts tests/worker-runtime.test.ts tests/cli-health.test.ts
+    - git diff --check

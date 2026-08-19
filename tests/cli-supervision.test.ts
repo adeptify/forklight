@@ -10,6 +10,8 @@ import {
   buildStatusProgress,
   humanCompactInspectionLines,
   humanWaitLines,
+  parseDeliveryDecideOptions,
+  parseDeliveryPrepareOptions,
   parseInspectSummaryOptions,
   parseWaitOptions,
   progressCursorKey,
@@ -204,6 +206,66 @@ test("wait parsing honors overrides and derives omitted poll interval", () => {
   assert.deepEqual(
     parseWaitOptions(["--poll-ms", "8", "--until", "terminal", "--json", "--timeout-ms", "90"], 37),
     { timeoutMs: 90, pollMs: 8, until: "terminal", json: true },
+  );
+});
+
+test("delivery prepare and decide parsing accepts the public flags and rejects extras", () => {
+  assert.deepEqual(
+    parseDeliveryPrepareOptions([
+      "--task", "task-1", "--reviewer-profiles", "a,b", "--reason", "Need review",
+      "--timeout-ms", "30", "--confirm", "--json",
+    ]),
+    {
+      taskId: "task-1",
+      reviewerProfileIds: ["a", "b"],
+      reason: "Need review",
+      timeoutMs: 30,
+      confirm: true,
+      json: true,
+    },
+  );
+  assert.deepEqual(
+    parseDeliveryPrepareOptions([
+      "--task-file", "work.yaml", "--reason", "Skip judges",
+      "--timeout-ms", "5", "--confirm", "--include-diff-max-bytes", "20",
+    ]),
+    {
+      taskFile: "work.yaml",
+      reviewerProfileIds: [],
+      reason: "Skip judges",
+      timeoutMs: 5,
+      confirm: true,
+      includeDiffMaxBytes: 20,
+      json: false,
+    },
+  );
+  assert.throws(
+    () => parseDeliveryPrepareOptions(["--task", "t", "--task-file", "f", "--reason", "r", "--timeout-ms", "1", "--confirm"]),
+    /exactly one/,
+  );
+  assert.throws(
+    () => parseDeliveryPrepareOptions(["--task", "t", "--reason", "r", "--timeout-ms", "1"]),
+    /--confirm/,
+  );
+  assert.deepEqual(
+    parseDeliveryDecideOptions([
+      "--decision", "accept", "--revision", "rev-1", "--digest", "abc",
+      "--reason", "ok", "--timeout-ms", "9", "--confirm",
+    ], "task-9"),
+    {
+      taskId: "task-9",
+      decision: "accept",
+      revisionId: "rev-1",
+      digest: "abc",
+      reason: "ok",
+      timeoutMs: 9,
+      confirm: true,
+      json: false,
+    },
+  );
+  assert.throws(
+    () => parseDeliveryDecideOptions(["--decision", "maybe", "--revision", "r", "--digest", "d", "--reason", "ok", "--timeout-ms", "1", "--confirm"], "t"),
+    /accept, revise, or reject/,
   );
 });
 
@@ -485,6 +547,93 @@ test("compact inspection exposes authority without raw claim or verification pay
     "Review remediation and decide whether to resume",
   );
   assert.doesNotMatch(JSON.stringify(compact), /DO_NOT_SURFACE/);
+});
+
+test("compact inspect exposes the same decision packet semantics without private content", () => {
+  const recorded = makeTask("packet", "succeeded");
+  recorded.spec.reviewRequirement = {
+    requiredJudges: 1,
+    reason: "Ordinary meaningful delivery",
+  };
+  const events = [
+    {
+      id: 1,
+      taskId: recorded.id,
+      sequence: 1,
+      timestamp: TS,
+      type: "verification.completed",
+      summary: "Independent verification passed",
+      payload: {
+        passed: true,
+        behaviorPassed: true,
+        policyPassed: true,
+        sourceCompatible: true,
+        commands: [{
+          command: "true",
+          exitCode: 0,
+          stdout: "SECRET_STDOUT",
+          stderr: "",
+          durationMs: 1,
+          timedOut: false,
+        }],
+        diffPath: recorded.paths.diff,
+        sourceUnchanged: true,
+      },
+    },
+  ] as EventRecord[];
+  const compact = buildCompactInspection({
+    task: recorded,
+    attempts: [],
+    events,
+    diff: "PRIVATE_DIFF_CONTENT\n",
+    eventLimit: 1,
+  });
+  assert.equal(compact.decisionPacket.kind, "main-decision-packet");
+  assert.equal(compact.decisionPacket.review.status, "missing");
+  assert.equal(compact.decisionPacket.nextActionCode, "await-required-review");
+  assert.equal(compact.decisionPacket.workerClaim.present, false);
+  const human = humanCompactInspectionLines(compact);
+  assert.match(human, /decisionPacket: await-required-review/);
+  assert.match(human, /reviewRequirement: 1 judge/);
+  assert.doesNotMatch(human, /SECRET_STDOUT|PRIVATE_DIFF|private-keychain|\/private\//);
+  assert.doesNotMatch(JSON.stringify(compact.decisionPacket), /SECRET_STDOUT|PRIVATE_DIFF|sk-[A-Za-z0-9_-]{8,}/);
+});
+
+test("compact inspect keeps explicit skip and legacy packets distinct", () => {
+  const skip = makeTask("skip", "succeeded");
+  skip.spec.reviewRequirement = { requiredJudges: 0, reason: "Mechanical check" };
+  const legacy = makeTask("legacy", "succeeded");
+  const events = [
+    {
+      id: 1,
+      taskId: skip.id,
+      sequence: 1,
+      timestamp: TS,
+      type: "verification.completed",
+      summary: "Independent verification passed",
+      payload: {
+        passed: true,
+        behaviorPassed: true,
+        policyPassed: true,
+        sourceCompatible: true,
+        commands: [{
+          command: "true", exitCode: 0, stdout: "", stderr: "", durationMs: 1, timedOut: false,
+        }],
+        diffPath: skip.paths.diff,
+        sourceUnchanged: true,
+      },
+    },
+  ] as EventRecord[];
+  const skipCompact = buildCompactInspection({
+    task: skip, attempts: [], events, diff: undefined, eventLimit: 0,
+  });
+  const legacyCompact = buildCompactInspection({
+    task: legacy, attempts: [], events, diff: undefined, eventLimit: 0,
+  });
+  assert.equal(skipCompact.decisionPacket.review.status, "explicit-skip");
+  assert.equal(legacyCompact.decisionPacket.review.status, "not-declared");
+  assert.match(humanCompactInspectionLines(skipCompact), /explicit skip \(0\)/);
+  assert.match(humanCompactInspectionLines(legacyCompact), /legacy \(none declared\)/);
 });
 
 // --- wait with open post-terminal follow-up operations ---

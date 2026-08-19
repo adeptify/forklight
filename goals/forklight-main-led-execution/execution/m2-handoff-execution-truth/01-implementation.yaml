@@ -1,0 +1,86 @@
+version: 2
+name: M2 freeze handoff successor execution truth from destination
+project: /Users/yijunwang/code/forklight
+taskClass: m2-handoff-destination-execution-truth
+taskFamily: forklight-runtime-continuation
+workerProfileId: grok-4-6-xhigh
+deliveryProfileId: forklight-self-upgrade
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 2
+  reason: Cross-Runtime handoff admission changes immutable Runtime truth, so two independent core-runtime and compatibility views are required.
+contract:
+  outcome: Newly authorized direct Goal and Competition handoff successors freeze executionPreference and executionMode from the selected destination Worker Profile and Runtime, so Grok-to-Claude handoff records auto to single-run while preserving every existing lineage, materialization, policy, and Integration boundary.
+  presentation: { summary: 修复跨 Runtime handoff 的 successor execution truth，只改共享 admission 构造与聚焦回归。, language: zh-CN }
+  context:
+    - Read specs/m2-delivery-journeys/work-items/handoff-destination-execution-truth/spec.md completely before editing.
+    - Actual stopped successor 91d34265-fdca-4623-8aa1-646c90ff1e36 stores claude-code/deepseek-flash plus auto/persistent-session; Claude Code auto must be single-run.
+    - buildHandoffSuccessorSpec clones the frozen Grok source, replaces destination identity, but retains source execution fields; buildTaskRecord stores them without normal Task parsing.
+    - Normal admission and canonical execution-mode helpers are already correct. Reuse them; do not add a second capability table or validator.
+    - ForkLight serves one local developer. Add no historical rewrite, Store migration, lock, lease, checksum, handshake, schema negotiation, or distributed coordination.
+  inScope:
+    - Resolve the successor's immutable execution preference from destinationSelection, using destination Profile omission to explicitly freeze single-run on the new Task; absence remains historical-only.
+    - Resolve the immutable successor mode through the existing canonical destination Runtime capability helper.
+    - Add focused Goal and Competition regressions for the authentic Grok auto/persistent source to Claude auto/single destination mismatch, source immutability, Grok/Codex auto capability projection, and legacy destination single-run.
+    - Preserve forced unsupported fail-closed destination selection and existing handoff identity, one-hop, replay, materialization, network, advanced-policy, review, and delivery behavior.
+  outOfScope:
+    - Historical Task relabeling, Store/API/schema mutation, Quality policy correction, broad admission refactor, Runtime adapter, Profile settings, CLI/MCP, daemon protocol, docs Candidate, storage, Hub, commit, or push.
+    - Second-hop handoff, retry/replay, manual source application, general consistency machinery, multi-user or distributed behavior.
+  executionSteps:
+    - Trace the exact shared successor builder, destination selection, canonical capability resolver, Task storage, and both handoff entry paths.
+    - Implement the smallest destination-owned preference/mode freeze without reparsing the whole source Task or mutating historical evidence.
+    - Add focused behavior tests that fail on the stopped mismatch and cover compatibility boundaries rather than increasing test count for its own sake.
+    - Run every acceptance command, inspect the exact diff, and stop after a complete passing slice.
+  deliverables:
+    - One source-compatible Candidate within the three accepted source/test paths.
+    - Focused machine evidence that stored successor execution truth matches the destination Runtime for both Goal and Competition handoffs.
+    - A concise Worker handoff naming exact behavior, tests, remaining risks, and no historical mutation.
+  modules:
+    - name: Shared handoff successor admission
+      responsibility: Clone the technical Task contract while replacing identity-bound execution truth with one canonical destination-owned snapshot.
+      consumes: [Frozen source TaskSpec, resolved destination Worker selection, reusable paths, remaining gaps, and canonical Runtime capabilities.]
+      produces: [One successor TaskSpec with truthful destination executionPreference and executionMode.]
+      boundaries: [No source mutation, historical rewrite, Store migration, duplicate capability table, Quality policy change, or new coordination mechanism.]
+    - name: Goal and Competition regressions
+      responsibility: Prove the actual cross-Runtime failure and shared-entry compatibility at durable successor Task creation.
+      consumes: [Existing handoff fixtures, profiles, canonical mode semantics, and source-immutability assertions.]
+      produces: [Focused failing-before and passing-after regression evidence.]
+      boundaries: [No real Home mutation, Provider call, generated source, documentation, or unrelated test expansion.]
+  callChain:
+    - Main authorizes one direct Goal or Competition handoff to an explicit different destination Profile.
+    - ForkLight resolves the launchable destination Worker selection and canonical Runtime capabilities before durable mutation.
+    - The shared builder imports only approved Candidate paths and freezes destination preference/mode into the queued successor Task.
+    - Worker execution and public decision surfaces consume the stored successor mode; ForkLight verifies, two Judges inspect, Main integrates serially, and later audits read activated truth.
+  scenarios:
+    - name: Authentic Grok to Claude mismatch
+      given: A source Task froze grok-build auto to persistent-session and Main hands its Candidate to a DeepSeek Claude Code Profile with auto.
+      when: The successor Task is authorized and stored.
+      then: Source remains persistent-session, successor freezes auto to single-run, and no historical record is relabeled.
+    - name: Destination auto selects its proven capability
+      given: The destination Runtime is Grok Build, Codex CLI, or Claude Code and its Profile requests auto.
+      when: The shared successor spec is built.
+      then: Mode is respectively persistent-session, native-goal, or single-run through the existing canonical helper.
+    - name: Omitted Profile preference and forced-mode compatibility
+      given: A destination Profile omits executionPreference or explicitly requests an unsupported forced mode.
+      when: Main validates the handoff.
+      then: The new successor explicitly freezes single-run preference and mode, while unsupported forced mode fails before any handoff/Task mutation.
+  risks: [Reusing source execution fields keeps public Runtime truth false; duplicating capability logic can drift. Both are blockers. The adjacent Quality policy profile finding is not part of this accepted execution fix.]
+  changeBudget: { maxFiles: 3, maxDiffLines: 260 }
+advancedPolicy: { maxDurationMs: null, observedTokenCeiling: null, noProgressTimeoutMs: null, workerStopGraceMs: 60000, fileLimit: null, fileLimitMode: warn, changedLineLimit: null, changedLineLimitMode: warn, baseMaxAttempts: 1, maxExtraAttempts: 0, maxMainCorrections: 1, maxMainReverifications: 1, maxConcurrency: 1, completionMode: warn, changeBudgetMode: warn, maxAdaptationRounds: 0 }
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths: [src/core/candidate-handoff.ts, tests/competition.test.ts, tests/goal.test.ts]
+acceptance:
+  criteria:
+    - Stored direct Goal and Competition successors freeze execution preference and mode from the resolved destination Profile and Runtime while source Tasks remain unchanged.
+    - Claude auto is single-run, Grok auto is persistent-session, Codex auto is native-goal, destination omission explicitly freezes single-run preference and mode, and forced unsupported modes still fail closed before mutation.
+    - Candidate changes only the accepted three paths, preserves existing handoff behavior and source compatibility, and excludes generated output.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/competition.test.ts tests/goal.test.ts tests/task.test.ts tests/worker-runtime.test.ts
+    - git diff --check

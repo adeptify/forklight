@@ -1,0 +1,143 @@
+version: 2
+name: M5-A3 bounded clean-bundle failure diagnosis
+project: /Users/yijunwang/code/forklight
+taskClass: m5-clean-bundle-failure-diagnosis
+taskFamily: forklight-product-graduation
+workerProfileId: grok-4-6-xhigh
+deliveryProfileId: forklight-self-upgrade
+executionPreference: auto
+routingDecision:
+  taskFamily: forklight-product-graduation
+  shortlist:
+    - provider: xai
+      model: grok-4.6
+      runtime: grok-build
+      effort: xhigh
+      workerProfileId: grok-4-6-xhigh
+    - provider: openai
+      model: gpt-5.6-luna
+      runtime: codex-cli
+      effort: max
+      workerProfileId: codex-luna-max
+  selectedWorker:
+    provider: xai
+    model: grok-4.6
+    runtime: grok-build
+    effort: xhigh
+    workerProfileId: grok-4-6-xhigh
+  selectedBecause:
+    code: user-specified
+    note: 一骏 has standing authorization for continued Grok CLI 4.6 Xhigh native Goal execution; this bounded diagnostic is the sole accepted path to classify the stopped A3 bundle.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+reviewRequirement:
+  requiredJudges: 2
+  reason: The public failure line must remain privacy-safe while distinguishing lifecycle truth. Two read-only views check semantic accuracy and non-leakage before Main Integration.
+contract:
+  outcome: Preserve the original bounded verification category and exact Hub/Daemon cleanup outcome in a privacy-safe clean-bundle failure line, without changing cleanup behavior.
+  presentation:
+    summary: 打包失败时只说明是哪一类检查先失败，以及 Hub、Daemon 是否清理完成，不泄露路径、日志或进程细节。
+    language: zh-CN
+  context:
+    - Read AGENTS.md, specs/m5-product-graduation/work-items/clean-bundle-diagnosis/spec.md, the parent clean-clone-delivery spec and goals/forklight-main-led-execution/evidence/m5-a3-clean-bundle-cleanup-stop.md completely before editing. The diagnosis spec is the sole accepted implementation boundary.
+    - Two pre-fix runs and one post-fix run all published nothing and ended with the same generic cleanup-failed line. The stale-PID guard is integrated and its tests pass, but the real blocker remains unclassified.
+    - The catch path currently discards the earlier BundleBuilderError category and collapses returned hubGone/daemonGone into one message. A cleanup throw is also collapsed.
+    - Preserve every current cleanup action, staging removal rule and cleanup-failure precedence. Do not run a real bundle or edit Goal evidence.
+  inScope:
+    - Project the caught BundleBuilderError category, or the literal unexpected for an untyped error.
+    - On returned cleanup failure, project cleanup=returned with exact hubGone and daemonGone booleans.
+    - On a cleanup exception, project cleanup=threw with both results unknown and never include the raw exception.
+    - Preserve the original error object when cleanup succeeds.
+    - Add focused deterministic tests for returned failure, thrown cleanup and unchanged original-error behavior.
+  outOfScope:
+    - Cleanup behavior, signal order, process ownership, timeout, retry, process scan, publication, Core schema, Store, setup, backup, Daemon/Hub lifecycle, UI, docs or real bundle execution.
+    - Raw exception text, stdout/stderr, paths, PIDs, commands, identities, credentials, Homes or process names in public output.
+  executionSteps:
+    - Trace only the buildCleanRunBundle catch path, BundleBuilderError category and existing failure-format tests/fixtures.
+    - Introduce the smallest private closed-value helper or branches needed to construct the bounded line.
+    - Keep original error rethrow unchanged when cleanup has no failure.
+    - Add focused exact-shape and non-leakage regressions, then run every accepted command once.
+  deliverables:
+    - Exact two-path Candidate with bounded diagnostic projection and focused tests.
+    - Final response naming the closed shape, unchanged behavior, test evidence and uncertainty; no handoff file.
+  modules:
+    - name: Clean-bundle catch projection
+      responsibility: Preserve bounded failure causality without leaking arbitrary process or error content.
+      consumes: [caught error type/category, cleanup return or throw, hubGone, daemonGone]
+      produces: [one closed cleanup-failed message]
+      boundaries: [no cleanup action, schema, timeout, retry, path, PID or raw error]
+    - name: Focused failure tests
+      responsibility: Prove exact returned/thrown/original-error cases and non-leakage.
+      consumes: [existing fixture hooks and BundleBuilderError]
+      produces: [deterministic regressions]
+      boundaries: [no real bundle, current Home, Provider, Daemon or Hub]
+  callChain:
+    - Verification throws a bounded BundleBuilderError or an untyped error.
+    - The existing catch path runs owned cleanup once.
+    - Cleanup success rethrows the original error unchanged.
+    - Returned cleanup failure or cleanup throw emits only the accepted closed diagnostic values.
+  scenarios:
+    - name: Verification and returned cleanup failure
+      given: Verification fails with a known category and cleanup returns one or two false outcomes.
+      when: The catch path preserves cleanup-failure precedence.
+      then: The error identifies prior category, cleanup=returned and exact Hub/Daemon booleans.
+    - name: Cleanup throws private text
+      given: Verification has failed and owned cleanup throws an error containing a path or marker.
+      when: The catch path emits its public failure.
+      then: It says cleanup=threw with unknown outcomes and contains none of the private text.
+    - name: Cleanup succeeds
+      given: Verification fails but all owned cleanup completes.
+      when: The catch path exits.
+      then: The exact original error is rethrown unchanged.
+  risks:
+    - Reusing arbitrary error messages would leak paths or logs. Admit only the existing closed category or unexpected.
+    - Inventing booleans after a throw would be false. Use unknown for both.
+    - Changing cleanup while adding observability would make the diagnostic run ambiguous. No cleanup behavior change is allowed.
+  changeBudget:
+    maxFiles: 2
+    maxDiffLines: 160
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 60000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxWorkerValidationRepairs: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, plans]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/clean-run/build-clean-run-bundle.ts
+    - tests/clean-run-bundle.test.ts
+acceptance:
+  criteria:
+    - Returned cleanup failure projects only prior category, cleanup=returned and exact Hub/Daemon booleans.
+    - Cleanup throw projects cleanup=threw and unknown outcomes without raw exception content.
+    - Successful cleanup preserves the original failure unchanged and all clean-bundle behavior remains otherwise identical.
+    - No timeout, retry, process scan, signal, publication, schema, Hub/UI or non-focused path change exists.
+    - Grok 4.6 Xhigh uses native Goal, ForkLight independently runs exact commands, two read-only Judges review the exact Revision and Main alone decides serial Integration.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/clean-run-bundle.test.ts
+    - git diff --check

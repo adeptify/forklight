@@ -1,0 +1,84 @@
+version: 2
+name: M2-C return completed storage reclaim results past 15 seconds
+project: /Users/yijunwang/code/forklight
+taskClass: m2-storage-reclaim-transport-observation
+taskFamily: forklight-storage-lifecycle
+workerProfileId: default
+deliveryProfileId: forklight-self-upgrade
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 2
+  reason: Transport timing fronts a destructive durable operation, so non-replay and CLI/MCP parity require two independent views.
+contract:
+  outcome: Let confirmed storage_reclaim use the established long daemon observation behavior so a normal local batch can return after the generic 15-second window, while short methods stay bounded and no timeout can cancel, replay, or decide the reclaim result.
+  presentation: { summary: 让真实 Storage reclaim 完成后能把结果返回给 CLI/MCP，不再被 15 秒观察窗截断。, language: zh-CN }
+  context:
+    - Read specs/m2-c-task-storage-lifecycle/work-items/reclaim-transport-observation/spec.md completely before editing.
+    - A real 248-Task reclaim completed durably in about 32 seconds with 248 reclaimed dispositions, 363 targets, 1079179854 removed bytes, zero process actions, and integrity ok/0; the CLI timed out at 15 seconds first.
+    - The operation was not cancelled. Fix only shared result observation; do not redesign storage lifecycle or manufacture another real reclaim.
+    - Grok 4.6 Xhigh is currently blocked by missing xAI local authentication. Use the healthy DeepSeek Pro Worker honestly as single-run; do not claim Grok or native-goal.
+    - ForkLight serves one local developer. Add no lock, lease, checksum, handshake, schema negotiation, replay, or distributed coordination.
+  inScope:
+    - Inspect daemonRequestTimeoutMs and existing long mutation/wait timeout behavior.
+    - Give storage_reclaim a non-premature shared transport observation window with focused deterministic tests.
+    - Preserve generic short method, wait, remediation, candidate-reverify, exact-build handshake, disconnect, and no-replay behavior.
+  outOfScope:
+    - Storage eligibility, filesystem/process mutation, disposition schema, daemon dispatch, CLI/MCP command shape, Hub, Runtime/Provider, Worker policy, or Integration redesign.
+    - Real-home access or mutation, synthetic destructive dogfood, retry/replay/cancel logic, asynchronous operation infrastructure, commit, or push.
+  executionSteps:
+    - Trace the shared client timeout resolver and the exact CLI/MCP storage reclaim call paths.
+    - Implement the smallest shared mapping; avoid transport-specific duplication.
+    - Add focused fast tests for storage_reclaim and non-regression of short/long methods and no replay semantics.
+    - Run every acceptance command and inspect exact diff scope.
+  deliverables:
+    - One source-compatible bounded Candidate in the accepted daemon-client/test paths.
+    - Focused evidence that storage_reclaim no longer inherits 15 seconds and that the operation authority did not change.
+  modules:
+    - name: Daemon request observation policy
+      responsibility: Resolve a method-appropriate client response window without deciding, cancelling, or replaying daemon work.
+      consumes: [Daemon method, request parameters, and existing timeout policy.]
+      produces: [A bounded observation timeout in milliseconds.]
+      boundaries: [No lifecycle state, Store, dispatch replay, operation deadline, or transport-specific duplicate.]
+    - name: Transport regressions
+      responsibility: Prove reclaim, ordinary, existing long, and disconnect/no-replay behavior deterministically.
+      consumes: [Shared resolver and existing daemon/CLI/MCP test seams.]
+      produces: [Fast focused acceptance evidence.]
+      boundaries: [No real daemon home, real deletion, 15-second wall wait, or generated Candidate output.]
+  callChain:
+    - CLI and MCP both invoke storage_reclaim through daemonRequest after explicit confirmation.
+    - The shared timeout resolver supplies the response window and the socket dispatches exactly once.
+    - Daemon storage authority completes and returns its durable result; the client renders the same response.
+    - ForkLight independently verifies; two Judges inspect; Main safely integrates; a later zero-diff audit checks integrated truth.
+  scenarios:
+    - name: Normal batch exceeds generic window
+      given: A confirmed local reclaim legitimately takes more than 15 seconds.
+      when: CLI or MCP waits for the daemon response.
+      then: The shared observation remains open long enough and no second dispatch is created.
+    - name: Short and existing long methods stay exact
+      given: Health, wait, remediation, candidate reverify and reclaim resolve through one policy.
+      when: Their timeout is calculated.
+      then: Only reclaim receives the necessary long-mutation behavior; established semantics do not drift.
+    - name: Observation failure is not operation failure
+      given: A socket observer disconnects or its window ends.
+      when: The daemon already accepted the dispatch.
+      then: The client never cancels, retries, replays, or fabricates a reclaim result.
+  risks: [A naive retry could delete twice; no retry is allowed. A global timeout increase could hide unrelated hangs; keep the method mapping focused.]
+  changeBudget: { maxFiles: 4, maxDiffLines: 180 }
+advancedPolicy: { maxDurationMs: null, observedTokenCeiling: null, noProgressTimeoutMs: null, workerStopGraceMs: 60000, fileLimit: null, fileLimitMode: warn, changedLineLimit: null, changedLineLimitMode: warn, baseMaxAttempts: 1, maxExtraAttempts: 0, maxMainCorrections: 1, maxMainReverifications: 1, maxConcurrency: 1, completionMode: warn, changeBudgetMode: warn, maxAdaptationRounds: 0 }
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths: [src/daemon/client.ts, tests/daemon.test.ts, tests/daemon-cli.test.ts, tests/mcp.test.ts]
+acceptance:
+  criteria:
+    - storage_reclaim no longer inherits the generic 15000ms response window, while ordinary short and established long methods keep their semantics.
+    - CLI and MCP share the same daemonRequest behavior; there is no replay, cancel, new operation state, storage semantic change, or real-home mutation.
+    - Candidate stays in allowed paths, excludes dist, and remains source-compatible.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/daemon.test.ts tests/daemon-cli.test.ts tests/mcp.test.ts
+    - git diff --check

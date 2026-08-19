@@ -1,6 +1,18 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { buildTaskDecisionView } from "../src/core/task-decision-view.js";
+import { resolveHandoffViewForTask } from "../src/core/candidate-handoff.js";
+import { buildMainDecisionPacket, buildMainDecisionPacketForTask } from "../src/core/main-decision-packet.js";
+import { CANDIDATE_HANDOFF_CORRUPTION_ERROR, StateStore } from "../src/state/store.js";
+import {
+  PENDING_REVIEW_BLOCKS_INTEGRATION,
+  REQUIRED_REVIEW_GRAPH_MISSING,
+  STALE_MAIN_ACCEPT_AFTER_REVIEW,
+} from "../src/core/review-graph.js";
 import type {
   AttemptRecord,
   EventRecord,
@@ -690,4 +702,544 @@ test("Decision View exposes a readable preparation cursor only while preparing",
   });
   assert.equal(running.progress.preparationStage, undefined,
     "completed preparation must not become stale live status");
+});
+
+// --- M2-B Main decision packet ---
+
+test("packet names missing review for requiredJudges 1 without creating a Judge", () => {
+  const recorded = task("succeeded");
+  recorded.spec.reviewRequirement = {
+    requiredJudges: 1,
+    reason: "Ordinary meaningful delivery",
+  };
+  const events = [
+    event(1, "worker.completed", { claim: { label: "unverified-claim", text: "All tests pass" } }),
+    event(2, "verification.completed", verification(true)),
+  ];
+  const decision = buildTaskDecisionView({
+    task: recorded,
+    attempts: [attempt],
+    events,
+    integrationResults: [],
+  });
+  const packet = buildMainDecisionPacket({
+    task: recorded,
+    decision,
+    events,
+    reviewGate: {
+      declared: true,
+      status: "missing",
+      requiredJudges: 1,
+      reason: "Ordinary meaningful delivery",
+      assigned: 0,
+      terminal: 0,
+      usableTerminal: 0,
+      missingOpinions: 1,
+      blocksIntegration: true,
+      rejectionReasons: [REQUIRED_REVIEW_GRAPH_MISSING],
+    },
+  });
+  assert.equal(packet.kind, "main-decision-packet");
+  assert.equal(packet.workerClaim.label, "unverified-claim");
+  assert.equal(packet.review.status, "missing");
+  assert.equal(packet.review.missingOpinions, 1);
+  assert.equal(packet.nextActionCode, "await-required-review");
+  assert.match(packet.nextAction, /1 missing independent opinion/);
+  assert.ok(packet.blockers.includes(REQUIRED_REVIEW_GRAPH_MISSING));
+  assert.doesNotMatch(JSON.stringify(packet), /All tests pass|\/diff|stdout/);
+});
+
+test("packet shows one missing independent opinion when requiredJudges is 2", () => {
+  const recorded = task("succeeded");
+  recorded.spec.reviewRequirement = {
+    requiredJudges: 2,
+    reason: "High-risk Integration authority",
+  };
+  const events = [event(2, "verification.completed", verification(true))];
+  const decision = buildTaskDecisionView({
+    task: recorded,
+    attempts: [attempt],
+    events,
+    integrationResults: [],
+  });
+  const packet = buildMainDecisionPacket({
+    task: recorded,
+    decision,
+    events,
+    reviewGate: {
+      declared: true,
+      status: "undersized",
+      requiredJudges: 2,
+      reason: "High-risk Integration authority",
+      assigned: 1,
+      terminal: 1,
+      usableTerminal: 1,
+      missingOpinions: 1,
+      blocksIntegration: true,
+      rejectionReasons: ["Required Review Graph is undersized: fewer independent assignments than requiredJudges"],
+    },
+    reviewGraph: {
+      schemaVersion: 1,
+      id: "graph-1",
+      candidateTaskId: recorded.id,
+      candidateRevisionId: "rev-1",
+      attemptOrdinal: 1,
+      verificationEventSequence: 2,
+      digestPrefix: "abc",
+      status: "completed",
+      round: 1,
+      maxAssignments: 1,
+      assignments: [],
+      aggregation: {
+        total: 1,
+        pending: 0,
+        usable: 1,
+        unusable: 0,
+        dispositionCounts: { accept: 1, revise: 0, reject: 0 },
+        state: "single-opinion",
+        explanation: "One usable judge suggested accept.",
+      },
+      createdAt: now,
+      updatedAt: now,
+      blocksIntegration: false,
+      requiresFreshMainReview: false,
+      nextAction: "unused",
+      nextActionCode: "main-decision",
+    },
+  });
+  assert.equal(packet.review.missingOpinions, 1);
+  assert.equal(packet.review.aggregationState, "single-opinion");
+  assert.equal(packet.nextActionCode, "await-required-review");
+  assert.match(packet.nextAction, /1 missing independent opinion/);
+});
+
+test("explicit skip and legacy packets do not invent review policy", () => {
+  const skipTask = task("succeeded");
+  skipTask.spec.reviewRequirement = {
+    requiredJudges: 0,
+    reason: "Mechanical deterministic check",
+  };
+  const events = [event(2, "verification.completed", verification(true))];
+  const skipDecision = buildTaskDecisionView({
+    task: skipTask,
+    attempts: [attempt],
+    events,
+    integrationResults: [],
+  });
+  const skipPacket = buildMainDecisionPacket({ task: skipTask, decision: skipDecision, events });
+  assert.equal(skipPacket.review.status, "explicit-skip");
+  assert.equal(skipPacket.review.requiredJudges, 0);
+  assert.equal(skipPacket.nextActionCode, "record-main-review");
+  assert.match(skipPacket.nextAction, /explicit Judge skip/);
+  assert.match(skipPacket.nextAction, /no Judge was assigned/);
+  assert.doesNotMatch(skipPacket.nextAction, /independent Judge/);
+
+  const legacy = task("succeeded");
+  const legacyDecision = buildTaskDecisionView({
+    task: legacy,
+    attempts: [attempt],
+    events,
+    integrationResults: [],
+  });
+  const legacyPacket = buildMainDecisionPacket({ task: legacy, decision: legacyDecision, events });
+  assert.equal(legacyPacket.review.declared, false);
+  assert.equal(legacyPacket.review.status, "not-declared");
+  assert.equal(legacyPacket.review.requiredJudges, undefined);
+  assert.equal(legacyPacket.nextActionCode, "record-main-review");
+  assert.equal(legacyPacket.blockers.length, 0);
+});
+
+test("legacy and explicit-skip packets honor existing Review Graph blockers", () => {
+  const events = [
+    event(2, "verification.completed", verification(true)),
+    event(3, "main-review.completed", {
+      decision: "accept",
+      reason: "before review finished",
+      attemptId: "attempt-1",
+      verificationEventSequence: 2,
+    }),
+  ];
+
+  for (const kind of ["legacy", "explicit-skip"] as const) {
+    const recorded = task("succeeded");
+    if (kind === "explicit-skip") {
+      recorded.spec.reviewRequirement = {
+        requiredJudges: 0,
+        reason: "Mechanical deterministic check",
+      };
+    }
+    const decision = buildTaskDecisionView({
+      task: recorded,
+      attempts: [attempt],
+      events,
+      integrationResults: [],
+    });
+    assert.equal(decision.stage, "ready-for-integration");
+
+    const pendingPacket = buildMainDecisionPacket({
+      task: recorded,
+      decision,
+      events,
+      reviewGate: {
+        declared: kind === "explicit-skip",
+        status: "pending",
+        ...(kind === "explicit-skip"
+          ? { requiredJudges: 0 as const, reason: "Mechanical deterministic check" }
+          : {}),
+        assigned: 1,
+        terminal: 0,
+        usableTerminal: 0,
+        missingOpinions: 0,
+        blocksIntegration: true,
+        rejectionReasons: [PENDING_REVIEW_BLOCKS_INTEGRATION],
+      },
+    });
+    assert.equal(pendingPacket.nextActionCode, "wait-for-judges");
+    assert.ok(pendingPacket.blockers.includes(PENDING_REVIEW_BLOCKS_INTEGRATION));
+    assert.notEqual(pendingPacket.nextActionCode, "ready-for-integration");
+
+    const staleMainPacket = buildMainDecisionPacket({
+      task: recorded,
+      decision,
+      events,
+      reviewGate: {
+        declared: kind === "explicit-skip",
+        status: "stale-main-accept",
+        ...(kind === "explicit-skip"
+          ? { requiredJudges: 0 as const, reason: "Mechanical deterministic check" }
+          : {}),
+        assigned: 1,
+        terminal: 1,
+        usableTerminal: 1,
+        missingOpinions: 0,
+        blocksIntegration: true,
+        rejectionReasons: [STALE_MAIN_ACCEPT_AFTER_REVIEW],
+      },
+    });
+    assert.equal(staleMainPacket.nextActionCode, "record-fresh-main-review");
+    assert.ok(staleMainPacket.blockers.includes(STALE_MAIN_ACCEPT_AFTER_REVIEW));
+    assert.notEqual(staleMainPacket.nextActionCode, "ready-for-integration");
+
+    // Defensive: even if status still looks like skip/legacy, rejection reasons win.
+    const reasonOnlyPacket = buildMainDecisionPacket({
+      task: recorded,
+      decision,
+      events,
+      reviewGate: {
+        declared: kind === "explicit-skip",
+        status: kind === "explicit-skip" ? "explicit-skip" : "not-declared",
+        ...(kind === "explicit-skip"
+          ? { requiredJudges: 0 as const, reason: "Mechanical deterministic check" }
+          : {}),
+        assigned: 1,
+        terminal: 0,
+        usableTerminal: 0,
+        missingOpinions: 0,
+        blocksIntegration: true,
+        rejectionReasons: [PENDING_REVIEW_BLOCKS_INTEGRATION],
+      },
+    });
+    assert.equal(reasonOnlyPacket.nextActionCode, "wait-for-judges");
+    assert.notEqual(reasonOnlyPacket.nextActionCode, "ready-for-integration");
+  }
+});
+
+test("partial result packet preserves output and recommends one handoff or stop", () => {
+  const failed = task("failed");
+  const events = [event(2, "verification.completed", verification(false))];
+  const decision = buildTaskDecisionView({
+    task: failed,
+    attempts: [attempt],
+    events,
+    integrationResults: [],
+  });
+  const packet = buildMainDecisionPacket({
+    task: failed,
+    decision,
+    events,
+    candidateRevision: {
+      id: "rev-partial",
+      attemptOrdinal: 1,
+      digestPrefix: "deadbeef0001",
+      affectedPathCount: 2,
+      affectedPaths: ["src/a.ts", "src/b.ts"],
+      filesChanged: 2,
+      changedLines: 40,
+      verificationPassed: false,
+    },
+    handoff: {
+      id: "handoff-1",
+      status: "authorized",
+      originKind: "goal-task",
+      sourceTaskId: failed.id,
+      sourceCandidateRevisionId: "rev-partial",
+      sourceDigestPrefix: "deadbeef0001",
+      gapContractDigestPrefix: "cafebabe0001",
+      reusablePathCount: 1,
+      remainingGapCount: 1,
+      reusablePaths: ["src/a.ts"],
+      remainingGaps: [{
+        description: "Finish the remaining acceptance gap",
+        acceptanceExpectation: "Independent verification must pass",
+      }],
+      destinationWorkerProfileId: "other",
+      destinationIdentity: {
+        provider: "deepseek",
+        model: "deepseek-v4-pro",
+        runtime: "claude-code",
+        effort: "high",
+      },
+      successorTaskId: "successor-1",
+      reason: "Reuse verified paths",
+      createdAt: now,
+      updatedAt: now,
+      nextAction: "wait-for-successor",
+    },
+  });
+  assert.equal(packet.candidate?.filesChanged, 2);
+  assert.equal(packet.reuse?.reusablePathCount, 1);
+  assert.equal(packet.reuse?.remainingGapCount, 1);
+  assert.equal(packet.nextActionCode, "handoff-or-stop");
+  assert.equal(packet.workspaceDisposition, "protect-reusable-partial");
+  assert.doesNotMatch(JSON.stringify(packet), /\/state\/task|PRIVATE|sk-[A-Za-z0-9_-]{8,}/);
+});
+
+test("repeated no-progress packet names the stop and one Main decision", () => {
+  const failed = task("failed");
+  const events = [
+    event(2, "verification.completed", verification(false)),
+    event(3, "policy.noprogress.exceeded"),
+    event(4, "policy.noprogress.exceeded"),
+  ];
+  const decision = buildTaskDecisionView({
+    task: failed,
+    attempts: [attempt],
+    events,
+    integrationResults: [],
+  });
+  const packet = buildMainDecisionPacket({
+    task: failed,
+    decision,
+    events,
+    candidateRevision: {
+      id: "rev-stop",
+      attemptOrdinal: 1,
+      digestPrefix: "aaaaaaaaaaaa",
+      affectedPathCount: 1,
+      affectedPaths: ["src/a.ts"],
+      filesChanged: 1,
+      changedLines: 8,
+      verificationPassed: false,
+    },
+  });
+  assert.equal(packet.stop.code, "no-progress");
+  assert.equal(packet.nextActionCode, "handoff-or-stop");
+  assert.equal(packet.attempts.count, 1);
+});
+
+test("decision packet reads authentic Competition handoff and keeps current origins exact", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-decision-legacy-handoff-"));
+  const store = new StateStore(home);
+  try {
+    const stamp = "2026-08-14T00:00:00.000Z";
+    const make = (id: string, status: TaskRecord["status"]): TaskRecord => ({
+      ...task(status),
+      id,
+      name: id,
+      taskFile: `/${id}.yaml`,
+      sessionId: `session-${id}`,
+    });
+    const legacySource = make("legacy-src", "failed");
+    const legacySuccessor = make("legacy-succ", "queued");
+    const goalSource = make("goal-src", "failed");
+    const goalSuccessor = make("goal-succ", "queued");
+    const currentCompSource = make("comp-src", "failed");
+    const currentCompSuccessor = make("comp-succ", "queued");
+    for (const record of [legacySource, legacySuccessor, goalSource, currentCompSource]) {
+      store.createTask(record);
+    }
+
+    const shared = {
+      schemaVersion: 1 as const,
+      status: "prepared" as const,
+      sourcePatchDigest: "a".repeat(64),
+      gapContractDigest: "b".repeat(64),
+      reusablePathCount: 1,
+      remainingGapCount: 1,
+      reusablePaths: ["src/a.ts"],
+      remainingGaps: [{
+        description: "Finish the remaining acceptance gap",
+        acceptanceExpectation: "Independent verification must pass",
+      }],
+      destinationWorkerProfileId: "other",
+      destinationIdentity: {
+        provider: "deepseek" as const,
+        model: "deepseek-v4-pro",
+        runtime: "claude-code" as const,
+        effort: "high" as const,
+      },
+      reason: "Reuse verified paths",
+      createdAt: stamp,
+      updatedAt: stamp,
+      preparedAt: stamp,
+      nextAction: "wait-for-successor" as const,
+    };
+    store.createCandidateHandoff({
+      record: {
+        ...shared,
+        id: "goal-handoff",
+        origin: { kind: "goal-task", goalId: "goal-1", itemId: "item-1" },
+        sourceTaskId: goalSource.id,
+        sourceCandidateRevisionId: "rev-goal",
+        successorTaskId: goalSuccessor.id,
+      },
+      task: goalSuccessor,
+      authorizationEvent: { summary: "goal handoff" },
+    });
+    store.createCandidateHandoff({
+      record: {
+        ...shared,
+        id: "comp-handoff",
+        origin: { kind: "competition", competitionId: "comp-current", sourceCandidateId: "cand-current" },
+        sourceTaskId: currentCompSource.id,
+        sourceCandidateRevisionId: "rev-comp",
+        successorTaskId: currentCompSuccessor.id,
+      },
+      task: currentCompSuccessor,
+      authorizationEvent: { summary: "competition handoff" },
+    });
+
+    const legacyJson = JSON.stringify({
+      ...shared,
+      id: "legacy-handoff",
+      competitionId: "comp-legacy",
+      sourceCandidateId: "cand-legacy",
+      sourceTaskId: legacySource.id,
+      sourceCandidateRevisionId: "rev-legacy",
+      successorTaskId: legacySuccessor.id,
+    });
+    const raw = new DatabaseSync(store.databasePath);
+    try {
+      raw.prepare(
+        `INSERT INTO candidate_handoffs
+         (id, source_revision_id, source_task_id, successor_task_id, competition_id,
+          status, record_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        "legacy-handoff",
+        "rev-legacy",
+        legacySource.id,
+        legacySuccessor.id,
+        "comp-legacy",
+        "prepared",
+        legacyJson,
+        stamp,
+        stamp,
+      );
+    } finally {
+      raw.close();
+    }
+
+    const eventsBefore = [
+      legacySource.id,
+      legacySuccessor.id,
+      goalSource.id,
+      currentCompSource.id,
+    ].reduce((sum, id) => sum + store.listEvents(id).length, 0);
+
+    const legacyView = resolveHandoffViewForTask(store, legacySource.id);
+    const successorView = resolveHandoffViewForTask(store, legacySuccessor.id);
+    const goalView = resolveHandoffViewForTask(store, goalSource.id);
+    const currentCompView = resolveHandoffViewForTask(store, currentCompSource.id);
+    const legacyPacket = buildMainDecisionPacketForTask(store, legacySource.id);
+    const successorPacket = buildMainDecisionPacketForTask(store, legacySuccessor.id);
+    const goalPacket = buildMainDecisionPacketForTask(store, goalSource.id);
+    const currentCompPacket = buildMainDecisionPacketForTask(store, currentCompSource.id);
+
+    assert.equal(legacyView?.originKind, "competition");
+    assert.equal(legacyView?.competitionId, "comp-legacy");
+    assert.equal(legacyView?.sourceCandidateId, "cand-legacy");
+    assert.equal(legacyView?.goalId, undefined);
+    assert.equal(successorView?.originKind, "competition");
+    assert.equal(successorView?.isSuccessor, true);
+    assert.equal(goalView?.originKind, "goal-task");
+    assert.equal(goalView?.goalId, "goal-1");
+    assert.equal(goalView?.itemId, "item-1");
+    assert.equal(goalView?.competitionId, undefined);
+    assert.equal(currentCompView?.originKind, "competition");
+    assert.equal(currentCompView?.competitionId, "comp-current");
+    assert.equal(currentCompView?.goalId, undefined);
+    assert.equal(legacyPacket.reuse?.handoffStatus, "prepared");
+    assert.equal(legacyPacket.reuse?.reusablePathCount, 1);
+    assert.equal(successorPacket.reuse?.handoffStatus, "prepared");
+    assert.equal(goalPacket.reuse?.handoffStatus, "prepared");
+    assert.equal(currentCompPacket.reuse?.handoffStatus, "prepared");
+    assert.doesNotMatch(JSON.stringify(legacyPacket), /SECRET|sk-[A-Za-z0-9_-]{8,}/);
+
+    assert.equal(
+      [
+        legacySource.id,
+        legacySuccessor.id,
+        goalSource.id,
+        currentCompSource.id,
+      ].reduce((sum, id) => sum + store.listEvents(id).length, 0),
+      eventsBefore,
+    );
+    const after = new DatabaseSync(store.databasePath);
+    try {
+      const row = after.prepare(
+        `SELECT record_json FROM candidate_handoffs WHERE id = ?`,
+      ).get("legacy-handoff") as { record_json: string };
+      assert.equal(row.record_json, legacyJson);
+    } finally {
+      after.close();
+    }
+
+    const broken = make("broken-src", "failed");
+    const brokenSuccessor = make("broken-succ", "queued");
+    store.createTask(broken);
+    store.createTask(brokenSuccessor);
+    const secret = "SECRET-DECISION-HANDOFF";
+    const brokenRaw = new DatabaseSync(store.databasePath);
+    try {
+      brokenRaw.prepare(
+        `INSERT INTO candidate_handoffs
+         (id, source_revision_id, source_task_id, successor_task_id, competition_id,
+          status, record_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        "broken-handoff",
+        "rev-broken",
+        broken.id,
+        brokenSuccessor.id,
+        "",
+        "prepared",
+        JSON.stringify({
+          ...shared,
+          id: "broken-handoff",
+          sourceTaskId: broken.id,
+          sourceCandidateRevisionId: "rev-broken",
+          successorTaskId: brokenSuccessor.id,
+          reason: secret,
+        }),
+        stamp,
+        stamp,
+      );
+    } finally {
+      brokenRaw.close();
+    }
+    assert.equal(store.listCandidateHandoffs().find((row) => row.id === "broken-handoff")?.origin, undefined);
+    assert.throws(
+      () => buildMainDecisionPacketForTask(store, broken.id),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.equal(error.message, CANDIDATE_HANDOFF_CORRUPTION_ERROR);
+        assert.ok(!error.message.includes(secret));
+        return true;
+      },
+    );
+  } finally {
+    store.close();
+    await rm(home, { recursive: true, force: true });
+  }
 });

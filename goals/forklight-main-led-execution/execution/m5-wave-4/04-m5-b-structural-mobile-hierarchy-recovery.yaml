@@ -1,0 +1,199 @@
+version: 2
+name: M5-B structural mobile hierarchy recovery
+project: /Users/yijunwang/code/forklight
+taskClass: m5-human-first-hub-structural-mobile-hierarchy
+taskFamily: forklight-product-graduation
+workerProfileId: grok-4-6-xhigh
+executionPreference: auto
+routingDecision:
+  taskFamily: forklight-product-graduation
+  shortlist:
+    - provider: xai
+      model: grok-4.6
+      runtime: grok-build
+      effort: xhigh
+      workerProfileId: grok-4-6-xhigh
+  selectedWorker:
+    provider: xai
+    model: grok-4.6
+    runtime: grok-build
+    effort: xhigh
+    workerProfileId: grok-4-6-xhigh
+  selectedBecause:
+    code: user-specified
+    note: 一骏长期授权 ForkLight 优先使用 Grok CLI 4.6 Xhigh，并把 UI 交互与动效符合预期设为硬要求；本任务复用现有完整 Candidate，但改用真正适合手机的两层层级，而不是继续把所有控件挤在一行。
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+reviewRequirement:
+  requiredJudges: 2
+  reason: 最终 Hub 同时影响信息理解、触控与键盘交互、响应式布局、动效和安全动作可达性；产品体验与技术可访问性两个独立视角必须检查同一最终 Revision。
+runtime:
+  name: grok-build
+  executable: /Users/yijunwang/code/forklight/goals/forklight-main-led-execution/execution/m5-wave-4/m5-b-structural-mobile-recovery-bootstrap.mjs
+  effort: xhigh
+  maxBudgetUsd: null
+contract:
+  outcome: Preserve the complete Goal-first M5-B desktop Candidate while replacing the cramped phone shell with a native-feeling two-row hierarchy whose navigation, Back, System utilities, interaction feedback and restrained motion all fit and behave correctly from 320px through desktop.
+  presentation:
+    summary: 保留已经成形的新版 Hub，真正重排手机导航：主入口一行、返回与页面标题一行，菜单不裁切，触控、键盘和克制动效都符合预期。
+    language: zh-CN
+  context:
+    - Read AGENTS.md and specs/m5-product-graduation/work-items/hub-redesign/spec.md completely. Its structural mobile-hierarchy continuation is the sole accepted boundary; create no second Spec or roadmap.
+    - 一骏已长期授权同一 Goal 内的后续普通 Task，并明确撤销阻止本次继续的 no-further-replacement 边界。Do not ask for another per-Task approval.
+    - "User acceptance is not only no-overflow. UI interaction and motion must feel expected: immediate state feedback, correct focus/keyboard/touch behavior, subtle purposeful motion and complete reduced-motion behavior."
+    - Prior Tasks 24f8000a-5810-43e3-9f15-098ccf94203c, 0be03566-54d9-4e01-8224-a3b1088c1128 and 64b4ac59-c3a7-4eb2-bd18-02294045be8b remain immutable and protected. Do not resume, relabel, mutate or read their Workspaces.
+    - The Workspace-local seed is exact Candidate Revision 8454e3cf-ea26-4b8f-892f-234b7835e13c, digest 1bd59768d702566e0577a382c573728eef1cdfd218044825fe7932104b2a91a8. Bootstrap validates its exact seven-path set and source apply feasibility before materialization.
+    - "Desktop 1440x900 already passes: 52px product bar, readable Goal Tree/document, about 68ch prose, one-line status and a true Decision Center route. Preserve that composition."
+    - Real QA proved the structural phone cause. At 390px and 360px the two rows are each about 405.3px wide because brand, primary routes, System and Back compete in the product row; System utilities extend to about x=446.6. Overflow hiding is not a fix.
+    - The Candidate also contains one test-only TypeScript build gap at tests/hub-responsive-layout.test.ts:1706 where match[1] needs explicit narrowing after assert.ok(match).
+    - The mobile Goal file starts at scrollTop zero, Back restores the Goal Tree and narrow-to-wide resize hides Back. Preserve these behaviors.
+    - Existing Work, Decision Center, System routes, theme/language handlers and connection truth are one implementation. Recompose them; do not duplicate state, actions or data.
+    - The Impeccable detector already ran exactly once for M5-B. Do not run it again.
+    - ForkLight serves one local developer. Add no checksum, lock, lease, version handshake, responsive state store or coordination mechanism. The path/apply bootstrap exists only to prevent wrong Candidate/source-base use.
+    - No absolute Worker duration, Token or no-progress limit applies. Continue only while each round closes a named acceptance item; stop before compensating patches or a widened product contract.
+  inScope:
+    - Materialize and preserve the complete seven-path Goal-first Candidate.
+    - On 760px and below, make the product row contain only ForkLight identity, Work, Decision Center and System. Move the existing Back control into the page row so it never competes for product-navigation width.
+    - Make the page row contain only the conditional Back control and current page title on phone. Hide the redundant top-meta chips from permanent phone chrome; the existing System connection truth remains reachable and desktop meta stays unchanged.
+    - At widths below 360px, the brand mark may become the compact visual identity while ForkLight remains the accessible name. Do not abbreviate or hide the three primary routes.
+    - Anchor the System menu to the viewport-fitting edge, bound its width and height, allow vertical scrolling when needed and keep every route, theme/language control and connection fact reachable without horizontal clipping.
+    - Close System on route selection, Escape and outside pointer/touch. Escape returns focus to the System summary. Keep native details/summary keyboard semantics and visible focus.
+    - Add one restrained System-menu entrance motion using opacity plus a small vertical translation, 120-160ms, only under prefers-reduced-motion no-preference. Navigation state feedback may use the same short duration. No decorative looping, scaling, bounce or content movement.
+    - Preserve the existing exact Goal-entry scroll, Back-to-tree state, detail close, route replacement and narrow-to-wide presentation behavior.
+    - Fix the exact test-only TypeScript narrowing and add focused assertions for hierarchy, fitting intent, interaction dismissal/focus, motion and reduced-motion without weakening any existing safety or continuity assertion.
+  outOfScope:
+    - Goal file, Goal Tree, Decision Center content, Task detail, copy/data adapters, i18n strings, API, backend, Core, Store, daemon, schema, routing or framework redesign.
+    - Bottom navigation, hamburger replacement, new icons/assets, duplicate mobile utilities, a separate mobile codebase, responsive persistence or hiding any core route.
+    - Changing DESIGN.md or i18n.js from the retained Candidate, broad CSS cleanup, detector rerun, commit, push, reset, Competition or distributed coordination machinery.
+  executionSteps:
+    - Inspect only the retained shell markup, the final Goal-first CSS block, System/Back initialization, and the two focused tests. Confirm DESIGN.md and i18n.js stay byte-identical to the seed.
+    - Implement the explicit two-row mobile hierarchy. Use layout sizing and content-driven breakpoints so every visible shell control's bounding box is inside 320, 360 and 390px; do not use clipping as proof of fit.
+    - Keep one DOM instance for Back, System, theme, language and connection truth. Preserve all current ids and event consumers where possible.
+    - Add bounded System dismissal/focus behavior and restrained motion. Reduced-motion must remove both menu animation and navigation transitions.
+    - Update the smallest focused tests, including the exact match[1] TypeScript narrowing. Tests must assert human behavior, not only CSS token presence.
+    - Run all five acceptance commands and return a concise handoff naming the mobile hierarchy, interaction states, motion, exact changed paths and Main's remaining real-browser/two-Judge gates.
+  deliverables:
+    - One complete seven-path M5-B Candidate whose delta from Revision 8454e3cf is limited to structural mobile shell, System/Back interactions, restrained motion and focused tests.
+    - A phone shell that fits at 320/360/390, keeps 96px or less permanent chrome, exposes all primary routes and utilities, and never clips Back or the System menu.
+    - Keyboard/touch dismissal and focus behavior, reduced-motion-safe feedback, passing independent acceptance and a precise Main browser/Judge handoff.
+  modules:
+    - name: retained Candidate materialization
+      responsibility: Apply exactly Revision 8454e3cf before Grok starts.
+      consumes: [Workspace-local Candidate patch, fresh isolated Workspace, exact seven paths]
+      produces: [Goal-first Hub and Task-local seed marker]
+      boundaries: [No sibling Workspace read, source mutation or extra integrity machinery]
+    - name: structural mobile shell
+      responsibility: Separate global navigation from contextual Back/title so both rows fit the phone instead of clipping.
+      consumes: [existing product bar, topbar, Back state, 760px breakpoint]
+      produces: [viewport-contained 320/360/390 shell, desktop-preserving two-row hierarchy]
+      boundaries: [No duplicate control/state, no content/data change, no overflow-hiding workaround]
+    - name: System interaction and motion
+      responsibility: Keep all utilities reachable with expected pointer, touch, keyboard, focus and reduced-motion behavior.
+      consumes: [existing details/summary, theme/language handlers, connection status]
+      produces: [viewport-fit menu, selection/outside/Escape dismissal, focused summary, subtle entrance feedback]
+      boundaries: [No modal state model, no looping/decorative motion, no second utility implementation]
+    - name: focused shell verification
+      responsibility: Prove hierarchy, interaction/motion contract and existing Goal continuity without loosening safety tests.
+      consumes: [index, final CSS, shell helpers, existing focused fixtures]
+      produces: [build-clean tests and human-behavior assertions]
+      boundaries: [No browser geometry claim from static tests; Main owns real rendering]
+  callChain:
+    - ForkLight daemon submit snapshots current source; bootstrap materializes exact Revision 8454e3cf and launches one Grok current-model-only native Goal.
+    - Product row renders identity plus Work/Decision/System. Page row renders Back only when existing state requires it plus the current page title.
+    - System keeps native disclosure semantics; bounded listeners close it on outside pointer or Escape and restore summary focus on Escape; route buttons keep the existing switchTab path.
+    - CSS fits the menu to the right/viewport edge and supplies one short entrance transition only when motion is allowed.
+    - Existing Goal selection still resets file/page scroll, Back restores tree context, resize updates presentation and polling retains semantic DOM state.
+    - ForkLight independently runs the unchanged suite. Main then performs one batched desktop/phone/landscape QA, two different-view Judges inspect one Revision and Main alone may integrate serially.
+  scenarios:
+    - name: 390px Goal file
+      given: A selected Goal file is open at 390x844.
+      when: Back is visible.
+      then: Product row contains identity and three routes; page row contains horizontal Back and title; both rows fit, total no more than 96px, and the Goal header/result begins below them.
+    - name: 360px System utilities
+      given: The Hub is 360x800.
+      when: The user opens System.
+      then: The menu stays fully inside the viewport, every route/theme/language/connection item is reachable, and no horizontal clipping or body overflow occurs.
+    - name: 320px compact identity
+      given: The Hub is 320px wide.
+      when: Work, Decision Center and System are visible.
+      then: ForkLight remains the accessible product name, the compact mark may replace visible brand text, every route stays horizontal and all visible shell boxes remain within the viewport.
+    - name: keyboard and outside dismissal
+      given: System is open.
+      when: Escape is pressed or the user taps outside.
+      then: The menu closes once; Escape restores focus to its summary; no route, theme or data state changes.
+    - name: expected motion
+      given: Motion is allowed.
+      when: System opens or route state changes.
+      then: Feedback uses only a 120-160ms opacity/small-translation or color transition and settles immediately; reduced-motion removes it without changing behavior.
+    - name: narrow to desktop
+      given: Back is visible in a narrow Goal file.
+      when: The viewport grows above 760px without new data.
+      then: Back hides immediately and the accepted desktop Goal Tree/document layout returns without refresh-dependent residue.
+    - name: desktop regression guard
+      given: The Hub opens at 1440x900.
+      when: Work, Decision Center and System are used.
+      then: The accepted 52px product bar, readable document, true route replacement, meta/status, safe actions and focus behavior remain unchanged.
+  risks:
+    - Moving Back by CSS positioning would leave it in the wrong semantic row and can still reserve width; move the existing DOM control into the page row.
+    - Simply hiding overflow can make measurements look clean while controls remain unreachable; real bounding boxes are the Main acceptance source.
+    - A global outside-click listener can close the menu before its own controls act; ignore events inside the disclosure and preserve existing handlers.
+    - Motion can become distracting or inaccessible; keep one short entrance, no scale/bounce, and fully disable it under reduced-motion.
+  changeBudget:
+    maxFiles: 7
+    maxDiffLines: 3500
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 60000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxWorkerValidationRepairs: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, coverage]
+  generatedPaths: [dist/**, coverage/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - DESIGN.md
+    - src/hub/public/index.html
+    - src/hub/public/app.css
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - tests/hub-ui-assets.test.ts
+    - tests/hub-responsive-layout.test.ts
+acceptance:
+  criteria:
+    - Exact Revision 8454e3cf is materialized on a matching source base; the three prior Tasks remain immutable and Grok reads no sibling Workspace.
+    - At 320/360/390, every visible product/page-shell and open System-menu bounding box fits the viewport, permanent chrome is at most 96px, labels stay horizontal and no core control is hidden or clipped.
+    - Product row contains only accessible ForkLight identity plus Work, Decision Center and System; page row contains conditional Back plus title; redundant mobile top-meta is not permanent chrome and desktop stays unchanged.
+    - System routes, theme/language and connection truth use the existing controls; selection, outside pointer/touch and Escape close the menu, Escape restores summary focus and keyboard/touch targets remain practical.
+    - Motion is purposeful and bounded to 120-160ms opacity/small vertical translation or state-color feedback, has no loop/scale/bounce and is fully disabled by prefers-reduced-motion without changing behavior.
+    - Back appears only for narrow file/detail state, Goal entry remains at exact scrollTop zero, Back restores tree context and narrow-to-wide resize hides it without fetch or refresh.
+    - Desktop retains the accepted Goal Tree, about 68ch Goal file, one-line status, top meta, independent Decision Center route/body, safe actions and focus behavior.
+    - DESIGN.md, i18n.js, Goal/Decision content, data/actions and backend remain byte-identical to the seed; detector is not rerun and visible copy has no em dash or en dash.
+    - ForkLight independently verifies the complete Candidate; exactly two different-view read-only Judges inspect the final Revision and Main alone decides serial Integration.
+  commands:
+    - node --check goals/forklight-main-led-execution/execution/m5-wave-4/m5-b-structural-mobile-recovery-bootstrap.mjs
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/hub-ui-assets.test.ts tests/hub-responsive-layout.test.ts tests/hub-contract-quality.test.ts tests/hub-settings.test.ts tests/hub-operations.test.ts tests/hub-ops-mutations.test.ts
+    - node -e "const fs=require('fs'); const src=fs.readFileSync('src/hub/public/app.js','utf8'); new Function(src); const visible=[fs.readFileSync('src/hub/public/index.html','utf8'),src,fs.readFileSync('src/hub/public/i18n.js','utf8')].join('\\n'); if(/[—–]/.test(visible)) throw new Error('page-visible Hub source contains em/en dash');"
+    - git diff --check

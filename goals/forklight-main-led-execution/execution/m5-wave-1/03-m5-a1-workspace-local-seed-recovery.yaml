@@ -1,0 +1,173 @@
+version: 2
+name: M5-A1 Workspace-local exact protected-partial recovery
+project: /Users/yijunwang/code/forklight
+taskClass: m5-cli-api-first-setup-workspace-local-recovery
+taskFamily: forklight-product-graduation
+workerProfileId: grok-4-6-xhigh
+executionPreference: auto
+routingDecision:
+  taskFamily: forklight-product-graduation
+  shortlist:
+    - provider: xai
+      model: grok-4.6
+      runtime: grok-build
+      effort: xhigh
+      workerProfileId: grok-4-6-xhigh
+  selectedWorker:
+    provider: xai
+    model: grok-4.6
+    runtime: grok-build
+    effort: xhigh
+    workerProfileId: grok-4-6-xhigh
+  selectedBecause:
+    code: user-specified
+    note: The first Grok Task lost Provider connectivity and the cross-Task bootstrap was sandbox-blocked before model work. Main follows 一骏's standing Grok 4.6 Xhigh preference for the exact recovery without claiming a routing recommendation.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+reviewRequirement:
+  requiredJudges: 2
+  reason: Credential transport and external Main-client configuration remain a security-sensitive setup path; two different-view read-only Judges inspect the exact recovered Candidate before Main Integration.
+runtime:
+  name: grok-build
+  executable: /Users/yijunwang/code/forklight/goals/forklight-main-led-execution/execution/m5-wave-1/m5-a1-workspace-local-seed-bootstrap.mjs
+  effort: xhigh
+  maxBudgetUsd: null
+contract:
+  outcome: Reuse exactly the protected 16-path M5-A1 partial on its matching source base, fix the one compile error and atomic signed-in Provider/compatible-Runtime selection, and deliver the original no-Hub first-setup result through unchanged independent acceptance and review.
+  presentation:
+    summary: 保留已经通过的117项行为，只修编译和已登录Provider对应Runtime这两个真实缺口。
+    language: zh-CN
+  context:
+    - Read AGENTS.md, specs/m5-product-graduation/work-items/cli-api-setup/spec.md and goals/forklight-main-led-execution/evidence/m5-a1-attempt-1-connectivity-stop.md completely before editing. They are the sole accepted product and recovery boundary.
+    - Failed Task 245a5dec-eb63-4c6b-9971-2e503c55109d, Session 8da42592-13f1-4658-a1ca-1d670ffe26a7 and its full Workspace remain immutable and protected. Do not resume, relabel, write or reclaim them.
+    - The prior recovery Task stopped before model work because the Workspace sandbox correctly denied reading another Task directory. This replacement carries the exact 16-path partial as a Workspace-local patch, validates its exact path set and runs `git apply --check` before materialization. Add no checksum, content hash, manifest, lock, lease or version handshake.
+    - Main read-only acceptance passes 117/121 focused tests. Build fails only because src/cli/setup.ts has one unused ctx parameter.
+    - "All four behavior failures share one cause: selectSignedInProvider updates xAI/OpenAI Provider settings while leaving runtime.name as claude-code. Existing settings validation correctly requires xai with grok-build and openai with codex-cli."
+    - Preserve the already passing stdin-only secret, rollback, built-in Worker, Main install, API compatibility, human output and documentation behavior. Do not rewrite the partial or expand setup features.
+    - This is one fresh Grok 4.6 Xhigh current-model-only native Goal. It is not continuity with the failed Goal.
+    - No absolute Worker duration, Token or no-progress limit applies. One base Attempt, one validation repair and one Main correction/reverification allowance exist; no generic extra Attempt, adaptation, fallback, model switch or Competition.
+  inScope:
+    - Remove or use the one unused CLI context parameter without changing public behavior.
+    - Make signed-in Provider selection update Provider plus its compatible Runtime atomically through existing SettingsService validation.
+    - Prove xAI selects grok-build and OpenAI selects codex-cli without reading/storing an API key; preserve API-key Provider behavior.
+    - Adjust only focused tests or documentation necessary for the corrected exact behavior.
+    - Run the unchanged A1 acceptance and hand off the exact Candidate.
+  outOfScope:
+    - Any new setup command, full Worker editor, Provider probe, Hub UI, GoalBoard, backup/recovery, Store schema, Task/Integration semantics, automatic work, model switch, Competition, commit, push or reset.
+    - Any path outside the exact protected 16-path set or any mutation of the failed Task Workspace.
+  executionSteps:
+    - Inspect the already materialized partial and two verified gaps before editing.
+    - Apply the smallest compatible Runtime-selection and compile fixes while preserving all passing behavior.
+    - Run the bootstrap policy check, build, full original focused suite and diff check.
+    - Inspect the exact 16-path diff and stop when acceptance passes; return evidence rather than widening the contract.
+  deliverables:
+    - One exact 16-path Candidate containing the protected partial plus only scoped corrections.
+    - Passing build, 121 focused behavior tests and diff validation under ForkLight independent acceptance.
+    - Concise handoff naming Provider/Runtime mapping, secret boundary, verification and remaining A2/A3 dependencies.
+  modules:
+    - name: Exact partial materialization
+      responsibility: Validate and apply the exact Workspace-local protected A1 seed before the Worker starts.
+      consumes: [Workspace-local exact partial patch, fresh isolated Workspace, exact 16 paths.]
+      produces: [Materialized reusable A1 partial and Task-local marker.]
+      boundaries: [Operational only; no cross-Task read, product manifest/hash/lock, old Workspace mutation or source Integration.]
+    - name: Atomic signed-in setup
+      responsibility: Select local-sign-in Provider and its compatible Runtime as one valid settings update.
+      consumes: [Resolved xAI/OpenAI Provider, local sign-in evidence, current settings.]
+      produces: [xAI plus grok-build or OpenAI plus codex-cli, with no key read/write.]
+      boundaries: [No Provider probe, API-key semantic change or second settings truth.]
+    - name: Preserved no-Hub setup surface
+      responsibility: Keep the accepted CLI/API, Worker selection, Main install and human explanation behavior unchanged.
+      consumes: [Protected partial and corrected shared setup result.]
+      produces: [Buildable, independently verified first-setup Candidate.]
+      boundaries: [No new command, Hub UI, backup/recovery or unrelated refactor.]
+  callChain:
+    - Main-owned bootstrap validates the Workspace-local seed path set and apply feasibility, then materializes the exact partial in the fresh Task Workspace.
+    - Grok starts one fresh native Goal, fixes the two known gaps and self-checks all original acceptance.
+    - ForkLight independently runs the bootstrap policy test, build, 121-test focused suite and diff check against one exact Candidate.
+    - Two fresh independent Judges inspect security/human behavior; Main alone accepts/revises/rejects and may integrate serially.
+  scenarios:
+    - name: Signed-in Grok selection
+      given: Grok is locally signed in and no ForkLight xAI Keychain item exists.
+      when: The user selects xAI setup.
+      then: One settings update selects xAI plus grok-build, asks for no key and points to the built-in Grok Worker.
+    - name: Signed-in Codex selection
+      given: Codex is locally signed in.
+      when: The user selects OpenAI setup.
+      then: One settings update selects OpenAI plus codex-cli and the API-key path remains refused.
+    - name: Existing API-key path remains safe
+      given: A supported API-key Provider is selected with a stdin credential.
+      when: Setup commits it after confirmation.
+      then: Existing transactional Keychain/settings behavior and content-free output remain unchanged.
+    - name: Wrong source or partial stops before Worker
+      given: The Workspace-local patch has a wrong path set or does not apply to the fresh source base.
+      when: The recovery bootstrap starts.
+      then: It exits before Grok and applies no knowingly mismatched recovery.
+  risks:
+    - Changing Provider without Runtime reproduces the defect; focused xAI/OpenAI settings assertions must prove the atomic pair.
+    - Rebuilding instead of reusing can regress 117 passing cases; exact materialization and 16-path ownership preserve the usable partial.
+    - Operational recovery could seed the wrong source; exact path parsing and `git apply --check` fail before Worker launch.
+  changeBudget:
+    maxFiles: 16
+    maxDiffLines: 2600
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 60000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxWorkerValidationRepairs: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test, .forklight-boundary-capture, .forklight-receipt-retry, plans]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - README.md
+    - docs/configuration.md
+    - docs/m1-clean-user-runbook.md
+    - docs/operations.md
+    - src/cli.ts
+    - src/cli/setup.ts
+    - src/core/providers.ts
+    - src/hub/server.ts
+    - src/setup/service.ts
+    - src/setup/status.ts
+    - src/setup/types.ts
+    - tests/cli-setup.test.ts
+    - tests/hub-main-install.test.ts
+    - tests/hub-settings.test.ts
+    - tests/main-install-skill.test.ts
+    - tests/setup-service.test.ts
+acceptance:
+  criteria:
+    - The Workspace-local bootstrap validates exactly 16 paths and `git apply --check` before materialization and one fresh Grok native Goal; both earlier failed Tasks stay immutable.
+    - Build passes with no unused CLI parameter, and the unchanged full focused suite passes all 121 tests.
+    - Signed-in xAI atomically selects grok-build and signed-in OpenAI atomically selects codex-cli without asking for, reading or storing an API key.
+    - API-key Providers retain stdin-only transport, transactional rollback and no secret in argv, output, Store, receipts or failures.
+    - Built-in Worker selection, Main install/status/uninstall, existing authenticated setup API and plain-language fact/reason/next output remain compatible.
+    - No path outside the exact 16, Hub UI, backup/recovery, Store schema, automatic work, coordination machinery or unrelated behavior exists.
+    - ForkLight independently verifies one exact Candidate, two different-view Judges review it and Main alone decides serial Integration.
+  commands:
+    - node goals/forklight-main-led-execution/execution/m5-wave-1/m5-a1-workspace-local-seed-bootstrap.test.mjs
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/cli-setup.test.ts tests/setup-service.test.ts tests/hub-main-install.test.ts tests/main-install-skill.test.ts tests/hub-settings.test.ts
+    - git diff --check

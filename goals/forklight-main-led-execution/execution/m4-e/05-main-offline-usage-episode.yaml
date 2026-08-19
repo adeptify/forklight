@@ -1,0 +1,175 @@
+version: 2
+name: M4-E Main-offline delivery usage episode
+project: /Users/yijunwang/code/forklight
+taskClass: m4-main-offline-usage-episode
+taskFamily: orchestration-efficiency
+directCodexProfileId: codex-main-gpt-5.6-sol-xhigh-v1
+workerProfileId: grok-4-6-xhigh
+executionPreference: auto
+routingDecision:
+  taskFamily: orchestration-efficiency
+  shortlist:
+    - provider: xai
+      model: grok-4.6
+      runtime: grok-build
+      effort: xhigh
+      workerProfileId: grok-4-6-xhigh
+  selectedWorker:
+    provider: xai
+    model: grok-4.6
+    runtime: grok-build
+    effort: xhigh
+    workerProfileId: grok-4-6-xhigh
+  selectedBecause:
+    code: user-specified
+    note: The active Goal requires Grok 4.6 Xhigh native Goal for meaningful ForkLight implementation, and current matched health says the Profile is launchable.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+reviewRequirement:
+  requiredJudges: 2
+  reason: Main Token accounting and durable schema are high-risk; two different-view Judges must independently inspect exact segment summing, compatibility and privacy.
+contract:
+  outcome: Main can stop while ForkLight works, resume only at meaningful delivery evidence, and capture every resumed Codex terminal segment as one auditable role total without omitting or double-counting Main work.
+  presentation:
+    summary: 让Main在后台执行期间真正离线，只在有新交付证据时恢复；所有恢复会话的Token都完整合并，不能为了好看的节省数字漏算。
+    language: zh-CN
+  context:
+    - Read AGENTS.md, specs/m4-e-main-efficient-delivery/work-items/main-offline-usage-episode/spec.md, goals/forklight-main-led-execution/evidence/m4-e-storage-main-token-amplification-audit.md, src/core/codex-terminal-usage.ts, src/core/main-token-usage.ts and current focused tests completely before editing. The accepted Work Item is the unique boundary; do not create another spec or roadmap.
+    - The valid storage pair remains immutable negative evidence. This Task implements a cross-project Main-offline measurement capability; it does not rerun calibration or claim saving.
+    - Reuse current observation-only delivery timeout/re-entry, main_usage_samples row, pair gate and value report. Do not create another delivery state machine, usage table or coordination mechanism.
+    - ForkLight serves one local developer. Reject malformed count evidence with focused validation, but add no lock, lease, checksum/content hash, version handshake or distributed consistency layer.
+    - Every segment must be count-only and retain its run reference. No prompt, response, log, terminal body, private path, credential or transcript may persist or appear in public output.
+    - M5 and Hub/UI remain closed.
+  inScope:
+    - Add one Core capture-episode path accepting Task/comparison/role, one episode run ref and a bounded ordered segment array.
+    - Each segment contains one unique run ref and one exact five-counter Codex turn.completed event normalized through the existing strict adapter.
+    - Persist one aggregate role sample with safely summed disjoint counts plus bounded count-only segment evidence and compatibility for every current schema-version-1 sample.
+    - Expose one shared behavior through Daemon, CLI capture-episode and MCP, with status projection that never computes savings.
+    - Keep pair assessment/report and value report behavior unchanged except accepting the normalized aggregate sample shape.
+    - "Document staged Main-offline prepare timeout/re-entry: dispatch and stop, non-model durable observation, review re-entry, exact decision/Integration, then complete episode capture."
+    - Add focused Core, Store reopen, CLI, Daemon, MCP, pair/value compatibility and existing delivery timeout/re-entry tests.
+  outOfScope:
+    - Product Hub/UI, routing/model changes, Worker Runtime changes, storage reclaim, old sample or assessment mutation, calibration execution or main-token-pairs.json changes.
+    - Automatic Main decision, automatic reviewer choice, retry, replacement pair, fallback, Competition, third Judge or lower quality gate.
+    - New usage table or delivery operation/entity; locks, leases, checksums/content addressing, version handshakes or distributed coordination.
+    - Absolute Worker duration/Token ceiling, commit, push, reset, remote or credential handling.
+  executionSteps:
+    - Trace the current strict terminal adapter, role sample normalization/persistence and CLI/Daemon/MCP capture call chain only.
+    - Define the smallest backward-compatible episode sample shape and bounded segment validation before editing consumers.
+    - Implement one Core path and thread it through Store, Daemon, CLI and MCP without duplicating arithmetic.
+    - Prove existing single-run capture and all pair/value consumers stay compatible; add the staged observation-only delivery test and operator documentation.
+    - Run the complete accepted command set, inspect the exact diff and hand off only evidence-backed behavior.
+  deliverables:
+    - One exact Candidate implementing count-only Main usage episodes across Core, Store, Daemon, CLI and MCP.
+    - Backward-compatible schema and tests for legacy single-run samples plus multi-session aggregates.
+    - Main-offline delivery documentation that counts every resumed Main segment and never treats observation timeout as Task failure.
+    - Concise handoff naming changed paths, schema, public commands/tools, test results and the one-new-storage-subject proof boundary.
+  modules:
+    - name: Main usage episode
+      responsibility: Validate named terminal segments and produce one safe aggregate role sample.
+      consumes: [Task-derived comparison identity, episode run ref, ordered segment run refs and exact Codex terminal usage events.]
+      produces: [One durable count-only aggregate sample with bounded segment evidence.]
+      boundaries: [No raw content, invented counters, saving arithmetic, delivery mutation or second usage table.]
+    - name: Public episode capture
+      responsibility: Expose the same Core capture through Daemon, CLI and MCP and return status-compatible evidence.
+      consumes: [Validated capture-episode request.]
+      produces: [Canonical sample and read-only status projection.]
+      boundaries: [No identity override, duplicate comparison role, content echo or transport-specific arithmetic.]
+    - name: Main-offline operating path
+      responsibility: Explain and prove how existing prepare timeout/re-entry lets Main stop between durable evidence boundaries.
+      consumes: [Current delivery prepare/decide checkpoints and non-model durable observation.]
+      produces: [Documented dispatch, review and decision segmentation plus a focused regression test.]
+      boundaries: [No Worker deadline, automatic Main decision, new delivery state or hidden Main segment.]
+  callChain:
+    - Main dispatch segment calls existing delivery prepare with bounded observation and then ends.
+    - ForkLight continues Task and Judge work while a non-model host observes durable state.
+    - Later Main segments re-enter the exact Task only after new Candidate/Judge evidence and perform exact decide/Integration.
+    - Caller submits every terminal segment once to main-token capture-episode.
+    - Core normalizes and sums segments, Store persists one role sample, and existing pair/value readers consume its aggregate fields.
+  scenarios:
+    - name: Complete multi-session episode
+      given: Two or more distinct complete Codex terminal segments belong to the same fixed Main profile and role.
+      when: Main captures the episode once.
+      then: One sample persists exact segment refs/counts and parent sums; status, CLI and MCP agree after Store reopen.
+    - name: Malformed or duplicate segment
+      given: A segment has a wrong terminal shape, unknown/content field, duplicate within-episode run ref or unsafe numeric sum.
+      when: Capture is requested.
+      then: It fails with a stable non-echoing error and persists no partial sample.
+    - name: Legacy compatibility
+      given: Existing schema-version-1 single-run samples, assessments and canonical comparisons already exist.
+      when: New code reads and reports them.
+      then: Their bytes/behavior, pair arithmetic and value claims remain unchanged.
+    - name: Offline staged delivery
+      given: Worker or Judges outlive a bounded prepare observation.
+      when: Main ends and later re-enters only after durable progress.
+      then: The same Task/Graph continues without cancellation or recreation and every Main session can be counted in one episode.
+  risks:
+    - Segment summing could double-count cached input or reasoning; reuse the strict terminal adapter and test disjoint arithmetic at every level.
+    - Schema evolution could invalidate historical rows; normalize both legacy and episode shapes and test real Store reopen compatibility.
+    - Public surfaces could leak terminal content; persist/project only explicit count fields and run refs, with unknown-key rejection tests.
+    - A short observation could be mistaken for a Task limit; documentation and tests must keep timeout observation-only.
+  changeBudget:
+    maxFiles: 16
+    maxDiffLines: 3000
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 60000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxWorkerValidationRepairs: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test, .forklight-boundary-capture, .forklight-receipt-retry, plans]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/main-token-usage.ts
+    - src/core/main-token-pair.ts
+    - src/state/store.ts
+    - src/daemon/coordinator.ts
+    - src/daemon/protocol.ts
+    - src/daemon/server.ts
+    - src/cli.ts
+    - src/mcp/server.ts
+    - tests/main-token-usage.test.ts
+    - tests/main-token-pair.test.ts
+    - tests/main-token-value-report.test.ts
+    - tests/main-delivery.test.ts
+    - tests/daemon.test.ts
+    - tests/daemon-cli.test.ts
+    - tests/mcp.test.ts
+    - docs/main-led-delivery.md
+    - docs/operations.md
+acceptance:
+  criteria:
+    - Two or more exact Codex terminal segments persist one aggregate role sample whose disjoint parent totals equal the safe segment sums and survive Store reopen.
+    - Every segment run ref and count component is visible count-only through status, CLI and MCP; no raw content or terminal body is stored or echoed.
+    - Malformed/unknown/content-bearing input, duplicate within-episode segment refs, unsafe sums, identity mismatch and duplicate comparison role fail before persistence with stable non-echoing errors.
+    - Existing single-run capture, schema-version-1 rows, pair assessment/report, value report and all current M4 comparisons remain behavior compatible.
+    - Core, Daemon, CLI and MCP share one episode implementation and schema; status remains count-only and never claims savings.
+    - Documentation and a focused regression prove staged prepare timeout/re-entry is observation-only, uses the same durable Task/Graph and counts every resumed Main segment.
+    - No Hub/UI, routing, Runtime, storage deletion, old evidence, coordination mechanism, credential, commit, push, reset or unrelated path change exists.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/main-token-usage.test.ts tests/main-token-pair.test.ts tests/main-token-value-report.test.ts tests/main-delivery.test.ts tests/daemon.test.ts tests/daemon-cli.test.ts tests/mcp.test.ts
+    - git diff --check

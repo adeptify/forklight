@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "name": "M2-C reclaim transport observation",
+  "objective": "Keep the shared CLI/MCP daemon observation window from expiring before an ordinary confirmed local storage reclaim returns, without adding replay, cancellation, new operation state, or changing storage eligibility and deletion semantics.",
+  "planFile": "./plan.json",
+  "policy": {
+    "maxDurationMs": null,
+    "noProgressTimeoutMs": null,
+    "maxCorrectionRounds": 1,
+    "maxReviewRounds": 2,
+    "maxNoNewEvidenceCycles": 2
+  },
+  "milestones": [
+    { "itemId": "reclaim-transport-fix", "gate": "integration" },
+    { "itemId": "integrated-timeout-audit", "gate": "machine" },
+    { "itemId": "cli-mcp-parity-audit", "gate": "machine" },
+    { "itemId": "no-replay-boundary-audit", "gate": "machine" }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "name": "M2 Coding final environment-correct audits",
+  "objective": "Prove the environment-correct amended-acceptance boundary, then reuse the delivered Coding source and stopped audit evidence to obtain fresh machine success for only the three remaining zero-change gates.",
+  "items": [
+    { "id": "acceptance-contract-boundary", "task": "./00-acceptance-contract-boundary.yaml", "dependsOn": [] },
+    { "id": "activated-runtime-boundary", "task": "./01-activated-runtime-boundary.yaml", "dependsOn": ["acceptance-contract-boundary"] },
+    { "id": "wrong-candidate-safety", "task": "./02-wrong-candidate-safety.yaml", "dependsOn": ["activated-runtime-boundary"] },
+    { "id": "operation-surface", "task": "./03-operation-surface.yaml", "dependsOn": ["wrong-candidate-safety"] }
+  ]
+}

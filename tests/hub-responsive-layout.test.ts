@@ -1,11 +1,6 @@
 /**
- * FL-112B responsive topology for the focused hierarchical workbench.
- *
- * Desktop keeps one canonical seven-column Task board beside a concise
- * portfolio rail; narrow screens stack the rail and focused workspace and show
- * readable status groups without leaking page-level horizontal scroll. These
- * are deterministic source/CSS assertions that Main's two-viewport browser
- * audit then confirms.
+ * Goal-first Hub layout: Goal Tree, continuous Goal file, one Decision Center,
+ * live-refresh continuity, and the 760px single-pane Back flow.
  */
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
@@ -32,6 +27,431 @@ function extractFunctionSource(src: string, name: string): string {
   throw new Error(`function ${name} is not balanced`);
 }
 
+function emptyColumns() {
+  return {
+    "not-started": [],
+    ready: [],
+    running: [],
+    "waiting-verification": [],
+    "waiting-user-decision": [],
+    completed: [],
+    "stopped-failed": [],
+  };
+}
+
+function hierarchyFixture() {
+  const runningCard = {
+    taskId: "t-run",
+    name: "Implement Hub file",
+    column: "running",
+    placementReason: "lifecycle-running",
+    whatCompleted: "Worker is editing the Goal file",
+    nextAction: "Wait for verification",
+    blockers: [],
+    breadcrumb: { goalId: "g-active", goalName: "Hub redesign", planId: "p-now", planName: "Build" },
+  };
+  const decisionCard = {
+    taskId: "t-decide",
+    name: "Accept Candidate",
+    column: "waiting-user-decision",
+    placementReason: "awaiting-main-decision",
+    whatCompleted: "Verification passed and a Candidate is retained",
+    nextAction: "Main must accept or return the Candidate",
+    blockers: [],
+    breadcrumb: { goalId: "g-active", goalName: "Hub redesign", planId: "p-now", planName: "Build" },
+  };
+  const blockedCard = {
+    taskId: "t-block",
+    name: "Repair failed check",
+    column: "stopped-failed",
+    placementReason: "stopped-or-failed",
+    whatCompleted: "Verification failed; the Candidate workspace is retained",
+    nextAction: "Open the confirmed repair action",
+    blockers: [{ label: "acceptance failed" }],
+    breadcrumb: { goalId: "g-active", goalName: "Hub redesign", planId: "p-now", planName: "Build" },
+  };
+  const doneCard = {
+    taskId: "t-done",
+    name: "Ship DESIGN.md",
+    column: "completed",
+    placementReason: "delivered-outcome",
+    whatCompleted: "DESIGN.md was written from the built interface",
+    nextAction: "No further action",
+    blockers: [],
+    breadcrumb: { goalId: "g-done", goalName: "Finished Goal", planId: "p-old", planName: "Done" },
+  };
+  const parentlessDecision = {
+    taskId: "t-orphan",
+    name: "Standalone decision",
+    column: "waiting-user-decision",
+    placementReason: "awaiting-main-decision",
+    whatCompleted: "A parentless Task is waiting",
+    nextAction: "Decide whether to continue",
+    blockers: [],
+    breadcrumb: {},
+  };
+  const nowColumns = {
+    ...emptyColumns(),
+    running: [runningCard],
+    "waiting-user-decision": [decisionCard],
+    "stopped-failed": [blockedCard],
+  };
+  const historyColumns = { ...emptyColumns(), completed: [doneCard] };
+  return {
+    schemaVersion: 1,
+    columns: [
+      { code: "not-started", order: 0 },
+      { code: "ready", order: 1 },
+      { code: "running", order: 2 },
+      { code: "waiting-verification", order: 3 },
+      { code: "waiting-user-decision", order: 4 },
+      { code: "completed", order: 5 },
+      { code: "stopped-failed", order: 6 },
+    ],
+    goals: [
+      {
+        goalId: "g-active",
+        name: "Hub redesign",
+        objective: "Open on Goal truth and one Decision Center",
+        status: "active",
+        currentPlanId: "p-now",
+        summary: {
+          whatCompleted: "The Goal file is being rebuilt",
+          nextAction: "Decide on the retained Candidate",
+          blocker: "No current blocker.",
+        },
+        plans: [{ planId: "p-now", name: "Build", objective: "Replace the Hub shell", columns: nowColumns }],
+      },
+      {
+        goalId: "g-done",
+        name: "Finished Goal",
+        objective: "A completed Goal stays in History",
+        status: "completed",
+        summary: { whatCompleted: "Every gate is satisfied", nextAction: "No further action" },
+        plans: [{ planId: "p-old", name: "Done", columns: historyColumns }],
+      },
+    ],
+    independentPlans: [],
+    oneOffTasks: { columns: { ...emptyColumns(), "waiting-user-decision": [parentlessDecision] } },
+  };
+}
+
+function loadPresentationApi(src: string) {
+  const names = [
+    "workGoalIsTerminalStatusForSelection",
+    "workGoalDecisionCount",
+    "workColumnsCardCount",
+    "workGoalTaskCount",
+    "workPlanTaskCount",
+    "workOneOffCardCount",
+    "workLaneIsTerminalHistory",
+    "workSafeNarrativeParams",
+    "workNarrativeText",
+    "workLaneHasRealBlocker",
+    "workLaneNextActionText",
+    "workPortfolioCue",
+    "workSummaryWhat",
+    "workSummaryNext",
+    // workLaneNextActionText is required: composeGoalTreeModel and
+    // composeGoalFileModel call it through workPortfolioCue / workSummaryNext.
+    "workGoalCurrentIndex",
+    "workGoalPhaseState",
+    "workGoalCurrentPlan",
+    "workSafeCardBlockerLabel",
+    "workPlacementLabel",
+    "workNormalizeTreeWidth",
+    "workNextMobilePane",
+    "workTreeItemMatches",
+    "composeGoalTreeModel",
+    "composeGoalFileModel",
+    "collectDecisionGroups",
+  ];
+  const helpers = names.map((name) => extractFunctionSource(src, name)).join("\n");
+  return new Function(
+    "t",
+    "WORK_COLUMN_CODES",
+    "WORK_LIVE_COLUMN_CODES",
+    "WORK_NARRATIVE_I18N_KEYS",
+    "WORK_NARRATIVE_EMPTY_BLOCKER_CODES",
+    "GOAL_TREE_WIDTH_MIN",
+    "GOAL_TREE_WIDTH_MAX",
+    "GOAL_TREE_WIDTH_DEFAULT",
+    "GOAL_FILE_CURRENT_CODES",
+    "GOAL_FILE_BLOCKED_CODES",
+    "GOAL_FILE_HISTORY_CODES",
+    `${helpers}
+     return {
+       composeGoalTreeModel: composeGoalTreeModel,
+       composeGoalFileModel: composeGoalFileModel,
+       collectDecisionGroups: collectDecisionGroups,
+       workLaneNextActionText: workLaneNextActionText,
+       workNormalizeTreeWidth: workNormalizeTreeWidth,
+       workNextMobilePane: workNextMobilePane
+     };`,
+  )(
+    (key: string, vars?: Record<string, string>) => {
+      if (!vars) return key;
+      return Object.keys(vars).reduce((out, name) => out.split("{" + name + "}").join(vars[name]), key);
+    },
+    ["not-started", "ready", "running", "waiting-verification", "waiting-user-decision", "completed", "stopped-failed"],
+    ["not-started", "ready", "running", "waiting-verification", "waiting-user-decision"],
+    {},
+    { "lane-blocker-none": true, "goal-wait-all-gates-satisfied": true, "goal-wait-nothing": true },
+    200,
+    420,
+    280,
+    ["waiting-user-decision", "running", "waiting-verification", "ready", "not-started"],
+    ["stopped-failed"],
+    ["completed"],
+  ) as {
+    composeGoalTreeModel: (view: unknown, query?: string, scope?: string) => {
+      now: Array<{ id: string; kind: string; terminal: boolean; plans?: Array<{
+        id: string; kind: string; tasks: Array<{ id: string; status: string }>;
+      }> }>;
+      history: Array<{ id: string; kind: string; terminal: boolean; plans?: Array<{
+        id: string; kind: string; tasks: Array<{ id: string; status: string }>;
+      }> }>;
+      visible: Array<{ id: string; kind: string; plans?: Array<{
+        id: string; kind: string; tasks: Array<{ id: string; status: string }>;
+      }> }>;
+      scope: string;
+    };
+    composeGoalFileModel: (goal: unknown, viewedPlan?: unknown) => {
+      desiredResult: string;
+      currentTruth: string;
+      decisionNeeded: boolean;
+      decisionCount: number;
+      currentTask: { taskId: string } | null;
+      currentCards: Array<{ taskId: string }>;
+      blockedCards: Array<{ taskId: string }>;
+      historyCards: Array<{ taskId: string }>;
+      blockers: Array<{ text: string; fact?: string; next?: string }>;
+      terminal: boolean;
+      sectionOrder: string[];
+      nextAction: string;
+    };
+    collectDecisionGroups: (view: unknown) => {
+      groups: Array<{ goalId: string; items: Array<{ taskId: string; fact: string; reason: string }> }>;
+      parentless: Array<{ taskId: string }>;
+      total: number;
+    };
+    workLaneNextActionText: (summary: { nextAction?: string }, opts?: object) => string;
+    workNormalizeTreeWidth: (px: number) => number;
+    workNextMobilePane: (current: string, action: string) => string;
+  };
+}
+
+test("Goal-first shell, Goal Tree, Goal file and 760px Back styles ship", async () => {
+  const html = await readFile(path.join(hubPublic, "index.html"), "utf8");
+  const css = await readFile(path.join(hubPublic, "app.css"), "utf8");
+  const js = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  assert.ok(html.includes("product-bar") && html.includes('data-tab="work"') && html.includes('data-tab="decisions"'));
+  assert.ok(html.includes("fl-system-menu") && html.includes('data-tab="model"') && html.includes('data-tab="limits"'));
+  assert.ok(html.includes('data-fl-role="mobile-back"'));
+  const productRow = html.slice(html.indexOf('class="product-bar"'), html.indexOf('class="workspace"'));
+  const pageRow = html.slice(html.indexOf('class="topbar"'), html.indexOf('id="main"'));
+  assert.ok(
+    productRow.includes("brand")
+      && productRow.includes('data-tab="work"')
+      && productRow.includes('data-tab="decisions"')
+      && productRow.includes("fl-system-menu"),
+    "product row is identity plus Work, Decision Center and System",
+  );
+  assert.ok(!productRow.includes("fl-mobile-back"), "Back is not a product-row sibling of the primary routes");
+  assert.ok(pageRow.includes('id="fl-mobile-back"') && pageRow.includes('id="fl-page-title"'),
+    "page row contains the existing Back control and the current page title");
+  assert.ok(!pageRow.includes("fl-system-menu") && !pageRow.includes('data-tab="work"'),
+    "primary routes stay in the product row");
+  const systemStart = html.indexOf('id="fl-system-menu"');
+  const systemEnd = html.indexOf("</details>", systemStart);
+  assert.ok(systemStart >= 0 && systemEnd > systemStart, "System disclosure ships");
+  const system = html.slice(systemStart, systemEnd);
+  assert.ok(system.includes("theme-switch") && system.includes("lang-switch") && system.includes('id="fl-status-bar"'),
+    "theme, language and connection truth live inside System");
+  assert.equal((html.match(/id="fl-theme-light"/g) || []).length, 1, "theme Light exists once");
+  assert.equal((html.match(/id="fl-lang-zh"/g) || []).length, 1, "language 中文 exists once");
+  assert.equal((html.match(/id="fl-status-bar"/g) || []).length, 1, "connection truth exists once");
+  const navScrollAt = html.indexOf('class="nav-scroll"');
+  assert.ok(navScrollAt >= 0, "primary routes scroll in an inner nav scroller");
+  const navScroll = html.slice(navScrollAt, html.indexOf('id="fl-system-menu"'));
+  assert.ok(navScroll.includes('data-tab="work"') && navScroll.includes('data-tab="decisions"'),
+    "Work and Decision Center stay in the inner scroller");
+  assert.ok(!navScroll.includes("fl-system-menu") && !navScroll.includes("theme-switch"),
+    "System disclosure is not wrapped by the inner nav scroller");
+  assert.match(css, /\.nav\s*\{[^}]*overflow:\s*visible/, "nav does not clip the System disclosure");
+  assert.match(css, /\.nav-scroll\s*\{[\s\S]*?overflow-x:\s*auto/,
+    "primary-route overflow lives on the inner scroller");
+  assert.match(css, /\.system-menu-list\s*\{[\s\S]*?position:\s*absolute/,
+    "System list paints below the product bar");
+  assert.ok(css.includes("#f6f7f9") && css.includes("#ffffff") && css.includes("#171a21") && css.includes("#1677ff"));
+  assert.match(css, /@media\s*\(max-width:\s*760px\)/, "single-pane breakpoint is 760px");
+  assert.match(css, /@media\s*\(max-width:\s*760px\)[\s\S]*?\.mobile-back/, "narrow Back control is styled");
+  assert.match(css, /@media\s*\(max-width:\s*760px\)[\s\S]*?data-mobile-pane="tree"[\s\S]*?display:\s*none/,
+    "tree pane hides the Goal file on narrow screens");
+  assert.match(css, /@media\s*\(min-width:\s*761px\)[\s\S]*?#fl-mobile-back[\s\S]*?display:\s*none\s*!important/,
+    "wide viewports hide the narrow-only Back control even if it stayed unhidden");
+  assert.ok(js.includes("function composeGoalTreeModel(") && js.includes("function composeGoalFileModel("));
+  assert.ok(js.includes("function collectDecisionGroups(") && js.includes("function rDecisions("));
+  assert.ok(js.includes("function workNextMobilePane(") && js.includes("function workMobileBack("));
+  assert.ok(js.includes("function workApplyGoalFileStart("), "narrow Goal-file start helper ships");
+  assert.ok(js.includes("function workBindViewportPresentation("), "viewport presentation bind ships");
+  assert.ok(js.includes("workBindViewportPresentation()"), "init binds viewport presentation");
+  assert.ok(js.includes("function closeSystemMenu(") && js.includes("function onSystemMenuEscape("),
+    "System close and Escape helpers ship");
+  assert.ok(js.includes("closeSystemMenuOnRouteSelection()"), "route selection closes System");
+  assert.ok(js.includes('addEventListener("pointerdown", onSystemMenuPointerDown)'),
+    "outside pointer closes System");
+  assert.ok(js.includes('addEventListener("touchstart", onSystemMenuTouchStart)'),
+    "outside touch closes System");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  for (const key of [
+    "navDecisions", "navSystem", "navLimits", "mobileBack", "goalTreeNow", "goalTreeHistory",
+    "goalFileResult", "goalFileTruth", "goalFileDecision", "decisionParentless",
+  ]) {
+    assert.equal((i18n.match(new RegExp(`${key}:`, "g")) ?? []).length, 2, `${key} is bilingual`);
+  }
+  const gridBlock = css.slice(css.indexOf(".work-col-grid"), css.indexOf(".work-col-head .work-cell"));
+  assert.match(gridBlock, /repeat\(7,\s*minmax\(150px,\s*1fr\)\)/, "folded evidence still has seven canonical columns");
+});
+
+test("Goal Tree places Now vs History and Decision Center groups by Goal", async () => {
+  const js = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const api = loadPresentationApi(js);
+  const view = hierarchyFixture();
+  const now = api.composeGoalTreeModel(view, "", "now");
+  const history = api.composeGoalTreeModel(view, "", "history");
+  assert.deepEqual(now.now.map((item) => item.id), ["g-active", "inbox"]);
+  assert.deepEqual(history.history.map((item) => item.id), ["g-done"]);
+  assert.equal(now.now[0]?.plans?.[0]?.id, "p-now", "Goal keeps its canonical Plan as a child");
+  assert.deepEqual(now.now[0]?.plans?.[0]?.tasks.map((task) => task.id),
+    ["t-run", "t-decide", "t-block"], "Plan keeps canonical Tasks in status order");
+  assert.ok(now.visible.every((item) => item.id !== "g-done"), "History Goals do not crowd Now");
+  const searched = api.composeGoalTreeModel(view, "Finished", "history");
+  assert.deepEqual(searched.visible.map((item) => item.id), ["g-done"]);
+
+  const goal = view.goals[0];
+  if(!goal || !goal.plans[0]) throw new Error("fixture is missing the active Goal and phase");
+  const file = api.composeGoalFileModel(goal, goal.plans[0]);
+  assert.deepEqual(file.sectionOrder, [
+    "desired-result", "current-truth", "decision", "phase",
+    "current-task", "blockers", "delivery", "evidence",
+  ]);
+  assert.equal(file.desiredResult, "Open on Goal truth and one Decision Center");
+  assert.equal(file.decisionNeeded, true);
+  assert.equal(file.currentTask?.taskId, "t-decide");
+  assert.ok(file.blockedCards.some((card) => card.taskId === "t-block"));
+  assert.ok(!file.historyCards.some((card) => card.taskId === "t-block"));
+  assert.ok(file.blockers.some((blocker) => /acceptance failed|Repair|failed/i.test(blocker.text)));
+  assert.ok(file.nextAction);
+  assert.equal(
+    api.workLaneNextActionText({ nextAction: "Wait for verification" }),
+    "Wait for verification",
+    "fixture drives the shipped next-action helper",
+  );
+
+  const blockedOnly = {
+    goalId: "g-blocked",
+    name: "Blocked only",
+    objective: "Keep the failed Candidate readable",
+    status: "active",
+    currentPlanId: "p-block",
+    summary: {
+      whatCompleted: "Verification failed",
+      nextAction: "Open the confirmed repair",
+    },
+    plans: [{
+      planId: "p-block",
+      name: "Repair",
+      columns: {
+        ...emptyColumns(),
+        "stopped-failed": [{
+          taskId: "t-only-fail",
+          name: "Failed check",
+          column: "stopped-failed",
+          placementReason: "stopped-or-failed",
+          whatCompleted: "Verification failed; the Candidate workspace is retained",
+          nextAction: "Open the confirmed repair action",
+          blockers: [{ label: "acceptance failed" }],
+          breadcrumb: { goalId: "g-blocked", goalName: "Blocked only" },
+        }],
+      },
+    }],
+  };
+  const blockedPhase = blockedOnly.plans[0];
+  if(!blockedPhase) throw new Error("fixture is missing the blocked-only phase");
+  const blockedFile = api.composeGoalFileModel(blockedOnly, blockedPhase);
+  assert.equal(blockedFile.currentTask?.taskId, "t-only-fail",
+    "a Goal whose only live work is stopped-failed still has a current Task");
+  assert.ok(blockedFile.blockedCards.some((card) => card.taskId === "t-only-fail"));
+  assert.ok(!blockedFile.historyCards.some((card) => card.taskId === "t-only-fail"),
+    "stopped-failed work is not filed as completed History");
+  assert.ok(blockedFile.blockers.some((blocker) => blocker.fact || blocker.next || /failed/i.test(blocker.text)),
+    "blocked work exposes fact, reason, retained work, and next action");
+
+  const decisions = api.collectDecisionGroups(view);
+  assert.equal(decisions.total, 2);
+  assert.equal(decisions.groups[0]?.goalId, "g-active");
+  assert.equal(decisions.groups[0]?.items[0]?.taskId, "t-decide");
+  assert.match(decisions.groups[0]?.items[0]?.fact || "", /Candidate is retained/);
+  assert.equal(decisions.parentless[0]?.taskId, "t-orphan");
+  assert.equal(api.workNormalizeTreeWidth(120), 200);
+  assert.equal(api.workNormalizeTreeWidth(500), 420);
+  assert.equal(api.workNextMobilePane("tree", "open-file"), "file");
+  assert.equal(api.workNextMobilePane("file", "open-detail"), "detail");
+  assert.equal(api.workNextMobilePane("detail", "back"), "file");
+  assert.equal(api.workNextMobilePane("file", "back"), "tree");
+});
+
+test("narrow already-selected Goal still opens the Goal file pane", async () => {
+  const js = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const helpers = [
+    extractFunctionSource(js, "workMakeSelection"),
+    extractFunctionSource(js, "workSelectionKey"),
+    extractFunctionSource(js, "workSelectionEqual"),
+    extractFunctionSource(js, "workNextMobilePane"),
+    extractFunctionSource(js, "workApplyMobilePane"),
+    extractFunctionSource(js, "workSelectWorkspace"),
+  ].join("\n");
+  const factory = new Function(
+    `${helpers}
+     var WORKSPACE_SELECTION_KINDS = ["goal", "plan", "one-off"];
+     var S = {
+       workSelection: { kind: "goal", id: "g-active" },
+       workMobilePane: "tree",
+       tab: "work",
+       detail: null
+     };
+     var viewEl = { querySelector: function(){ return null; } };
+     var document = {
+       body: { setAttribute: function(){} },
+       getElementById: function(){ return { hidden: true }; }
+     };
+     function workIsNarrowViewport(){ return true; }
+     function workUpdateMobileBack(){}
+     function workScheduleReadingContextSave(){}
+     function workActionChooserReset(){}
+     function workPendingHandoffReset(){}
+     function hideDetail(){}
+     function workApplyGoalFileStart(){ S.fileStart = true; }
+     function render(){ S.rendered = true; }
+     return { S: S, select: workSelectWorkspace };`,
+  );
+  const api = factory() as {
+    S: {
+      workMobilePane: string;
+      workSelection: { kind: string; id: string };
+      rendered?: boolean;
+      fileStart?: boolean;
+    };
+    select: (kind: string, id: string) => void;
+  };
+  api.select("goal", "g-active");
+  assert.equal(api.S.workSelection.id, "g-active", "already-selected Goal stays selected");
+  assert.equal(api.S.workMobilePane, "file", "narrow tree pane still opens the Goal file");
+  assert.equal(api.S.fileStart, true, "narrow file entry starts at the Goal header");
+  assert.equal(api.S.rendered, undefined, "already-selected tap does not rebuild Work");
+});
+
 test("Work board keeps seven columns with contained horizontal scroll on wide screens", async () => {
   const css = await readFile(path.join(hubPublic, "app.css"), "utf8");
   const gridBlock = css.slice(css.indexOf(".work-col-grid"), css.indexOf(".work-col-head .work-cell"));
@@ -52,10 +472,10 @@ test("FL-112E5 Work hierarchy, expert details, and continuity stay explicit", as
   ]);
 
   const workbench = extractFunctionSource(js, "renderWorkWorkbench");
-  assert.ok(workbench.indexOf("renderWorkPortfolio") < workbench.indexOf("renderWorkContextHeader"),
-    "workspace navigation precedes the selected context");
-  assert.ok(workbench.indexOf("renderWorkContextHeader") < workbench.indexOf("renderWorkFocusedWorkspace"),
-    "the hierarchy explanation precedes the selected workspace");
+  assert.ok(workbench.indexOf("renderWorkPortfolio") < workbench.indexOf("renderWorkFocusedWorkspace"),
+    "workspace navigation precedes the selected result");
+  assert.ok(!workbench.includes("renderWorkContextHeader"),
+    "the tree does not repeat itself as an explanatory workspace header");
   assert.ok(workbench.indexOf("renderWorkFocusedWorkspace") < workbench.indexOf("renderWorkAdvanced"),
     "expert details follow the ordinary execution surface");
 
@@ -249,6 +669,105 @@ test("FL-112E5 restores captured closed disclosures without lazy materialization
   assert.equal(nodes.board.scrollLeft, 64, "board reading position is restored");
 });
 
+test("Goal file reading order and Decision Center reuse existing Task actions", async () => {
+  const js = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const goal = extractFunctionSource(js, "renderWorkFocusedGoal");
+  const roles = [
+    "goal-file-result",
+    "goal-file-truth",
+    "goal-file-decision",
+    "goal-file-phase",
+    "goal-file-task",
+    "goal-file-blockers",
+    "goal-file-delivery",
+    "goal-file-evidence",
+  ];
+  let last = -1;
+  for (const role of roles) {
+    const at = goal.indexOf(role);
+    assert.ok(at > last, `${role} appears in the Goal file reading order`);
+    last = at;
+  }
+  assert.ok(goal.includes("switchTab(\"decisions\")"), "decision-needed states link to Decision Center");
+  assert.ok(goal.includes("renderWorkCard"), "current Task reuses the canonical card");
+  const decisions = extractFunctionSource(js, "renderDecisionCenter");
+  const item = extractFunctionSource(js, "renderDecisionItem");
+  assert.ok(decisions.includes("collectDecisionGroups") && decisions.includes("decision-parentless"));
+  assert.ok(item.includes("showTask") && item.includes("renderWorkMoveActControl"),
+    "Decision Center reuses the existing confirmed action path");
+  assert.doesNotMatch(item, /postJSON\s*\(/, "Decision Center has no second mutation path");
+});
+
+test("live refresh restores Goal Tree width, query, pane and does not steal focus", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const capture = extractFunctionSource(src, "workCaptureWorkbenchContext");
+  const restore = extractFunctionSource(src, "workRestoreWorkbenchContext");
+  for (const key of ["treeWidth", "treeQuery", "treeScope", "mobilePane", "goalFileEvidenceOpen"]) {
+    assert.ok(capture.includes(key) && restore.includes(key), `${key} survives a Work rebuild`);
+  }
+  assert.ok(restore.includes("preventScroll") || restore.includes("workFindFocusTarget"),
+    "focus restore stays semantic and does not jump the page");
+  const tree = { scrollTop: 0, styleAttr: "" };
+  const fileHost = { scrollTop: 0 };
+  const searchInput = { value: "" };
+  const layout = { pane: "tree", styleAttr: "" };
+  const viewEl = {
+    querySelector(selector: string) {
+      if (selector.includes("goal-tree-search-input")) return searchInput;
+      if (selector.includes("goal-file-host")) return fileHost;
+      if (selector.includes("workbench-layout")) return layout;
+      if (selector.includes("goal-tree") && !selector.includes("search") && !selector.includes("resize")) return tree;
+      return null;
+    },
+  };
+  const content = { scrollTop: 0, scrollLeft: 0 };
+  const documentObj = {
+    createEvent() { return { initEvent() {} }; },
+    querySelector() { return content; },
+    getElementById() { return { hidden: true }; },
+    body: { setAttribute() {} },
+  };
+  const state = { workTreeWidth: 280, workTreeQuery: "", workTreeScope: "now", workMobilePane: "tree", tab: "work" };
+  const factory = new Function(
+    "viewEl",
+    "document",
+    "content",
+    "S",
+    `${restore}
+     function workNormalizeTreeWidth(px){
+       if (px < 200) return 200;
+       if (px > 420) return 420;
+       return px;
+     }
+     function workApplyTreeWidth(px){ S.workTreeWidth = workNormalizeTreeWidth(px); }
+     function workApplyMobilePane(pane){ S.workMobilePane = pane; }
+     function workUpdateMobileBack(){}
+     function workFindFocusTarget(){ return null; }
+     function workContentScrollEl(){ return content; }
+     function workMaterializeOpenFinishedBody(){}
+     return function(ctx){ workRestoreWorkbenchContext(ctx); };`,
+  );
+  const restoreContext = factory(viewEl, documentObj, content, state) as (ctx: Record<string, unknown>) => void;
+  restoreContext({
+    treeWidth: 360,
+    treeQuery: "Hub",
+    treeScope: "history",
+    mobilePane: "file",
+    treeScrollTop: 40,
+    fileScrollTop: 88,
+    contentScrollTop: 12,
+    detailOpen: false,
+    focusKey: null,
+  });
+  assert.equal(state.workTreeWidth, 360, "tree width is restored");
+  assert.equal(state.workTreeQuery, "Hub", "tree query is restored");
+  assert.equal(state.workTreeScope, "history", "Now/History scope is restored");
+  assert.equal(state.workMobilePane, "file", "narrow pane is restored");
+  assert.equal(tree.scrollTop, 40, "tree reading position is restored");
+  assert.equal(fileHost.scrollTop, 88, "Goal file reading position is restored");
+  assert.equal(searchInput.value, "Hub", "search field keeps the surviving query");
+});
+
 test("Narrow screens keep the portfolio rail and one focused Goal workspace readable", async () => {
   const css = await readFile(path.join(hubPublic, "app.css"), "utf8");
   // The workbench narrow block is the 900px media query whose first rule is
@@ -266,7 +785,10 @@ test("Narrow screens keep the portfolio rail and one focused Goal workspace read
   // workspace. Other Goals are summaries, never nested boards.
   const js = await readFile(path.join(hubPublic, "app.js"), "utf8");
   const rw = extractFunctionSource(js, "rWork");
-  assert.ok(rw.includes("renderWorkShapeGuide()"), "shape explanation leads the Work surface");
+  assert.ok(rw.includes("renderWorkWorkbench(view, S.workSelection)"),
+    "the same user-view workbench leads empty and populated Work");
+  assert.ok(!js.includes("function renderWorkShapeGuide("),
+    "the UI no longer asks users to choose a shape through an instruction block");
   assert.ok(rw.includes("workResolveSelection"), "selection resolves against canonical Work data");
   assert.ok(rw.includes("renderWorkWorkbench(view, S.workSelection)"),
     "rWork mounts one selected workbench");
@@ -353,11 +875,11 @@ test("Long-lived Work summaries stay bounded without losing hierarchy", async ()
   const js = await readFile(path.join(hubPublic, "app.js"), "utf8");
   assert.ok(js.includes("function workResolveSelection("), "selection resolver ships");
   assert.ok(js.includes("function workPresentProjectOptions("), "project presentation helper ships");
-  const portfolio = extractFunctionSource(js, "renderWorkPortfolio");
+  const portfolio = extractFunctionSource(js, "renderWorkGoalTree");
   const finished = extractFunctionSource(js, "renderWorkFinishedGoals");
   const oneOff = extractFunctionSource(js, "renderWorkOneOffGroup");
-  assert.ok(portfolio.includes("activeGoals"), "active Goals remain in the portfolio rail");
-  assert.ok(portfolio.includes("independentPlans"), "independent Plans remain in the portfolio rail");
+  assert.ok(portfolio.includes("composeGoalTreeModel"), "Goal Tree consumes the Now/History model");
+  assert.ok(js.includes("function composeGoalTreeModel("), "Now vs History placement is a shipped helper");
   assert.ok(finished.includes("ensureFinishedBody"), "finished Goal history is lazy");
   assert.ok(oneOff.includes("definition.limit"), "one-off groups have bounded first-paint limits");
   assert.ok(oneOff.includes('limit !== "all"'), "one-off history can be reached without flooding the DOM");
@@ -374,10 +896,13 @@ test("Long-lived Work summaries stay bounded without losing hierarchy", async ()
 test("Empty, filtered-empty, stale, and error states stay honest in the Work surface", async () => {
   const js = await readFile(path.join(hubPublic, "app.js"), "utf8");
   const rw = extractFunctionSource(js, "rWork");
-  assert.ok(rw.includes("workFilterNoMatches"), "filtered-empty has its own message");
-  assert.ok(rw.includes("workEmpty"), "naturally-empty has its own message");
+  const emptyText = extractFunctionSource(js, "workGoalTreeEmptyText");
+  assert.ok(emptyText.includes("goalTreeEmptyNow") && emptyText.includes("goalTreeEmptyHistory"),
+    "the tree distinguishes no current work from no history");
+  assert.ok(rw.includes("renderWorkWorkbench(view, S.workSelection)"),
+    "naturally empty Work keeps the real hierarchy surface instead of a tutorial page");
   assert.ok(rw.includes('data-fl-role", "work-hierarchy-error"'), "unsupported hierarchy shows an error");
-  assert.ok(rw.includes("activeFilter"), "empty state distinguishes filtered from natural");
+  assert.ok(js.includes("workFilterNoMatches"), "filtered-empty copy remains available to the filter surface");
   // The page evidence state machine still owns loading/unavailable/stale.
   assert.ok(/work\s*:\s*\{\s*workHierarchy\s*:\s*true,\s*intakes\s*:\s*true\s*\}/.test(js),
     "work page depends on the hierarchy board plus the bounded outcome-intake list");
@@ -390,12 +915,10 @@ test("FL-112A Work continuity preserves composition order and does not invent la
   const js = await readFile(path.join(hubPublic, "app.js"), "utf8");
   // Continuity is infrastructure only: the desktop composition contract stays.
   const rw = extractFunctionSource(js, "rWork");
-  const outcomeAt = rw.indexOf("renderOutcomeSection()");
-  const storyAt = rw.indexOf("renderWorkShapeGuide()");
   const filtersAt = rw.lastIndexOf("renderWorkFilters()");
   const boardAt = rw.lastIndexOf("renderWorkWorkbench(view, S.workSelection)");
-  assert.ok(outcomeAt > 0 && storyAt > outcomeAt && boardAt > storyAt && filtersAt > boardAt,
-    "continuity renders the focused workbench before optional filters");
+  assert.ok(boardAt > 0 && filtersAt > boardAt,
+    "continuity renders the user-view workbench before optional filters");
   assert.ok(rw.includes("workCaptureWorkbenchContext()"), "capture wraps the Work rebuild");
   assert.ok(rw.includes("workRestoreWorkbenchContext(continuity)"), "restore runs after board mount");
   // No layout/visual redesign: continuity helpers never restyle Work nodes.
@@ -405,11 +928,13 @@ test("FL-112A Work continuity preserves composition order and does not invent la
     "continuity does not restyle Work nodes");
   assert.ok(restore.includes("finishedOpen") && restore.includes("boardScrollLeft"),
     "Finished open state and board scroll are restored at every width");
-  assert.ok(capture.includes("shapeGuideOpen") && restore.includes("shapeGuideOpen"),
-    "shape explanation disclosure survives a Work rebuild");
+  assert.ok(capture.includes("treeQuery") && restore.includes("treeQuery"),
+    "tree search survives a Work rebuild");
   const truth = extractFunctionSource(js, "workVisibleTruthSnapshot");
   assert.ok(truth.includes("viewedGoal") && truth.includes("viewedPlan"),
     "selected Goal and viewed phase participate in refresh continuity truth");
+  assert.ok(truth.includes("tab:") && truth.includes("S.tab"),
+    "Work and Decision Center do not share one retain snapshot");
   // Page scroll host is main.content (index.html), not window.
   assert.ok(capture.includes("workContentScrollEl") && restore.includes("content.scrollTop"),
     "content container scroll is captured and restored at every width");
@@ -426,27 +951,26 @@ test("FL-112B desktop composition reaches one focused board; narrow layout stays
   const js = await readFile(path.join(hubPublic, "app.js"), "utf8");
   const css = await readFile(path.join(hubPublic, "app.css"), "utf8");
   const rw = extractFunctionSource(js, "rWork");
-  // 1280x720 contract: empty Work leads with the primary action; existing Work
-  // leads with one focused board and keeps optional filters after it.
-  const outcomeAt = rw.indexOf("renderOutcomeSection()");
-  const storyAt = rw.indexOf("renderWorkShapeGuide()");
+  // 1280x720 contract: empty and existing Work share one hierarchy-first
+  // workbench; optional filters follow it.
   const filtersAt = rw.lastIndexOf("renderWorkFilters()");
   const boardAt = rw.lastIndexOf("renderWorkWorkbench(view, S.workSelection)");
   const headAt = js.indexOf('data-fl-role", "work-col-head"');
-  assert.ok(outcomeAt > 0 && storyAt > outcomeAt && boardAt > storyAt && filtersAt > boardAt,
-    "desktop composition order: empty creation; focused board → optional filters");
-  assert.ok(rw.includes('h("div", "work-intro")'), "outcome and rules share the compact intro band");
+  assert.ok(boardAt > 0 && filtersAt > boardAt,
+    "desktop composition order: hierarchy-first workbench, then optional filters");
+  const tree = extractFunctionSource(js, "renderWorkGoalTree");
+  assert.ok(tree.includes("renderWorkCreateButton") && tree.includes("workTreeNewGoal"),
+    "the root action lives in the hierarchy header");
   assert.ok(headAt > 0, "canonical board heading is part of the board render");
-  // Compact empty intake and shape rules shrink the above-board stack without
-  // fixed viewport heights, clipping, overlays, or hidden form fields.
+  // Contextual creation stays in flow without fixed heights or overlays.
   assert.ok(css.includes(".outcome-story-note-empty"), "empty intake has a compact style");
-  assert.ok(css.includes(".work-shape-guide"), "shape explanation style ships");
+  assert.ok(css.includes(".work-contextual-create"), "contextual creation has a contained style");
   assert.match(css, /\.work-focus \.work-story-fact\s*\{[\s\S]*?min-height:\s*64px/, "focused work summary stays compact above the board");
   assert.ok(css.includes("min-height: 32px"), "disclosure toggles keep a practical touch target");
   assert.ok(!/outcome-section[\s\S]{0,120}(height:\s*\d+vh|max-height:\s*\d+vh)/.test(css),
     "outcome section is not viewport-height locked");
-  assert.ok(!/work-shape-guide[\s\S]{0,200}(position:\s*fixed|position:\s*absolute)/.test(css),
-    "shape explanation stays in document flow");
+  assert.ok(!/work-contextual-create[\s\S]{0,240}(position:\s*fixed|position:\s*absolute)/.test(css),
+    "contextual creation stays in document flow");
   assert.ok(!/work-finished-group[\s\S]{0,200}(position:\s*fixed|overflow:\s*hidden)/.test(css),
     "finished work stays in flow and is not clipped");
   // Keyboard/touch: portfolio selection and history are native controls.
@@ -465,14 +989,12 @@ test("FL-112B desktop composition reaches one focused board; narrow layout stays
     "390px-class narrow layout still avoids board horizontal overflow");
   assert.match(narrowBlock, /\.work-col-grid\s*\{[\s\S]*?flex-direction:\s*column/,
     "status groups still stack on narrow screens");
-  assert.match(narrowBlock, /\.work-focus\s*\{\s*order:\s*1/,
-    "selected workspace leads the narrow workbench");
-  assert.match(narrowBlock, /\.work-portfolio\s*\{\s*order:\s*2/,
-    "portfolio history follows the selected narrow workspace");
-  assert.match(css, /\.work-intro\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*1\.05fr\)\s*minmax\(0,\s*1fr\)/,
-    "desktop intro uses a balanced two-column band");
-  assert.match(narrowBlock, /\.work-intro\s*\{[\s\S]*?grid-template-columns:\s*1fr/,
-    "intro stacks without horizontal overflow on narrow screens");
+  assert.match(css, /@media\s*\(max-width:\s*760px\)[\s\S]*?data-mobile-pane="file"[\s\S]*?\.goal-tree/,
+    "narrow file pane hides the Goal Tree");
+  assert.match(css, /\.work-tree-row\s*\{[\s\S]*?grid-template-columns:\s*24px\s+minmax\(0,\s*1fr\)\s+auto/,
+    "desktop hierarchy reserves disclosure, readable title, and contextual action columns");
+  assert.match(css, /@media\s*\(max-width:\s*760px\)[\s\S]*?\.work-tree-select[\s\S]*?min-height:\s*44px/,
+    "tree rows keep practical touch targets without horizontal overflow");
   assert.ok(css.includes(".workbench-layout"), "focused layout ships");
   assert.match(css, /\.work-portfolio\s*\{[\s\S]*?max-height:\s*min\(720px,\s*calc\(100dvh\s*-\s*180px\)\)/,
     "desktop portfolio rail is bounded");
@@ -487,10 +1009,10 @@ test("FL-112B desktop composition reaches one focused board; narrow layout stays
   assert.ok(composer.includes('data-fl-role", "outcome-context"'), "context field is not deleted");
   assert.ok(composer.includes('data-fl-role", "outcome-shape"'), "shape field is not deleted");
   const selectWorkspace = extractFunctionSource(js, "workSelectWorkspace");
-  assert.ok(selectWorkspace.includes('matchMedia("(max-width: 900px)")'),
-    "only a deliberate narrow-screen selection moves the reader to the focused workspace");
-  assert.ok(selectWorkspace.includes('scrollIntoView({ block: "start" })'),
-    "selected narrow workspace is revealed past long portfolio history");
+  assert.ok(selectWorkspace.includes("workIsNarrowViewport") && selectWorkspace.includes("open-file"),
+    "only a deliberate narrow-screen selection opens the Goal file pane");
+  assert.ok(selectWorkspace.includes("workApplyGoalFileStart"),
+    "narrow Goal entry starts at the header and result");
   assert.match(css, /\.nav\s*\{[\s\S]*?overflow-y:\s*auto;[\s\S]*?overflow-x:\s*hidden;/,
     "desktop navigation cannot drift sideways");
 });
@@ -706,40 +1228,34 @@ test("FL-112E9 first-use journey stays contained, accessible, and compact in the
     "created story does not raw-open Task detail");
 });
 
-test("FL-112E10 narrow New work bridge stays narrow-only with practical touch and focus", async () => {
+test("FL-112E10 narrow contextual tree actions stay reachable and touch-safe", async () => {
   const js = await readFile(path.join(hubPublic, "app.js"), "utf8");
   const css = await readFile(path.join(hubPublic, "app.css"), "utf8");
   const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
 
   // Selected workspace stays first on narrow screens; portfolio (composer) follows.
-  assert.match(css, /@media\s*\(max-width:\s*900px\)[\s\S]*?\.work-focused-column\s*\{[\s\S]*?order:\s*1/,
-    "narrow screens keep the selected workspace first");
-  assert.match(css, /@media\s*\(max-width:\s*900px\)[\s\S]*?\.work-portfolio\s*\{[\s\S]*?order:\s*2/,
-    "narrow screens keep the portfolio rail after the focused workspace");
+  assert.match(css, /@media\s*\(max-width:\s*760px\)[\s\S]*?\.mobile-back[\s\S]*?min-height:\s*44px/,
+    "narrow screens keep a visible Back control");
+  assert.match(css, /@media\s*\(max-width:\s*760px\)[\s\S]*?data-mobile-pane="tree"[\s\S]*?display:\s*none/,
+    "narrow screens show one primary pane at a time");
 
-  // Desktop hides the bridge; narrow reveals it with a practical touch target.
-  const desktopRule = css.match(/\.work-context-new-entry\s*\{[^}]*\}/);
-  assert.ok(desktopRule && /display:\s*none/.test(desktopRule[0]),
-    "desktop keeps the New work bridge hidden so the rail composer stays sole");
-  assert.match(css, /@media\s*\(max-width:\s*900px\)[\s\S]*?\.work-context-new-entry\s*\{[\s\S]*?display:\s*inline-flex/,
-    "narrow screens show the New work bridge");
-  assert.match(css, /@media\s*\(max-width:\s*900px\)[\s\S]*?\.work-context-new-entry\s*\{[\s\S]*?min-height:\s*44px/,
-    "narrow bridge meets a practical touch target");
-  assert.match(css, /\.work-context-new-entry:focus-visible\s*\{[\s\S]*?outline:/,
-    "keyboard focus visibility ships for the bridge");
+  // The same tree actions remain visible and touch-safe on phone.
+  assert.match(css, /@media\s*\(max-width:\s*760px\)[\s\S]*?\.work-tree-add\s*\{[\s\S]*?min-height:\s*44px/,
+    "narrow tree add actions meet a practical touch target");
+  assert.match(css, /\.work-tree-add:focus-visible[\s\S]*?outline:/,
+    "keyboard focus visibility ships for contextual add actions");
   assert.ok(css.includes("overflow-wrap: anywhere") || css.includes("min-width: 0"),
     "work context and composer stay contained without horizontal overflow hooks");
 
-  const header = extractFunctionSource(js, "renderWorkContextHeader");
-  assert.ok(header.includes('data-fl-role", "work-context-new-entry"'),
-    "context header hosts the narrow bridge role");
-  assert.ok(header.includes("workRevealNewEntry"),
-    "header wires deliberate activation to the reveal helper");
-  const reveal = extractFunctionSource(js, "workRevealNewEntry");
-  assert.ok(reveal.includes("outcome-section") && reveal.includes("outcome-text"),
-    "reveal uses existing semantic roles only");
-  assert.equal((i18n.match(/workNewEntryLabel:/g) ?? []).length, 2,
-    "New work label remains bilingual");
+  const tree = extractFunctionSource(js, "renderWorkGoalTree");
+  const goal = extractFunctionSource(js, "renderWorkTreeGoal");
+  const plan = extractFunctionSource(js, "renderWorkTreePlan");
+  assert.ok(tree.includes("workTreeNewGoal"), "tree root exposes New Goal");
+  assert.ok(goal.includes("workTreeAddPlan"), "Goal exposes Add Plan");
+  assert.ok(plan.includes("workTreeAddTask"), "Plan exposes Add Task");
+  for (const key of ["workTreeNewGoal", "workTreeAddPlan", "workTreeAddTask"]){
+    assert.equal((i18n.match(new RegExp(`${key}:`, "g")) ?? []).length, 2, `${key} remains bilingual`);
+  }
 
   // Natural Main handoff and created-existence truth remain in both locales.
   assert.ok(i18n.includes("already coordinating this project")
@@ -753,17 +1269,16 @@ test("FL-112E10 narrow New work bridge stays narrow-only with practical touch an
     "invented-object defense language is gone from product copy");
 });
 
-test("FL-109D2 outcome composer is outcome-first, contained, and wraps on narrow screens", async () => {
+test("FL-109D2 contextual outcome composer is contained and wraps on narrow screens", async () => {
   const js = await readFile(path.join(hubPublic, "app.js"), "utf8");
   const css = await readFile(path.join(hubPublic, "app.css"), "utf8");
 
-  // The composer is placed at the beginning of the Work page, before the board
-  // filters, so describing the desired result is the primary action.
-  const rw = extractFunctionSource(js, "rWork");
-  const outcomeAppend = rw.indexOf("renderOutcomeSection()");
-  const filterAppend = rw.indexOf("renderWorkFilters()");
-  assert.ok(outcomeAppend > 0 && filterAppend > outcomeAppend,
-    "outcome composer renders before the board filters");
+  // The composer exists once and opens only after a contextual tree action.
+  const tree = extractFunctionSource(js, "renderWorkGoalTree");
+  const contextual = extractFunctionSource(js, "renderWorkContextualComposer");
+  assert.ok(tree.includes("renderWorkCreateButton"), "the hierarchy exposes contextual add actions");
+  assert.ok(contextual.includes("workCreateTargetEqual") && contextual.includes("renderOutcomeSection"),
+    "the composer mounts only for the selected tree location");
   assert.ok(js.includes("function renderOutcomeComposer("), "composer renderer ships");
   assert.ok(js.includes("function renderIntakeStory("), "intake story renderer ships");
   assert.ok(js.includes("outcome-intake-detail"), "selected intake detail role ships");
@@ -814,12 +1329,12 @@ test("FL-112E3 Goal phases stay ordered, read-only, and scoped to one board", as
   const board = extractFunctionSource(js, "renderWorkTaskBoard");
   assert.ok(board.includes('aria-labelledby'), "Task board has a semantic region name");
 
-  const rw = extractFunctionSource(js, "rWork");
   const outcomeSection = extractFunctionSource(js, "renderOutcomeSection");
-  assert.ok(outcomeSection.indexOf("renderOutcomeComposer()") < outcomeSection.indexOf("renderIntakeStory()"),
-    "the intake journey stays adjacent to the composer so a recorded result never falls below the board");
-  assert.ok(rw.indexOf("renderOutcomeSection()") < rw.indexOf("renderWorkWorkbench(view, S.workSelection)"),
-    "the outcome section (composer plus journey) precedes the focused workspace in rWork");
+  assert.ok(outcomeSection.indexOf("renderOutcomeComposer(options)") < outcomeSection.indexOf("renderIntakeStory()"),
+    "when included, the intake journey stays adjacent to its composer");
+  const tree = extractFunctionSource(js, "renderWorkGoalTree");
+  assert.ok(tree.includes("renderWorkIntakeTray"),
+    "recorded intake truth remains reachable after the canonical tree");
   assert.ok(js.includes('data-fl-role", "work-phase-option"'), "phase options have a stable semantic role");
   assert.ok(css.includes(".work-phase-list"), "phase navigation has a dedicated layout");
   assert.match(css, /\.work-board\s*>\s*\.work-col-grid\s*\{[\s\S]*?min-width:\s*1160px/, "desktop board gives seven columns readable room");
@@ -883,27 +1398,23 @@ test("FL-112E3 phase helpers follow Core currentPlanId without inferring readine
   );
 });
 
-test("FL-112E3 real Work leads the first screen; empty keeps creation primary", async () => {
+test("FL-112E3 real and empty Work both lead with the hierarchy", async () => {
   const js = await readFile(path.join(hubPublic, "app.js"), "utf8");
   const rw = extractFunctionSource(js, "rWork");
-  // Empty hierarchy: the creation band (outcome composer + shape guide) is
-  // appended before filters, so a brand-new user still sees a clear create entry.
-  const firstIntroAppend = rw.indexOf("viewEl.appendChild(intro)");
+  // Empty hierarchy uses the same tree and does not put a form before it.
+  const firstBoardAppend = rw.indexOf("viewEl.appendChild(renderWorkWorkbench(view, S.workSelection))");
   const firstFiltersAppend = rw.indexOf("viewEl.appendChild(renderWorkFilters())");
-  assert.ok(firstIntroAppend > 0 && firstIntroAppend < firstFiltersAppend,
-    "empty hierarchy still leads with the creation entry");
-  // With real Work: the selected workspace owns the canvas and the compact
-  // creation entry lives in the portfolio rail; filters follow the workbench.
+  assert.ok(firstBoardAppend > 0 && firstBoardAppend < firstFiltersAppend,
+    "empty hierarchy still leads with the real work tree");
+  // With real Work the selected workspace owns the canvas and filters follow.
   const boardAppend = rw.lastIndexOf("viewEl.appendChild(renderWorkWorkbench(view, S.workSelection))");
   const realFiltersAppend = rw.lastIndexOf("viewEl.appendChild(renderWorkFilters())");
   assert.ok(boardAppend > firstFiltersAppend && boardAppend < realFiltersAppend,
     "real Work leads the first screen; filters stay optional");
-  const portfolio = extractFunctionSource(js, "renderWorkPortfolio");
-  const entry = extractFunctionSource(js, "renderWorkNewEntry");
-  assert.ok(portfolio.includes("renderWorkNewEntry")
-    && entry.includes("renderOutcomeSection()")
-    && entry.includes("renderWorkShapeGuide()"),
-    "existing Work keeps creation and the shape strip beside workspace navigation");
+  const portfolio = extractFunctionSource(js, "renderWorkGoalTree");
+  assert.ok(portfolio.includes("workTreeNewGoal") && portfolio.includes("renderWorkTreeList")
+    && !portfolio.includes("renderWorkShapeGuide"),
+    "existing Work keeps creation inside the tree without a shape lesson");
 });
 
 test("FL-112E3 desktop Kanban cells keep their own height, mobile stack unchanged", async () => {
@@ -941,11 +1452,14 @@ test("FL-113 hierarchy-first entry, sparse states, and one-off search stay bound
     readFile(path.join(hubPublic, "i18n.js"), "utf8"),
   ]);
 
-  const portfolio = extractFunctionSource(js, "renderWorkPortfolio");
-  const entry = extractFunctionSource(js, "renderWorkNewEntry");
-  assert.ok(portfolio.includes("renderWorkNewEntry"), "existing Work keeps one compact creation entry near navigation");
-  assert.ok(entry.includes("renderOutcomeSection()") && entry.includes("renderWorkShapeGuide()"),
-    "the entry preserves the result composer and three-shape explanation");
+  const portfolio = extractFunctionSource(js, "renderWorkGoalTree");
+  const goalNode = extractFunctionSource(js, "renderWorkTreeGoal");
+  const planNode = extractFunctionSource(js, "renderWorkTreePlan");
+  assert.ok(portfolio.includes("workTreeNewGoal"), "the tree root can start a Goal");
+  assert.ok(goalNode.includes('shape: "plan"') && goalNode.includes("renderWorkTreePlan"),
+    "a Goal contains Plans and can add one in place");
+  assert.ok(planNode.includes('shape: "task"') && planNode.includes("renderWorkTreeTask"),
+    "a Plan contains Tasks and can add one in place");
 
   const board = extractFunctionSource(js, "renderWorkTaskBoard");
   const columns = extractFunctionSource(js, "renderWorkColumns");
@@ -986,8 +1500,8 @@ test("FL-113 hierarchy-first entry, sparse states, and one-off search stay bound
     && css.includes(".work-empty-state-rail"), "hierarchy-first visual hooks ship");
   assert.match(css, /@media\s*\(max-width:\s*900px\)[\s\S]*?\.work-column-set\s*>\s*\.work-col-grid[\s\S]*?flex-direction:\s*column/,
     "narrow status groups stack inside the board");
-  assert.ok(i18n.includes("Main proposes one shape with a reason; you confirm before anything is created.")
-    && i18n.includes("确认后才会创建 Task、Plan 或 Goal"),
+  assert.ok(i18n.includes("ForkLight will propose the next step for you to confirm.")
+    && i18n.includes("ForkLight 会先给出方案，由你确认后再开始。"),
     "both languages state the proposal and confirmation boundary");
   assert.ok(i18n.includes("History is lazy and searchable. Showing {count} matching Tasks.")
     && i18n.includes("历史按需加载，可搜索。当前显示 {count} 个匹配 Task。"),
@@ -1063,4 +1577,419 @@ test("FL-116A compact Worker rows and flat previews stay usable near 390px", asy
     "recovery narrative has no thick side bar");
   assert.doesNotMatch(css, /\.worker-safety\s*\{[^}]*border-left:\s*3px/,
     "safety box has no thick side bar");
+});
+
+test("narrow Goal file starts at the header and Back restores the tree", async () => {
+  const js = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  assert.ok(js.includes("function workApplyGoalFileStart("), "Goal-file start helper ships");
+  const helpers = [
+    extractFunctionSource(js, "workMakeSelection"),
+    extractFunctionSource(js, "workSelectionKey"),
+    extractFunctionSource(js, "workSelectionEqual"),
+    extractFunctionSource(js, "workNextMobilePane"),
+    extractFunctionSource(js, "workApplyMobilePane"),
+    extractFunctionSource(js, "workApplyGoalFileStart"),
+    extractFunctionSource(js, "workMobileBack"),
+    extractFunctionSource(js, "workSelectWorkspace"),
+  ].join("\n");
+  const tree = { scrollTop: 90 };
+  const fileHost = { scrollTop: 80 };
+  const focused = {
+    scrollIntoView() {},
+    setAttribute() {},
+    focus() {},
+  };
+  const content = { scrollTop: 240, scrollLeft: 12 };
+  const layout = {
+    pane: "tree",
+    setAttribute(_name: string, value: string) { layout.pane = value; },
+  };
+  const viewEl = {
+    querySelector(selector: string) {
+      if (selector.includes("goal-file-host")) return fileHost;
+      if (selector.includes("work-focus")) return focused;
+      if (selector.includes("workbench-layout")) return layout;
+      if (selector.includes("goal-tree")) return tree;
+      return null;
+    },
+  };
+  const factory = new Function(
+    "viewEl",
+    "content",
+    `${helpers}
+     var WORKSPACE_SELECTION_KINDS = ["goal", "plan", "one-off"];
+     var S = {
+       workSelection: { kind: "goal", id: "g-active" },
+       workMobilePane: "tree",
+       tab: "work",
+       detail: null
+     };
+     var document = {
+       body: { setAttribute: function(){} },
+       getElementById: function(){ return { hidden: true }; }
+     };
+     function workIsNarrowViewport(){ return true; }
+     function workUpdateMobileBack(){}
+     function workScheduleReadingContextSave(){}
+     function workActionChooserReset(){}
+     function workPendingHandoffReset(){}
+     function hideDetail(){ S.detail = null; }
+     function render(){ S.rendered = true; }
+     function workContentScrollEl(){ return content; }
+     return {
+       S: S,
+       select: workSelectWorkspace,
+       back: workMobileBack
+     };`,
+  );
+  const api = factory(viewEl, content) as {
+    S: { workMobilePane: string; rendered?: boolean };
+    select: (kind: string, id: string) => void;
+    back: () => void;
+  };
+  api.select("goal", "g-active");
+  assert.equal(api.S.workMobilePane, "file", "Goal entry opens the file pane");
+  assert.equal(fileHost.scrollTop, 0, "Goal file starts at its header, not mid-page");
+  assert.equal(content.scrollTop, 0, "page scroll does not keep the tree offset");
+  assert.equal(tree.scrollTop, 90, "tree reading position is kept while the file is open");
+  assert.equal(api.S.rendered, undefined, "already-selected entry does not rebuild Work");
+
+  api.back();
+  assert.equal(api.S.workMobilePane, "tree", "Back restores the Goal Tree pane");
+  assert.equal(tree.scrollTop, 90, "Back keeps the tree reading position");
+  assert.equal(content.scrollTop, 0, "Back does not leave the page scrolled into the file");
+});
+
+test("narrow-to-wide resize hides Back without a data refresh", async () => {
+  const js = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const helpers = [
+    extractFunctionSource(js, "workIsNarrowViewport"),
+    extractFunctionSource(js, "workUpdateMobileBack"),
+    extractFunctionSource(js, "workBindViewportPresentation"),
+  ].join("\n");
+  assert.doesNotMatch(helpers, /\brefresh\s*\(/, "viewport presentation does not refresh data");
+  assert.doesNotMatch(helpers, /\bfetch\s*\(/, "viewport presentation does not fetch");
+  const factory = new Function(
+    `${helpers}
+     var matches = true;
+     var changeHandler = null;
+     var btn = { hidden: true };
+     var S = { tab: "work", workMobilePane: "file", detail: null, refreshed: false };
+     var document = {
+       getElementById: function(id){ return id === "fl-mobile-back" ? btn : null; }
+     };
+     var window = {
+       matchMedia: function(query){
+         return {
+           media: query,
+           get matches(){ return matches; },
+           addEventListener: function(type, fn){ if(type === "change") changeHandler = fn; },
+           addListener: function(fn){ changeHandler = fn; }
+         };
+       }
+     };
+     function refresh(){ S.refreshed = true; }
+     workBindViewportPresentation();
+     return {
+       btn: btn,
+       S: S,
+       showFile: function(){ S.detail = null; S.workMobilePane = "file"; workUpdateMobileBack(); },
+       showTree: function(){ S.detail = null; S.workMobilePane = "tree"; workUpdateMobileBack(); },
+       showDetail: function(){ S.detail = { id: "t-1" }; workUpdateMobileBack(); },
+       widen: function(){
+         matches = false;
+         if(typeof changeHandler === "function") changeHandler();
+       }
+     };`,
+  );
+  const api = factory() as {
+    btn: { hidden: boolean };
+    S: { refreshed: boolean; workMobilePane: string };
+    showFile: () => void;
+    showTree: () => void;
+    showDetail: () => void;
+    widen: () => void;
+  };
+
+  api.showFile();
+  assert.equal(api.btn.hidden, false, "narrow Goal file presents Back");
+  api.showTree();
+  assert.equal(api.btn.hidden, true, "narrow tree pane does not present Back");
+  api.showDetail();
+  assert.equal(api.btn.hidden, false, "narrow detail presents Back");
+  api.showFile();
+  api.widen();
+  assert.equal(api.btn.hidden, true, "growing above 760px hides Back immediately");
+  assert.equal(api.S.refreshed, false, "narrow-to-wide Back hide does not refresh");
+  assert.equal(api.S.workMobilePane, "file", "viewport sync stores no extra pane state");
+});
+
+function firstRuleBody(block: string, selector: string): string {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = block.match(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`));
+  assert.ok(match, `${selector} is declared in the 760px shell`);
+  const body = match == null ? undefined : match[1];
+  assert.ok(typeof body === "string", `${selector} rule body is a string`);
+  return body;
+}
+
+function declaredPx(body: string, property: string): number | null {
+  const match = body.match(new RegExp(`${property}:\\s*(\\d+)px`));
+  return match ? Number(match[1]) : null;
+}
+
+function chromeRowHeight(body: string, label: string): number {
+  const values = ["max-height", "height", "min-height"]
+    .map((property) => declaredPx(body, property))
+    .filter((value): value is number => value != null);
+  assert.ok(values.length > 0, `${label} declares a height for 360/390 chrome`);
+  return Math.max(...values);
+}
+
+test("narrow chrome stays compact, accents stay hairline, badges stay one line", async () => {
+  const html = await readFile(path.join(hubPublic, "index.html"), "utf8");
+  const css = await readFile(path.join(hubPublic, "app.css"), "utf8");
+  const mediaAt = css.indexOf("@media (max-width: 760px)");
+  assert.ok(mediaAt >= 0, "760px single-pane breakpoint ships");
+  const nextMedia = css.indexOf("@media", mediaAt + 10);
+  const narrow = css.slice(mediaAt, nextMedia > 0 ? nextMedia : css.length);
+  const productBar = firstRuleBody(narrow, ".product-bar");
+  const topbar = firstRuleBody(narrow, ".topbar");
+  const combined = chromeRowHeight(productBar, "product bar") + chromeRowHeight(topbar, "page topbar");
+  assert.ok(combined <= 96,
+    `360/390 product plus page chrome is ${combined}px, which must be at most 96px`);
+  assert.match(productBar, /flex-wrap:\s*nowrap/, "product row does not wrap into a utility grid");
+  assert.doesNotMatch(productBar, /overflow(?:-x|-y)?:\s*hidden/,
+    "product bar does not use overflow hidden to enforce height");
+  assert.match(topbar, /flex-wrap:\s*nowrap/, "page row stays a single horizontal line");
+  assert.doesNotMatch(topbar, /overflow(?:-x|-y)?:\s*hidden/,
+    "page row does not clip Back or the title to fake a fit");
+  assert.match(firstRuleBody(narrow, ".nav"), /overflow:\s*visible/,
+    "760px nav does not clip the System disclosure");
+  assert.doesNotMatch(firstRuleBody(narrow, ".nav"), /overflow-(?:x|y):\s*(?:hidden|auto)/,
+    "760px nav scroller is not the element that wraps System");
+  assert.match(firstRuleBody(narrow, ".nav-scroll"), /overflow-x:\s*auto/,
+    "760px primary routes scroll inside nav-scroll");
+  assert.match(firstRuleBody(narrow, ".system-menu"), /overflow:\s*visible/,
+    "narrow System menu can paint below the 48px bar");
+  const systemList = firstRuleBody(narrow, ".system-menu-list");
+  assert.match(systemList, /(?:right:\s*8px|right:\s*0)/, "System menu anchors to the viewport-fitting edge");
+  assert.match(systemList, /max-width:/, "System menu declares a bounded width");
+  assert.match(systemList, /max-height:/, "System menu declares a bounded height");
+  assert.match(systemList, /overflow-y:\s*auto/, "System menu scrolls vertically when needed");
+  assert.doesNotMatch(systemList, /overflow(?:-x)?:\s*hidden/,
+    "System menu fit is not overflow clipping");
+  const shell900At = css.search(/@media\s*\(max-width:\s*900px\)\s*\{\s*\.shell\s*\{/);
+  assert.ok(shell900At >= 0, "900px shell breakpoint ships");
+  const shell900 = css.slice(shell900At, css.indexOf("@media", shell900At + 10));
+  assert.match(firstRuleBody(shell900, ".nav"), /overflow:\s*visible/,
+    "900px nav does not clip the System disclosure");
+  assert.doesNotMatch(narrow, /\.nav\s*\{[^}]*flex-basis:\s*100%/,
+    "narrow nav does not take a full-width row of its own");
+  assert.doesNotMatch(narrow, /\.product-utils\s*\{[^}]*width:\s*100%/,
+    "narrow utilities do not wrap onto a full-width third row");
+  assert.match(narrow, /\.brand-sub\s*\{\s*display:\s*none/,
+    "narrow chrome hides the brand subtitle");
+  assert.match(narrow, /\.page-sub\s*\{\s*display:\s*none/,
+    "narrow chrome hides the page subtitle");
+  assert.match(narrow, /\.top-meta\s*\{\s*display:\s*none/,
+    "phone chrome hides redundant top-meta chips");
+  assert.match(css, /\.top-meta\s*\{[\s\S]*?display:\s*flex/,
+    "desktop top-meta remains a visible meta row");
+  assert.match(firstRuleBody(narrow, ".page-title"), /white-space:\s*nowrap/,
+    "page title 工作 cannot wrap character-by-character");
+  assert.match(firstRuleBody(narrow, ".mobile-back"), /white-space:\s*nowrap/,
+    "Back 返回 cannot wrap character-by-character");
+  assert.match(narrow, /\.nav-item,[\s\S]*?\.system-summary\s*\{[^}]*white-space:\s*nowrap/,
+    "primary chrome labels stay on one line");
+  assert.match(css, /\.nav-label\s*\{[\s\S]*?white-space:\s*nowrap/,
+    "Work, Decision Center and System labels stay horizontal");
+  assert.doesNotMatch(narrow, /\.nav-label[\s\S]{0,80}display:\s*none/,
+    "the three primary route labels stay visible");
+  const compactAt = css.indexOf("@media (max-width: 359px)");
+  assert.ok(compactAt >= 0, "below-360 compact identity breakpoint ships");
+  const compactNext = css.indexOf("@media", compactAt + 10);
+  const compact = css.slice(compactAt, compactNext > 0 ? compactNext : css.length);
+  assert.match(compact, /\.brand-text\s*\{/, "below 360px the brand mark may replace visible brand text");
+  assert.doesNotMatch(compact, /\.brand-name[\s\S]{0,80}display:\s*none/,
+    "ForkLight remains present as the accessible product name");
+  assert.doesNotMatch(compact, /\.nav-label[\s\S]{0,80}display:\s*none/,
+    "below 360px the three route labels stay unhidden");
+  assert.ok(html.includes('class="brand-name">ForkLight</div>'),
+    "ForkLight remains the accessible product name");
+  const systemStart = html.indexOf('id="fl-system-menu"');
+  const system = html.slice(systemStart, html.indexOf("</details>", systemStart));
+  assert.ok(system.includes("theme-switch") && system.includes("lang-switch") && system.includes("conn-pill"),
+    "theme, language and connection truth remain reachable inside System");
+  const pageRow = html.slice(html.indexOf('class="topbar"'), html.indexOf('id="main"'));
+  assert.doesNotMatch(pageRow, /theme-switch|lang-switch|conn-pill/,
+    "theme/language/connection are not permanent first-viewport rows");
+  assert.match(narrow, /\.work-portfolio[\s\S]*?max-height:\s*calc\(100dvh\s*-\s*132px\)/,
+    "narrow Goal Tree keeps its own scroll host");
+
+  assert.doesNotMatch(css, /border-left:\s*3px/,
+    "guide, conclusion and delivery rows no longer use a 3px left accent");
+  assert.match(css, /\.guide-card\s*\{[\s\S]*?border-left:\s*1px\s+solid/,
+    "guide uses a hairline accent");
+  assert.match(css, /\.mr-conclusion\s*\{[\s\S]*?border-left:\s*1px\s+solid/,
+    "Main conclusion uses a hairline accent");
+  assert.match(css, /\.mr-conclusion\.mr-no-result\s*\{[\s\S]*?border-left:\s*1px\s+solid/,
+    "no-result conclusion uses a hairline accent");
+  assert.match(css, /\.delivery-invalid-row\s*\{[\s\S]*?border-left:\s*1px\s+solid/,
+    "invalid delivery row uses a hairline accent");
+
+  const statusBlock = css.slice(css.indexOf(".work-card-status {"), css.indexOf(".work-card-status.tone-active"));
+  assert.match(statusBlock, /white-space:\s*nowrap/, "status badges stay on one line");
+  assert.doesNotMatch(statusBlock, /overflow-wrap:\s*anywhere/,
+    "status badges do not wrap mid-label");
+  assert.doesNotMatch(statusBlock, /max-width:\s*42%/,
+    "status badges are not squeezed to a wrapping fraction");
+  assert.match(css, /\.badge\s*\{[\s\S]*?white-space:\s*nowrap/,
+    "Goal status pills stay on one line");
+  assert.match(css, /\.goal-file-lead,[\s\S]*?max-width:\s*68ch/,
+    "Goal file narrative uses a readable measure");
+  assert.match(css, /\.decision-item-fact,[\s\S]*?max-width:\s*68ch/,
+    "Decision Center narrative uses a readable measure");
+});
+
+test("System closes on route, outside pointer/touch, and Escape with summary focus", async () => {
+  const js = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const helpers = [
+    extractFunctionSource(js, "systemMenuElement"),
+    extractFunctionSource(js, "systemMenuSummary"),
+    extractFunctionSource(js, "closeSystemMenu"),
+    extractFunctionSource(js, "closeSystemMenuOnRouteSelection"),
+    extractFunctionSource(js, "systemMenuEventIsInside"),
+    extractFunctionSource(js, "onSystemMenuPointerDown"),
+    extractFunctionSource(js, "onSystemMenuTouchStart"),
+    extractFunctionSource(js, "onSystemMenuEscape"),
+  ].join("\n");
+  const factory = new Function(
+    `${helpers}
+     var focused = null;
+     var prevented = false;
+     var summary = { focus: function(){ focused = "summary"; } };
+     var themeBtn = { id: "theme" };
+     var langBtn = { id: "lang" };
+     var routeBtn = { id: "route" };
+     var outside = { id: "outside" };
+     var system = {
+       open: true,
+       contains: function(node){
+         return node === summary || node === themeBtn || node === langBtn || node === routeBtn;
+       },
+       querySelector: function(sel){ return sel === "summary" ? summary : null; }
+     };
+     var document = {
+       getElementById: function(id){ return id === "fl-system-menu" ? system : null; }
+     };
+     var S = { tab: "work", theme: "light", lang: "zh", data: 1 };
+     function eventFor(target){
+       return {
+         target: target,
+         preventDefault: function(){ prevented = true; }
+       };
+     }
+     return {
+       system: system,
+       S: S,
+       focused: function(){ return focused; },
+       prevented: function(){ return prevented; },
+       reset: function(){ system.open = true; focused = null; prevented = false; },
+       closeRoute: closeSystemMenuOnRouteSelection,
+       pointerOutside: function(){ onSystemMenuPointerDown(eventFor(outside)); },
+       pointerInside: function(){ onSystemMenuPointerDown(eventFor(themeBtn)); },
+       touchOutside: function(){ onSystemMenuTouchStart(eventFor(outside)); },
+       touchInside: function(){ onSystemMenuTouchStart(eventFor(langBtn)); },
+       escape: function(){ return onSystemMenuEscape({ key: "Escape" }); },
+       otherKey: function(){ return onSystemMenuEscape({ key: "Tab" }); }
+     };`,
+  );
+  const api = factory() as {
+    system: { open: boolean };
+    S: { tab: string; theme: string; lang: string; data: number };
+    focused: () => string | null;
+    prevented: () => boolean;
+    reset: () => void;
+    closeRoute: () => void;
+    pointerOutside: () => void;
+    pointerInside: () => void;
+    touchOutside: () => void;
+    touchInside: () => void;
+    escape: () => boolean;
+    otherKey: () => boolean;
+  };
+
+  api.closeRoute();
+  assert.equal(api.system.open, false, "route selection closes System once");
+  assert.equal(api.S.tab, "work", "route helper does not itself change the tab");
+
+  api.reset();
+  api.pointerOutside();
+  assert.equal(api.system.open, false, "outside pointer closes System once");
+  assert.equal(api.focused(), null, "outside pointer does not steal summary focus");
+  api.reset();
+  api.pointerOutside();
+  assert.equal(api.system.open, false, "outside pointer still closes on a second open");
+
+  api.reset();
+  api.pointerInside();
+  assert.equal(api.system.open, true, "inside pointer leaves System open");
+  assert.equal(api.prevented(), false, "inside pointer does not prevent theme or route handlers");
+
+  api.reset();
+  api.touchOutside();
+  assert.equal(api.system.open, false, "outside touch closes System once");
+  api.reset();
+  api.touchInside();
+  assert.equal(api.system.open, true, "inside touch leaves System open");
+
+  api.reset();
+  assert.equal(api.escape(), true, "Escape handles an open System menu");
+  assert.equal(api.system.open, false, "Escape closes System once");
+  assert.equal(api.focused(), "summary", "Escape restores focus to the System summary");
+  assert.equal(api.S.tab, "work", "Escape does not change the route");
+  assert.equal(api.S.theme, "light", "Escape does not change theme");
+  assert.equal(api.S.lang, "zh", "Escape does not change language");
+  assert.equal(api.S.data, 1, "Escape does not change data");
+  api.reset();
+  api.escape();
+  assert.equal(api.system.open, false, "Escape still closes on a second open");
+  assert.equal(api.focused(), "summary", "Escape still restores summary focus");
+
+  api.reset();
+  assert.equal(api.otherKey(), false, "Tab does not take over System dismissal");
+  assert.equal(api.system.open, true, "non-Escape keys leave System open");
+});
+
+test("System entrance and nav feedback are short, reduced-motion safe, and not decorative", async () => {
+  const css = await readFile(path.join(hubPublic, "app.css"), "utf8");
+  const goalFirst = css.slice(css.indexOf("/* Goal Tree, continuous Goal file"));
+  assert.ok(goalFirst.length > 0, "Goal-first CSS block ships");
+  const motionAt = goalFirst.lastIndexOf("@media (prefers-reduced-motion: no-preference)");
+  assert.ok(motionAt >= 0, "Goal-first motion is gated on no-preference");
+  const reduceAt = goalFirst.lastIndexOf("@media (prefers-reduced-motion: reduce)");
+  assert.ok(reduceAt > motionAt, "reduced-motion rules follow the allowed motion");
+  const motion = goalFirst.slice(motionAt, reduceAt);
+  assert.match(motion, /\.system-menu\[open\]\s*>\s*\.system-menu-list/,
+    "System entrance applies only while the disclosure is open");
+  assert.match(motion, /animation:\s*[\w-]+\s+14[0-6]ms/,
+    "System entrance uses a 120-160ms duration");
+  assert.match(motion, /\.nav-item,[\s\S]*?\.system-summary\s*\{[\s\S]*?transition:\s*background-color\s+14[0-6]ms/,
+    "navigation state feedback uses the same short color duration");
+  const keyframesAt = goalFirst.indexOf("@keyframes fl-system-menu-enter");
+  assert.ok(keyframesAt >= 0, "System entrance keyframes ship");
+  const keyframes = goalFirst.slice(keyframesAt, keyframesAt + 280);
+  assert.match(keyframes, /opacity:\s*0/, "entrance starts from opacity");
+  assert.match(keyframes, /translateY\(-6px\)/, "entrance uses a small vertical translation");
+  assert.doesNotMatch(keyframes, /scale\(|translateX\(|rotate\(/, "entrance does not scale, bounce, or slide content");
+  assert.doesNotMatch(motion, /infinite|cubic-bezier\([^)]*bounce|animation-iteration-count:\s*[2-9]/,
+    "new shell motion does not loop or bounce");
+  const reduce = goalFirst.slice(reduceAt);
+  assert.match(reduce, /\.system-menu-list[\s\S]*?animation:\s*none/,
+    "reduced-motion removes the System entrance");
+  assert.match(reduce, /\.nav-item[\s\S]*?transition:\s*none/,
+    "reduced-motion removes navigation transitions");
+  const baseMenu = css.slice(css.indexOf(".system-menu-list {"), css.indexOf(".system-menu-list .nav-item"));
+  assert.doesNotMatch(baseMenu, /animation:/, "System animation is not unconditional");
 });

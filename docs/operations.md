@@ -48,6 +48,41 @@ Codex Agent (intent, review, approval)
 
 ## Workflow
 
+For the staged Main-led local path — health, Goal submission, same-Task
+restart continuation, verification, Judge review, correction or one-hop
+handoff, exact-Candidate Integration, and terminal storage — follow
+[main-led-delivery.md](main-led-delivery.md). This page remains the command
+reference.
+
+### 0. First setup
+
+A new install can become ready without opening the Hub or editing a settings
+file. Start with the read-only summary:
+
+```bash
+forklight setup status
+forklight setup status --json
+```
+
+Then take the printed next command. Typical first-use sequence:
+
+```bash
+# Already signed in to Grok or Codex — no API key is requested
+forklight setup provider select --provider xai
+
+# Or store one API-key Provider from stdin after confirmation
+printf '%s' "$KEY" | forklight setup provider select --provider deepseek --variant default --confirm
+
+forklight setup worker list
+forklight setup worker select --profile grok-4-6-xhigh
+forklight setup main install --client grok-build --component mcp --confirm
+forklight doctor
+```
+
+API keys are never accepted as command-line flags. Main install/uninstall
+require `--confirm`, back up the existing client file, and tell you whether a
+new Main session is needed.
+
 ### 1. Submit a task
 
 A task is defined in a YAML/JSON Task Contract or submitted inline via MCP:
@@ -192,9 +227,89 @@ where billable or irreversible.
 
 ```bash
 forklight inspect <task-id>        # shows attempts, events, diff
+forklight inspect <task-id> --summary   # compact inspect plus the Main decision packet
 ```
 
+### 3b. Two-call reviewed delivery
+
+Ordinary reviewed delivery no longer requires Main to poll `wait`, create the
+Review Graph, and drive Integration as separate model turns. Two resumable
+commands compose the existing durable records and stop at the next genuine
+Main decision:
+
+```bash
+forklight delivery prepare (--task-file <path>|--task <id>) \
+  [--reviewer-profiles <id1,id2>] --reason <text> --timeout-ms <ms> --confirm \
+  [--include-diff-max-bytes <n>] [--json]
+
+forklight delivery decide <task-id> --decision <accept|revise|reject> \
+  --revision <id> --digest <sha256> --reason <text> --timeout-ms <ms> --confirm [--json]
+```
+
+`delivery prepare` submits at most one new Task (or observes an existing id
+without resuming the Worker), waits for independent verification, creates or
+reuses the exact confirmed Review Graph, waits for every required Judge, and
+returns one compact `main-delivery-checkpoint`. It never records a Main
+decision and never starts Integration.
+
+`delivery decide` binds Main's explicit `accept` / `revise` / `reject` to the
+exact Candidate Revision id and full digest from that checkpoint. `revise` and
+`reject` persist only that decision. `accept` runs one fresh preflight and one
+Integration, then observes that operation to terminal. Judge agreement is never
+acceptance.
+
+`--timeout-ms` ends only the caller's wait. The Worker, Review Graph, and
+Integration keep running. Re-enter the same command with the same Task id,
+Reviewer order, reason, and (for decide) exact identity. A changed identity,
+Reviewer order, decision, or reason fails closed and does not create a second
+graph, review, receipt, or operation. A short observation is not a Worker
+deadline and is not Task failure.
+
+Staged Main-offline delivery uses that observation-only timeout so Main can
+end the model session after dispatch and resume only when durable Candidate
+or Judge evidence exists:
+
+1. `delivery prepare` with a bounded `--timeout-ms`, then stop the Main session.
+2. Observe durable Task / Review events with non-model `status` / `wait`.
+3. Re-enter the same `delivery prepare` only after new Candidate or Judge
+   evidence, using the same Task id, Reviewer order, and reason.
+4. `delivery decide` only after the compact checkpoint is ready; bind the
+   exact Revision id and digest.
+5. Submit every resumed Codex terminal segment once:
+
+```bash
+forklight main-token capture-episode --task-id <task-id> --comparison-id <id> \
+  --role <direct-main|delegated-main> --run-ref <episode-ref> \
+  --segments '<json-array>' [--json]
+```
+
+Each segment is `{ "runRef": "codex-run:...", "usage": { "type": "turn.completed", "usage": { five counters } } }`.
+Core normalizes every event through the existing strict adapter and persists
+one role sample whose parent totals are the safe sums of the disjoint segment
+counters. Status, CLI, and MCP show the segment count and count-only fields.
+They never compute savings. Do not omit an earlier Main session to improve a
+pair. Single-run `main-token capture` is unchanged.
+
+MCP exposes `forklight_main_token_capture_episode` with the same schema.
+
+MCP exposes the same schema as `forklight_delivery_prepare` and
+`forklight_delivery_decide`. Existing `wait`, `review-graph`, `main-review`,
+and `integration` commands remain available.
+
 The Worker produces a diff against the original baseline.
+
+New Tasks may freeze an explicit `reviewRequirement` (`requiredJudges` 0, 1, or
+2 plus a bounded Main reason). `0` is an explicit skip, not a claim that review
+was unnecessary. Legacy Tasks without the field stay readable and do not gain
+an invented review policy. Integration preflight enforces a declared nonzero
+requirement against the current exact Candidate Revision, the Review Graph
+terminal assignment count, and a fresh following Main accept. When a legacy or
+explicit-skip Task already has a Review Graph, that graph keeps its authority:
+pending review or a terminal graph without a fresh following Main accept still
+blocks Integration and makes the decision packet wait or ask for a fresh Main
+decision. Compact CLI and MCP inspect, plus daemon inspect, expose one
+privacy-safe Main decision packet that names the missing evidence and exactly
+one next Main action without starting it.
 
 #### Checkpoint (Worker self-check)
 
@@ -415,9 +530,12 @@ or times out while `integration wait` is still pending, only that response is
 lost. The daemon keeps running, the already-started Integration continues, and
 durable state is unchanged. Reconnect and query the same `operationId` with
 `forklight integration status` or another wait. This is **not** the same as a
-genuinely killed daemon process after a partial stage such as `source-applied`;
-resuming stages after a process crash is still a separate, unimplemented
-recovery path.
+genuinely killed daemon process. After a durable `source-applied: passed`
+stage, a **source-only** operation (no declared build, activation, or
+activation-check commands) may continue on the same `operationId` when the
+daemon restarts; it does not apply the patch again. Build and activation crash
+recovery remain unsupported. The operator path and that exact boundary are in
+[main-led-delivery.md](main-led-delivery.md).
 
 Tasks without a delivery specification record build and activation as
 `not-applicable`. ForkLight never creates a Git commit or pushes a branch.
@@ -551,14 +669,22 @@ mutation bypass.
 | Hub status (read-only) | `forklight hub status` | **No** — read-only, never claims, replaces, or signals |
 | Integration preflight | `forklight integration preflight` | **No** |
 | Integration status/wait/history | `forklight integration status` / `wait` / `history` | **No** — observation only; never starts a daemon |
+| Delivery prepare | `forklight delivery prepare` | Yes — may submit one Task and start required Judges |
+| Delivery decide | `forklight delivery decide` | Accept integrates; revise/reject do not |
+| Main usage capture / episode / status | `forklight main-token capture` / `capture-episode` / `status` | **No** — count-only; never starts work or claims savings |
 | Health check | `forklight health` | **No** |
+| Setup status | `forklight setup status` | **No** — read-only; no Hub, Task, Worker, or probe |
+| Setup provider/worker/main | `forklight setup provider select` / `worker select` / `main install` | **No** — local settings/Keychain/Main config only |
 
 ## Actions that mutate the source project
 
-Only one operation writes to the source project:
+Only Integration apply writes to the source project. That includes the
+granular command and `forklight delivery decide --decision accept`, which runs
+the same preflight/apply path after an explicit exact accept:
 
 ```bash
 forklight integration apply <task-id> --receipt <receipt-id> --confirm
+forklight delivery decide <task-id> --decision accept --revision <id> --digest <sha256> --reason <text> --timeout-ms <ms> --confirm
 ```
 
 Every other operation is read-only with respect to source files. Workers edit
@@ -580,6 +706,94 @@ forklight daemon start
 ```
 
 On macOS the default is `~/Library/Application Support/ForkLight`.
+
+### Task storage lifecycle
+
+One local developer can audit, preview, and explicitly reclaim ordinary Task
+space without deleting unresolved work, unknown content, or durable evidence:
+
+```bash
+forklight storage audit
+forklight storage preview [--task <id>]
+forklight storage reclaim --task <id> --confirm
+forklight storage reclaim --all-eligible --confirm
+forklight storage retain --task <id> --reason "keep workspace for audit" --confirm
+```
+
+`audit` and `preview` are read-only. They classify every visible Task root as
+`protected`, `reclaimable`, `reclaimed`, `retained`, or `unknown-orphan` with a
+closed reason, byte counts, known regenerable targets, preserved durable or
+unknown entries, live-process facts, Store `quick_check`, and exactly one next
+action. All-eligible preview keeps that same audit's protected and unknown
+entries visible, names deletion targets only for reclaimable Tasks, and lets
+an unknown orphan win the one next action.
+
+`reclaim` re-evaluates current Store truth immediately before any deletion. It
+refuses when Store `quick_check` is not `ok` or foreign-key violations are
+nonzero, when a proven Task process cannot be stopped, or when any existing
+known target fails containment preflight. It stops only processes proven to
+belong to one eligible Task and removes only canonical regenerable categories:
+`workspace`, `baseline`, `claude-config`, `grok-home`, `codex-home`,
+`codex-tmp`, `verifier-git`, and `verifier-git.index`. A Task is `reclaimed`
+only after every known regenerable target is gone; an unavoidable mid-delete
+failure is recorded as a bounded partial result and the Task stays
+`reclaimable`. Logs, Candidate revisions, reviews, handoff evidence,
+Integration receipts/backups, diffs, Store rows, and unknown top-level names
+stay. Ambiguous or unmapped processes stay visible, protect every implicated
+Task, and keep `nextAction` from claiming all-clear. Stored `workerPid`
+ownership is a Task-id set: a duplicated PID protects every implicated Task
+and is never signalled. A symlink used as `runs` or `runs/<taskId>` is
+refused; a configured Home alias remains supported when its physical `runs`
+and Task directories are ordinary and contained.
+
+`retain` checks Store integrity before any write. A successful result reports
+the retained byte breakdown and the prior terminal eligibility reason. The
+durable event stays bounded and stores no raw user note.
+
+`--json` is supported on every storage command. Human output includes bytes,
+reason, and one next action. MCP tools `forklight_storage_audit`,
+`forklight_storage_preview`, `forklight_storage_reclaim`, and
+`forklight_storage_retain` expose the same semantics. Historical backup
+deletion remains a separate approved operation.
+
+### Local Home backup and restore
+
+One local developer can preview, create, inspect, and restore a self-contained
+backup of the ForkLight Home without opening the database or copying
+credentials:
+
+```bash
+forklight backup preview --destination /safe/outside/forklight-backup
+forklight backup create --destination /safe/outside/forklight-backup --confirm
+forklight backup inspect /safe/outside/forklight-backup
+forklight backup restore /safe/outside/forklight-backup
+forklight backup restore /safe/outside/forklight-backup --confirm
+```
+
+`preview` and `inspect` are read-only. `create` and `restore` require
+`--confirm`. None of the four actions start or signal Daemon or Hub.
+
+A backup includes `forklight.sqlite` (via SQLite online backup), owned durable
+roots such as `runs`, `competitions`, `review-projects`, and `samples`, plus
+unknown ordinary top-level files. It excludes the Daemon socket/log, Hub
+claim/descriptor, and SQLite WAL/SHM sidecars. External symlinks are not
+followed; the result reports how many were skipped. Keychain credentials,
+local Grok/Codex sign-in, and external Main client files are outside Home and
+are never read or copied. Keep the backup directory private: it may contain
+project code, diffs, and logs.
+
+The destination must be a new directory outside the active Home. Restore
+refuses while a live or unverified Daemon or Hub owns the Home and prints the
+stop or investigate action (`forklight daemon stop`, or quit the Hub). It
+never kills either owner. A successful restore keeps the previous Home as a
+named `.pre-restore-` recovery copy. If the final switch fails, that previous
+Home is put back.
+
+`--json` prints the same included, excluded, integrity, impact, and next-action
+facts. MCP tools `forklight_backup_preview`, `forklight_backup_create`, and
+`forklight_backup_inspect` share those read/create projections. Home-replacing
+restore stays on the CLI so a live MCP owner cannot pretend to replace its own
+Home.
 
 ### Daemon start readiness
 

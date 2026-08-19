@@ -1,0 +1,184 @@
+version: 2
+name: M2-C implement auditable Task storage lifecycle
+project: /Users/yijunwang/code/forklight
+taskClass: m2-task-storage-lifecycle
+taskFamily: forklight-storage-lifecycle
+workerProfileId: grok-4-6-xhigh
+deliveryProfileId: forklight-self-upgrade
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 2
+  reason: Destructive Task-space lifecycle and durable Store integrity require two independent reviews.
+
+provider:
+  name: xai
+  model: grok-4.6
+  keychainService: forklight.xai.api-key
+runtime:
+  name: grok-build
+  executable: grok
+  effort: xhigh
+  maxBudgetUsd: null
+
+contract:
+  outcome: >-
+    ForkLight lets one local developer audit protected, reclaimable, retained, reclaimed, and
+    unknown-orphan Task space; preview exact known regenerable targets; explicitly reclaim only
+    currently eligible space; and receive durable disposition plus Store and process integrity
+    evidence without deleting unresolved, unknown, or durable artifacts.
+  presentation:
+    summary: 为单人本地开发交付可审计、先预览、再确认的 Task 空间生命周期。
+    language: zh-CN
+  context:
+    - The sole accepted Work Item spec is specs/m2-c-task-storage-lifecycle/spec.md; read it completely before editing.
+    - M2-A and M2-B are integrated. Reuse their canonical Runtime-home names, Main decision packet, Review Graph, handoff, resolution, remediation, and Integration truth.
+    - This is the first real post-M2-B high-risk Task and its immutable admission must truthfully freeze requiredJudges 2.
+    - Historical cleanup is evidence only. Implement an ordinary product lifecycle; do not delete historical backups or real local ForkLight data during Worker execution or tests.
+    - ForkLight serves one local developer. Current Store state, canonical path ownership, and Main-serial mutation are sufficient; add no lock, lease, checksum, content hash, manifest, version handshake, or distributed protocol.
+    - Preserve all source work. Edit only the isolated Workspace. Never commit, push, change remotes, access credentials, edit Hub, or start Integration.
+  inScope:
+    - Add one canonical read-only storage audit joining current Store truth with bounded filesystem and process observations and closed protected, reclaimable, reclaimed, retained, or unknown-orphan classifications.
+    - Add exact non-mutating preview for one Task or the current eligible set, listing only known regenerable targets, estimated bytes, preserved durable or unknown entries, process facts, and integrity precheck.
+    - Add confirmed reclaim that re-evaluates current truth, refuses newly protected Tasks, stops only proven eligible-Task processes, and removes only canonical known regenerable targets.
+    - Persist one bounded disposition/result event and expose SQLite quick_check plus foreign-key violation count after mutations.
+    - Expose one canonical lifecycle through CLI storage audit, preview, and reclaim commands plus daemon/API and MCP with JSON and concise human output.
+    - Use only temporary ForkLight homes in automated tests and retain all Candidate, review, handoff, Main decision, Integration, Token/routing, log, Store, and backup evidence.
+  outOfScope:
+    - Historical backup deletion, Store row deletion or compaction, Candidate/Review/Integration evidence deletion, log retention redesign, scheduled janitor, quotas, or cloud cleanup.
+    - Automatic reclaim from age or terminal status alone; deletion of unknown content, roots, processes, durable artifacts, or any path outside canonical Task roots.
+    - Locks, leases, hashes, manifests, distributed transactions, multi-user coordination, duplicate consistency checks, or a second lifecycle database.
+    - Hub/UI, Worker execution semantics, Provider/model routing, Review Graph policy, handoff admission, economics, Competition, commit, or push.
+  executionSteps:
+    - Trace canonical Task roots, durable Store events, decision packet, Review Graph, handoff, resolution, remediation, Integration, and current process/workspace ownership before editing.
+    - Define one closed lifecycle projection and exact eligibility order that protects every active or unresolved state before considering terminal dispositions.
+    - Implement read-only audit and preview first, then confirmed re-evaluation, proven-process termination, known-path reclaim, disposition evidence, and Store integrity checks.
+    - Thread the same core semantics through daemon, CLI, and MCP without duplicating eligibility decisions.
+    - Add focused temporary-home tests for active, awaiting review, delivered, handoff partial, unknown root/process, state change after preview, path containment, integrity, parity, and privacy.
+    - Self-check the exact diff against the accepted spec and prove no real local home, Hub, backup, durable artifact, or unrelated subsystem changed.
+  deliverables:
+    - Canonical Task storage audit and eligibility projection.
+    - Exact read-only preview and confirmed re-evaluating reclaim path.
+    - Bounded durable disposition and Store/process integrity evidence.
+    - CLI, daemon/API, and MCP lifecycle surfaces with focused safety tests and operations documentation.
+  modules:
+    - name: Storage lifecycle authority
+      responsibility: Classify current Task roots from canonical Store and direct local observations using closed protection and terminal-disposition rules.
+      consumes:
+        - Task, Attempt, decision packet, Candidate, Review Graph, handoff, resolution, remediation, Integration, canonical run roots, and process observations.
+      produces:
+        - Protected, reclaimable, reclaimed, retained, or unknown-orphan entries with closed reasons, bytes, known targets, preserved entries, and one next action.
+      boundaries:
+        - Store remains durable authority; filesystem and process observations do not become a second state machine.
+    - name: Preview and confirmed reclaim
+      responsibility: Preview exact known regenerable targets without mutation, then on explicit confirm re-evaluate and remove only still-eligible targets while preserving unknown and durable content.
+      consumes:
+        - Current lifecycle projection, canonical target categories, confirm, and current process ownership.
+      produces:
+        - Refused or applied target and process results plus actual or bounded byte evidence.
+      boundaries:
+        - No preview receipt, lock, lease, hash, broad process kill, unknown deletion, backup deletion, or real-home test mutation.
+    - name: Durable evidence and public surfaces
+      responsibility: Record one bounded disposition result, run SQLite quick_check and foreign-key checks, and expose the same truth through daemon, CLI, and MCP.
+      consumes:
+        - Reclaim result, retained durable categories, process result, Store integrity, and canonical projection.
+      produces:
+        - Durable content-safe event and parity-safe JSON and human views.
+      boundaries:
+        - No raw private content, second database, duplicate eligibility resolver, Hub, automatic next action, or Store row deletion.
+  callChain:
+    - Main submits this Integration-gated Task with Grok 4.6 Xhigh persistent-session execution and immutable requiredJudges 2.
+    - Grok implements and self-checks only inside its isolated Workspace; ForkLight independently verifies and captures an exact source-only Candidate Revision.
+    - Two independent read-only Judges inspect protection/partial preservation and path/process/Store/public-surface safety; Main records the fresh exact decision.
+    - ForkLight safe Integration applies, verifies, builds, and activates the accepted Candidate before any post-Integration audit runs.
+    - Read-only Goal dependents audit integrated lifecycle truth and public surfaces with zero source change.
+    - Main runs the product preview against the real local home, reviews exact protected, eligible, and unknown entries, and confirms only ordinary eligible reclaim before recording M2 evidence.
+  scenarios:
+    - name: Active or review-open Task stays protected
+      given: A Task is active, resumable, awaiting required review, under handoff, or in Integration.
+      when: Audit, preview, or confirmed reclaim evaluates it.
+      then: No path or process is removed and a closed active or unresolved reason is returned.
+    - name: Delivered Task reclaims known regeneration only
+      given: Exact Integration is applied and every follow-up operation is terminal.
+      when: Main confirms reclaim after preview.
+      then: Only canonical Workspace, baseline, Runtime-home, verifier, and cache targets are removed; durable evidence remains readable and integrity passes.
+    - name: Reusable partial handoff preserves work
+      given: A partial Candidate has selected paths and gaps but no prepared materialized successor.
+      when: Lifecycle truth is read.
+      then: The source stays protected; it becomes eligible only after the one-hop handoff and successor materialization are durable.
+    - name: Unknown or changed state refuses safely
+      given: A root/process is unmapped or a previewed Task becomes active before apply.
+      when: Reclaim re-evaluates current truth.
+      then: Unknown content is reported and preserved, changed state is refused, and no lock, lease, hash, or automatic cleanup is used.
+  risks:
+    - Terminal status alone can destroy unresolved output; protection checks must run before terminal-disposition eligibility.
+    - Path or process ownership mistakes can delete outside one Task; containment and exact ownership must fail closed while unknown entries remain visible.
+    - Store integrity is durable-data-adjacent; retain only SQLite quick_check and foreign-key evidence, not general distributed consistency machinery.
+    - Acceptance builds recreate dist; generatedPaths must keep it outside Candidate and Integration evidence.
+  changeBudget:
+    maxFiles: 30
+    maxDiffLines: 4500
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 10000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .runtime
+    - .forklight
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/storage-lifecycle.ts
+    - src/core/types.ts
+    - src/core/config.ts
+    - src/core/task-decision-view.ts
+    - src/state/store.ts
+    - src/daemon/protocol.ts
+    - src/daemon/coordinator.ts
+    - src/daemon/server.ts
+    - src/cli.ts
+    - src/mcp/server.ts
+    - tests/storage-lifecycle.test.ts
+    - tests/store.test.ts
+    - tests/daemon.test.ts
+    - tests/daemon-cli.test.ts
+    - tests/mcp.test.ts
+    - docs/operations.md
+acceptance:
+  criteria:
+    - Read-only audit and preview never mutate Store, filesystem, Task state, or processes and classify every visible Task root with a closed reason.
+    - Confirmed reclaim re-evaluates current truth and removes only named known regenerable categories under one canonical Task root or the current eligible set.
+    - Every active, review-open, Integration-open, unresolved-partial, or ambiguous root and process is protected; unknown content and ownership are preserved and surfaced.
+    - Candidate, verification, Judge, handoff, Main decision, Integration, Token/routing, logs, Store rows, and backups remain readable after reclaim.
+    - Each applied or retained terminal disposition is bounded and SQLite quick_check returns ok with zero foreign-key violations after mutations.
+    - CLI, daemon/API, and MCP expose the same lifecycle semantics; human output includes bytes, reason, and exactly one next action.
+    - Automated tests mutate temporary ForkLight homes only; Candidate contains no Hub, backup cleanup, distributed coordination, generated dist, or unrelated change.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/storage-lifecycle.test.ts tests/store.test.ts tests/daemon.test.ts tests/daemon-cli.test.ts tests/mcp.test.ts
+    - git diff --check

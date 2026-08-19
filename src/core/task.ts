@@ -5,8 +5,9 @@ import path from "node:path";
 import YAML from "yaml";
 import { isProviderName, providerDefinition, providerNames } from "./providers.js";
 import {
+  EXECUTION_PREFERENCE_LIST,
+  executionCapabilitiesForRuntime,
   isExecutionPreference,
-  nativeGoalSupportForRuntime,
   resolveExecutionMode,
 } from "./execution-mode.js";
 import { normalizeDirectCodexProfileId } from "./direct-codex-calibration.js";
@@ -18,11 +19,19 @@ import {
   type RuntimeName,
 } from "./runtime-names.js";
 import { isPricingRouteId, resolveWorkerSelection } from "./worker-profiles.js";
+import type {
+  RoutingCannotDetermineReason,
+  RoutingOverallResult,
+} from "./model-routing.js";
 import {
   freezeWorkerNetworkPolicy,
   validateWorkerNetworkPolicy,
   type WorkerNetworkPolicy,
 } from "./network-policy.js";
+import type {
+  WorkerReadinessNextAction,
+  WorkerReadinessState,
+} from "./worker-readiness.js";
 import { selectDeliveryProfile } from "./delivery-profiles.js";
 import {
   expandHome,
@@ -47,10 +56,13 @@ import type {
   DeliveryResolution,
   DeliverySpec,
   ExecutionPreference,
+  FrozenRoutingAdvisorySnapshot,
+  FrozenSelectedExecutionSnapshot,
   FrozenWorkerIdentity,
   QualityReport,
   ResolvedExecutionMode,
   RoutingDecisionSnapshot,
+  RoutingSelectionRelationship,
   TaskAdvancedPolicyOverride,
   TaskBackground,
   TaskCodingExtension,
@@ -58,6 +70,7 @@ import type {
   TaskModuleContract,
   TaskPresentation,
   PolicyMode,
+  TaskReviewRequirement,
   TaskScenarioContract,
   TaskSpec,
 } from "./types.js";
@@ -65,6 +78,10 @@ import type {
 const DELIVERY_COMMAND_MAX_COUNT = 16;
 export const TASK_PRESENTATION_SUMMARY_MAX = 300;
 export const TASK_PRESENTATION_LANGUAGE_MAX = 35;
+export const REVIEW_REQUIREMENT_REASON_MAX = 300;
+
+const REVIEW_REQUIREMENT_CREDENTIAL_PATTERN =
+  /\b(sk-[A-Za-z0-9_-]{8,}|API[_-]?KEY|Bearer\s+[A-Za-z0-9_\-.]{8,}|password\s*[:=])/i;
 
 const DEFAULT_EXCLUDES = [
   ".git",
@@ -198,6 +215,289 @@ function validateFrozenWorkerIdentity(raw: unknown, label: string): FrozenWorker
   };
 }
 
+/** Comparable routing identity is provider + model + runtime + effort. */
+function frozenIdentitiesMatch(a: FrozenWorkerIdentity, b: FrozenWorkerIdentity): boolean {
+  return a.provider === b.provider
+    && a.model === b.model
+    && a.runtime === b.runtime
+    && a.effort === b.effort;
+}
+
+/** Advisory relationship identity also binds optional workerProfileId.
+ *  Two Profiles that share an executable identity stay distinct. */
+function frozenAdvisoryIdentitiesMatch(
+  a: FrozenWorkerIdentity,
+  b: FrozenWorkerIdentity,
+): boolean {
+  return frozenIdentitiesMatch(a, b) && a.workerProfileId === b.workerProfileId;
+}
+
+const VALID_ROUTING_OVERALL_RESULTS = new Set<RoutingOverallResult>([
+  "recommended",
+  "cannot-determine",
+  "historical-best-not-launchable",
+]);
+const VALID_CANNOT_DETERMINE_REASONS = new Set<RoutingCannotDetermineReason>([
+  "insufficient-relevant-samples",
+  "single-comparable-identity",
+  "no-active-factors",
+  "score-gap-too-small",
+  "positive-factor-unavailable",
+  "profile-identity-unavailable",
+]);
+const VALID_SELECTION_RELATIONSHIPS = new Set<RoutingSelectionRelationship>([
+  "followed-recommendation",
+  "manual-override",
+  "selected-after-cannot-determine",
+]);
+const VALID_RESOLVED_EXECUTION_MODES = new Set<ResolvedExecutionMode>([
+  "single-run",
+  "persistent-session",
+  "native-goal",
+]);
+const VALID_READINESS_STATES = new Set<WorkerReadinessState>([
+  "ready",
+  "launchable",
+  "needs-attention",
+  "blocked",
+]);
+const VALID_READINESS_NEXT_ACTIONS = new Set<WorkerReadinessNextAction>([
+  "none",
+  "run-smoke-check",
+  "check-provider",
+  "configure-authentication",
+  "fix-runtime",
+  "change-pairing",
+  "choose-model",
+  "choose-execution-mode",
+]);
+
+function validateSelectedExecution(
+  raw: unknown,
+): FrozenSelectedExecutionSnapshot {
+  const obj = object(raw, "task.routingDecision.advisory.selectedExecution");
+  const extra = Object.keys(obj).filter(
+    (key) =>
+      key !== "resolvedExecutionMode"
+      && key !== "readinessState"
+      && key !== "canLaunch"
+      && key !== "nextAction",
+  );
+  if (extra.length > 0) {
+    throw new Error("task.routingDecision.advisory.selectedExecution contains an unsupported field");
+  }
+  const resolvedExecutionMode = obj.resolvedExecutionMode;
+  if (
+    typeof resolvedExecutionMode !== "string"
+    || !VALID_RESOLVED_EXECUTION_MODES.has(resolvedExecutionMode as ResolvedExecutionMode)
+  ) {
+    throw new Error(
+      "task.routingDecision.advisory.selectedExecution.resolvedExecutionMode must be single-run, persistent-session, or native-goal",
+    );
+  }
+  const readinessState = obj.readinessState;
+  if (
+    typeof readinessState !== "string"
+    || !VALID_READINESS_STATES.has(readinessState as WorkerReadinessState)
+  ) {
+    throw new Error(
+      "task.routingDecision.advisory.selectedExecution.readinessState must be ready, launchable, needs-attention, or blocked",
+    );
+  }
+  if (typeof obj.canLaunch !== "boolean") {
+    throw new Error("task.routingDecision.advisory.selectedExecution.canLaunch must be a boolean");
+  }
+  const nextAction = obj.nextAction;
+  if (
+    typeof nextAction !== "string"
+    || !VALID_READINESS_NEXT_ACTIONS.has(nextAction as WorkerReadinessNextAction)
+  ) {
+    throw new Error(
+      "task.routingDecision.advisory.selectedExecution.nextAction must be a closed readiness next-action code",
+    );
+  }
+  return {
+    resolvedExecutionMode: resolvedExecutionMode as ResolvedExecutionMode,
+    readinessState: readinessState as WorkerReadinessState,
+    canLaunch: obj.canLaunch,
+    nextAction: nextAction as WorkerReadinessNextAction,
+  };
+}
+
+function validateRoutingAdvisory(
+  raw: unknown,
+  shortlist: FrozenWorkerIdentity[],
+  selectedWorker: FrozenWorkerIdentity,
+): FrozenRoutingAdvisorySnapshot {
+  const obj = object(raw, "task.routingDecision.advisory");
+  const extra = Object.keys(obj).filter(
+    (key) =>
+      key !== "overallResult"
+      && key !== "selection"
+      && key !== "recommendedWorker"
+      && key !== "confidence"
+      && key !== "cannotDetermineReasons"
+      && key !== "selectedExecution",
+  );
+  if (extra.length > 0) {
+    throw new Error("task.routingDecision.advisory contains an unsupported field");
+  }
+  const overallResult = obj.overallResult;
+  if (
+    typeof overallResult !== "string"
+    || !VALID_ROUTING_OVERALL_RESULTS.has(overallResult as RoutingOverallResult)
+  ) {
+    throw new Error(
+      "task.routingDecision.advisory.overallResult must be recommended, cannot-determine, or historical-best-not-launchable",
+    );
+  }
+  const selection = obj.selection;
+  if (
+    typeof selection !== "string"
+    || !VALID_SELECTION_RELATIONSHIPS.has(selection as RoutingSelectionRelationship)
+  ) {
+    throw new Error(
+      "task.routingDecision.advisory.selection must be followed-recommendation, manual-override, or selected-after-cannot-determine",
+    );
+  }
+  const selectedExecution = validateSelectedExecution(obj.selectedExecution);
+  const recommendedWorker = obj.recommendedWorker === undefined
+    ? undefined
+    : validateFrozenWorkerIdentity(
+      obj.recommendedWorker,
+      "task.routingDecision.advisory.recommendedWorker",
+    );
+  if (recommendedWorker !== undefined) {
+    const recommendedInShortlist = shortlist.some(
+      (worker) => frozenAdvisoryIdentitiesMatch(worker, recommendedWorker),
+    );
+    if (!recommendedInShortlist) {
+      throw new Error(
+        "task.routingDecision.advisory.recommendedWorker must match an entry in the shortlist by provider, model, runtime, effort, and workerProfileId",
+      );
+    }
+  }
+  let confidence: number | undefined;
+  if (obj.confidence !== undefined) {
+    if (typeof obj.confidence !== "number" || !Number.isFinite(obj.confidence)
+      || obj.confidence < 0 || obj.confidence > 1) {
+      throw new Error(
+        "task.routingDecision.advisory.confidence must be a finite number between 0 and 1",
+      );
+    }
+    confidence = obj.confidence;
+  }
+  if ((recommendedWorker === undefined) !== (confidence === undefined)) {
+    throw new Error(
+      "task.routingDecision.advisory.recommendedWorker and confidence must be present together",
+    );
+  }
+  let cannotDetermineReasons: RoutingCannotDetermineReason[] | undefined;
+  if (obj.cannotDetermineReasons !== undefined) {
+    if (!Array.isArray(obj.cannotDetermineReasons) || obj.cannotDetermineReasons.length === 0) {
+      throw new Error(
+        "task.routingDecision.advisory.cannotDetermineReasons must be a non-empty array of closed reasons",
+      );
+    }
+    cannotDetermineReasons = obj.cannotDetermineReasons.map((reason, index) => {
+      if (
+        typeof reason !== "string"
+        || !VALID_CANNOT_DETERMINE_REASONS.has(reason as RoutingCannotDetermineReason)
+      ) {
+        throw new Error(
+          `task.routingDecision.advisory.cannotDetermineReasons[${index}] must be a closed cannot-determine reason`,
+        );
+      }
+      return reason as RoutingCannotDetermineReason;
+    });
+  }
+  if (overallResult === "cannot-determine") {
+    if (selection !== "selected-after-cannot-determine") {
+      throw new Error(
+        "task.routingDecision.advisory.selection must be selected-after-cannot-determine when overallResult is cannot-determine",
+      );
+    }
+    if (recommendedWorker !== undefined || confidence !== undefined) {
+      throw new Error(
+        "task.routingDecision.advisory must not include a recommended Worker or confidence when overallResult is cannot-determine",
+      );
+    }
+    if (cannotDetermineReasons === undefined) {
+      throw new Error(
+        "task.routingDecision.advisory.cannotDetermineReasons is required when overallResult is cannot-determine",
+      );
+    }
+  } else {
+    if (selection === "selected-after-cannot-determine") {
+      throw new Error(
+        "task.routingDecision.advisory.selection must be followed-recommendation or manual-override when a recommendation exists",
+      );
+    }
+    if (recommendedWorker === undefined || confidence === undefined) {
+      throw new Error(
+        "task.routingDecision.advisory.recommendedWorker and confidence are required when overallResult is recommended or historical-best-not-launchable",
+      );
+    }
+    if (cannotDetermineReasons !== undefined) {
+      throw new Error(
+        "task.routingDecision.advisory.cannotDetermineReasons must not be present unless overallResult is cannot-determine",
+      );
+    }
+    const sameAsSelected = frozenAdvisoryIdentitiesMatch(recommendedWorker, selectedWorker);
+    if (selection === "followed-recommendation" && !sameAsSelected) {
+      throw new Error(
+        "task.routingDecision.advisory.selection cannot be followed-recommendation unless the recommended Worker matches selectedWorker",
+      );
+    }
+    if (selection === "manual-override" && sameAsSelected) {
+      throw new Error(
+        "task.routingDecision.advisory.selection cannot be manual-override when selectedWorker matches the recommended Worker",
+      );
+    }
+  }
+  return {
+    overallResult: overallResult as RoutingOverallResult,
+    selection: selection as RoutingSelectionRelationship,
+    ...(recommendedWorker === undefined ? {} : { recommendedWorker }),
+    ...(confidence === undefined ? {} : { confidence }),
+    ...(cannotDetermineReasons === undefined ? {} : { cannotDetermineReasons }),
+    selectedExecution,
+  };
+}
+
+/** Validate and freeze an explicit Main review requirement.
+ *  Absence is legacy and is not rewritten as skip or a default depth. */
+export function parseReviewRequirement(raw: unknown): TaskReviewRequirement {
+  const obj = object(raw, "task.reviewRequirement");
+  const keys = Object.keys(obj);
+  if (keys.some((key) => key !== "requiredJudges" && key !== "reason")) {
+    throw new Error("task.reviewRequirement contains an unsupported field");
+  }
+  if (!keys.includes("requiredJudges") || !keys.includes("reason")) {
+    throw new Error("task.reviewRequirement must contain requiredJudges and reason");
+  }
+  const judges = obj.requiredJudges;
+  if (judges !== 0 && judges !== 1 && judges !== 2) {
+    throw new Error("task.reviewRequirement.requiredJudges must be 0, 1, or 2");
+  }
+  if (typeof obj.reason !== "string") {
+    throw new Error("task.reviewRequirement.reason must be a string");
+  }
+  const reason = obj.reason.trim();
+  if (reason.length < 1 || reason.length > REVIEW_REQUIREMENT_REASON_MAX) {
+    throw new Error(
+      `task.reviewRequirement.reason must be 1-${REVIEW_REQUIREMENT_REASON_MAX} characters`,
+    );
+  }
+  if (/[\r\n\u0000-\u0009\u000b\u000c\u000e-\u001f\u007f]/.test(reason)) {
+    throw new Error("task.reviewRequirement.reason must be one trimmed line");
+  }
+  if (REVIEW_REQUIREMENT_CREDENTIAL_PATTERN.test(reason)) {
+    throw new Error("task.reviewRequirement.reason must not contain credentials");
+  }
+  return { requiredJudges: judges, reason };
+}
+
 function validateRoutingDecision(raw: unknown): RoutingDecisionSnapshot {
   const obj = object(raw, "task.routingDecision");
   // taskFamily is optional inside routingDecision (can come from top-level too)
@@ -272,6 +572,9 @@ function validateRoutingDecision(raw: unknown): RoutingDecisionSnapshot {
       familySampleCounts[key] = value;
     }
   }
+  const advisory = obj.advisory === undefined
+    ? undefined
+    : validateRoutingAdvisory(obj.advisory, shortlist, selectedWorker);
   return {
     ...(taskFamily !== undefined ? { taskFamily } : {}),
     shortlist,
@@ -286,6 +589,7 @@ function validateRoutingDecision(raw: unknown): RoutingDecisionSnapshot {
         ? { settingsDigest: stringValue(evidenceObj.settingsDigest, "task.routingDecision.evidenceSnapshot.settingsDigest") }
         : {}),
     },
+    ...(advisory === undefined ? {} : { advisory }),
   };
 }
 
@@ -778,12 +1082,13 @@ export function parseTaskSpec(
   // A saved per-Worker preference is turned into one immutable per-Task mode
   // before admission. Explicit Task override wins over the selected Worker
   // Profile; legacy Tasks with no preference freeze single-run. `auto` may fall
-  // back; forced `native-goal` fails closed when the Runtime cannot prove it.
+  // back; forced `persistent-session` and `native-goal` fail closed when the
+  // Runtime cannot prove the requested contract.
   const taskExecutionPreference = (() => {
     const raw = root.executionPreference;
     if (raw === undefined) return undefined;
     if (typeof raw !== "string" || !isExecutionPreference(raw)) {
-      throw new Error("task.executionPreference must be auto, single-run, or native-goal");
+      throw new Error(`task.executionPreference must be ${EXECUTION_PREFERENCE_LIST}`);
     }
     return raw as ExecutionPreference;
   })();
@@ -791,7 +1096,7 @@ export function parseTaskSpec(
     taskExecutionPreference ?? profileDefaults.executionPreference as ExecutionPreference | undefined;
   const executionResolution = resolveExecutionMode(
     effectiveExecutionPreference,
-    nativeGoalSupportForRuntime(runtimeName),
+    executionCapabilitiesForRuntime(runtimeName),
   );
   const frozenExecutionPreference: ExecutionPreference = executionResolution.preference;
   const frozenExecutionMode: ResolvedExecutionMode = executionResolution.mode;
@@ -812,6 +1117,10 @@ export function parseTaskSpec(
       ?? profileDefaults.networkPolicy
       ?? { mode: "inherit" },
   );
+
+  const reviewRequirement = root.reviewRequirement === undefined
+    ? undefined
+    : parseReviewRequirement(root.reviewRequirement);
 
   const common = {
     name: stringValue(root.name, "task.name"),
@@ -875,6 +1184,7 @@ export function parseTaskSpec(
     },
     executionPreference: frozenExecutionPreference,
     executionMode: frozenExecutionMode,
+    ...(reviewRequirement === undefined ? {} : { reviewRequirement }),
     networkPolicy: frozenNetworkPolicy,
   };
 
@@ -883,8 +1193,7 @@ export function parseTaskSpec(
     const sw = routingDecision.selectedWorker;
     // selectedWorker must be in the shortlist by frozen identity match.
     const inShortlist = routingDecision.shortlist.some(
-      (w) => w.provider === sw.provider && w.model === sw.model
-        && w.runtime === sw.runtime && w.effort === sw.effort,
+      (w) => frozenIdentitiesMatch(w, sw),
     );
     if (!inShortlist) {
       throw new Error(
@@ -922,6 +1231,14 @@ export function parseTaskSpec(
       throw new Error(
         "task.taskFamily and task.routingDecision.taskFamily must be identical when both are present",
       );
+    }
+    if (routingDecision.advisory !== undefined) {
+      const frozenMode = routingDecision.advisory.selectedExecution.resolvedExecutionMode;
+      if (frozenMode !== common.executionMode) {
+        throw new Error(
+          `task.routingDecision.advisory.selectedExecution.resolvedExecutionMode "${frozenMode}" does not match resolved Task executionMode "${common.executionMode}"`,
+        );
+      }
     }
   }
 

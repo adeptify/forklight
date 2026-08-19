@@ -1,0 +1,152 @@
+version: 2
+name: M2-C read authentic legacy Competition handoff
+project: /Users/yijunwang/code/forklight
+taskClass: m2-storage-legacy-handoff-compat
+taskFamily: forklight-storage-lifecycle
+workerProfileId: grok-4-6-xhigh
+deliveryProfileId: forklight-self-upgrade
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 2
+  reason: Durable-schema compatibility affects Main decisions and destructive storage eligibility, so two independent views are required.
+
+provider:
+  name: xai
+  model: grok-4.6
+  keychainService: forklight.xai.api-key
+runtime:
+  name: grok-build
+  executable: grok
+  effort: xhigh
+  maxBudgetUsd: null
+
+contract:
+  outcome: >-
+    Make authentic pre-origin Competition handoff records readable through every shared
+    StateStore handoff reader so Main decision composition and storage audit/preview complete,
+    while current origins remain exact, unreconstructable rows fail closed, and reads never
+    rewrite durable Store data.
+  presentation:
+    summary: 兼容真实旧版 Competition handoff 的只读形态，让 Storage audit/preview 可读且不改写 Store。
+    language: zh-CN
+  context:
+    - Read specs/m2-c-task-storage-lifecycle/spec.md and specs/m2-c-task-storage-lifecycle/work-items/real-store-legacy-handoff-compat/spec.md completely before editing.
+    - The recovery Goal is integrated and passed three audits plus the 2916-test source check; do not revisit its five completed gaps.
+    - Real read-only audit and preview fail in projectCandidateHandoff because one authentic old record has top-level competitionId and sourceCandidateId but no typed origin.
+    - Newer Competition and Goal-Task origins are current truth. Never fabricate Competition identity for a Goal Task.
+    - ForkLight serves one local developer. Add no migration protocol, lock, lease, checksum, version handshake, distributed coordination, or duplicate validation.
+    - Never read or mutate the real ForkLight Home, source project, Store, credentials, remotes, backups, Hub, or Integration from the Worker.
+  inScope:
+    - Normalize the authentic old Competition record shape once at the shared candidate-handoff Store read boundary.
+    - Preserve current-format Competition and Goal-Task records unchanged in meaning and projection.
+    - Preserve established unknown-legacy collection and Work Hierarchy readability without claiming Goal ownership; semantic projection, Main decision, and storage consumers fail closed with one bounded non-echoing error, while Goal lineage ignores the unproven handoff.
+    - Prove direct/list/source/successor reads plus handoff projection, Main decision packet, storage audit, and preview on temporary Homes.
+    - Prove read compatibility does not rewrite durable handoff JSON or append Task/events.
+  outOfScope:
+    - CLI, daemon, MCP, Hub, storage eligibility or reclaim redesign; Store write migration; real-home mutation; historical cleanup.
+    - Handoff admission, one-hop policy, Review Graph, Goal scheduling, Worker Runtime, Integration semantics, routing, economics, Token accounting, or unrelated refactor.
+    - Locks, leases, hashes, manifests, schema negotiation, multi-user or distributed coordination, or a broad legacy framework.
+    - Commit, push, remote mutation, credentials, generated dist content, or edits outside the accepted paths.
+  executionSteps:
+    - Reproduce the authentic old field shape in a temporary StateStore without using private real-home content.
+    - Trace every candidate-handoff read entry point and add one compatibility normalization at their shared durable boundary.
+    - Keep current writes and public projections strict; preserve legacy-tolerant collection views and add a bounded fail-closed path only where concrete handoff semantics are required.
+    - Add focused regressions for Store readers, decision composition, audit/preview, current-origin truth, privacy, and read-only durability.
+    - Run every acceptance command and inspect the exact diff for forbidden expansion or generated output.
+  deliverables:
+    - One source-compatible Candidate inside the accepted Store/handoff/test paths.
+    - Focused evidence for authentic legacy read compatibility, current-origin preservation, bounded corruption failure, and zero read mutation.
+    - A bounded Worker handoff naming the normalization point, tests, and any remaining blocker.
+  modules:
+    - name: Candidate handoff durable read boundary
+      responsibility: Return one current in-memory handoff truth from current and authentic legacy durable JSON.
+      consumes: [Current typed origin records, authentic old Competition identity fields, and StateStore reader entry points.]
+      produces: [Current CandidateHandoffRecord semantics or one bounded corruption error.]
+      boundaries: [No write migration, cross-row protocol, schema negotiation, Goal ownership guess, or raw-content echo.]
+    - name: Lifecycle compatibility regressions
+      responsibility: Prove the normalized record survives handoff projection, Main decision composition, audit and preview.
+      consumes: [Temporary StateStore, candidate handoff resolvers, decision packet, and storage lifecycle.]
+      produces: [Deterministic current/legacy/fail-closed/read-only test evidence.]
+      boundaries: [Temporary Homes only; no real data, reclaim, deletion, process signalling, or unrelated test-count work.]
+  callChain:
+    - StateStore reads one durable candidate-handoff JSON record through the shared compatibility boundary.
+    - Handoff projection and Main decision composition consume the normalized in-memory origin.
+    - Storage audit and preview classify the related source/successor Tasks without TypeError or Store mutation.
+    - ForkLight independently verifies the Candidate; two Judges inspect distinct compatibility and lifecycle risks; Main decides and safely integrates.
+    - Main alone reruns the real local audit and preview after Integration.
+  scenarios:
+    - name: Authentic old Competition record
+      given: A durable handoff lacks origin but has valid old top-level Competition and source-candidate ids.
+      when: Any StateStore handoff reader and downstream storage call consumes it.
+      then: It is projected as the same Competition origin in memory, every read completes, and durable bytes stay unchanged.
+    - name: Current origins remain exact
+      given: Current Competition and Goal-Task records are stored.
+      when: They pass through the same boundary.
+      then: Their kind and origin-specific ids are preserved without legacy fallback or fabricated ownership.
+    - name: Unknown old shape stops
+      given: A handoff has neither a valid current origin nor the authentic old Competition identity.
+      when: It is read.
+      then: Collection and Work Hierarchy stay readable without claimed Goal ownership; semantic projection, Main decision, and storage classification stop with a stable content-free error, Goal lineage ignores it, and no mutation follows.
+  risks:
+    - A fallback could silently guess ownership; accept only the measured authentic old field pair and fail closed otherwise.
+    - A read migration could mutate durable history; normalize in memory only and assert stored JSON remains unchanged.
+    - A broad legacy refactor could leave M2 scope; stop at the single candidate-handoff boundary and focused consumers.
+  changeBudget:
+    maxFiles: 8
+    maxDiffLines: 700
+
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 60000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude:
+    - .git
+    - node_modules
+    - dist
+    - .runtime
+    - .forklight
+    - .forklight-dev
+    - .forklight-daemon-test
+  generatedPaths:
+    - dist/**
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/state/store.ts
+    - src/core/candidate-handoff.ts
+    - src/core/goal.ts
+    - src/core/types.ts
+    - tests/store.test.ts
+    - tests/competition.test.ts
+    - tests/task-decision-view.test.ts
+    - tests/storage-lifecycle.test.ts
+    - tests/work-hierarchy.test.ts
+    - tests/goal.test.ts
+acceptance:
+  criteria:
+    - Authentic old Competition handoff JSON is normalized once at the shared Store read boundary and remains durably byte-unchanged.
+    - Current Competition and Goal-Task origins preserve exact semantics; an unreconstructable row stays visible to legacy-tolerant collection and Work Hierarchy without Goal ownership, semantic consumers fail closed without content echo, and Goal lineage ignores it.
+    - Handoff projection, Main decision composition, storage audit, and all-eligible preview complete for temporary Stores containing the authentic old shape.
+    - No CLI/daemon/MCP/Hub, storage eligibility, Store mutation, migration, coordination mechanism, generated output, or unrelated path enters the Candidate.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/store.test.ts tests/competition.test.ts tests/task-decision-view.test.ts tests/storage-lifecycle.test.ts tests/work-hierarchy.test.ts tests/goal.test.ts
+    - git diff --check

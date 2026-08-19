@@ -1,0 +1,78 @@
+version: 2
+name: M2 Grok native Goal read-only plan persistence
+project: /Users/yijunwang/code/forklight
+taskClass: m2-grok-native-goal-read-only-plan-persistence
+taskFamily: forklight-runtime-recovery
+workerProfileId: grok-4-6-xhigh
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 2
+  reason: Core Runtime tool and permission policy can either block every read-only native Goal or silently allow product Workspace edits, so two independent views are required.
+contract:
+  outcome: Let every Grok native Goal persist its Task-local plan while exact Workspace Write/Edit denials keep read-only Tasks non-mutating and editable/native plus non-native behavior remains stable.
+  presentation: { summary: 原生Goal可写自己的计划，但只读Task仍不能改Workspace。, language: zh-CN }
+  context:
+    - Read the unique accepted Work Item spec and only the two focus paths; do not scan broad repository history or other Goal files.
+    - Post-fix audit Task f20334a0-b8bd-4886-977b-62fa3553e501 proved the foreground cap is gone, then paused because grokNativeAllowTools(false) omitted search_replace/write and no Task-local plan file could be persisted.
+    - Historical native Goal e1941538-caf8-4c0b-bdf1-5c5241bf3476 already proves Task-local plan mutators plus exact Workspace Write/Edit and Bash denials can complete read-only work safely.
+    - This serves one local developer. Add no public permission model, schema, Store field, lock, lease, hash, version handshake or coordination mechanism.
+    - Existing Agent and background-control registrations are not part of this failure; preserve them and keep Bash denied.
+    - One Attempt only. There is no validation repair, correction, reverify, adaptation, retry or replacement.
+  inScope: [Native Goal always registers Task-local plan mutators, native read-only argv denies exact Workspace writes and edits, focused native editable/read-only and non-native read-only tests.]
+  outOfScope: [Failed Task resume or replacement, background-control removal, Bash enablement, other Runtime behavior, public config or schema, Store, protocol, storage lifecycle, Integration internals, docs, Hub/UI, commit, push, reset, or reclaim.]
+  executionSteps:
+    - Read specs/m2-a-grok-execution-truth/work-items/grok-native-goal-read-only-plan-persistence/spec.md completely and inspect only the two focus paths.
+    - Make the minimal adapter change that always registers native plan mutators and conditionally adds exact Workspace Write/Edit denials when allowEdits is false.
+    - Add focused exact-policy tests for native read-only, native editable and persistent-session read-only behavior.
+    - Run every approved command and self-review only the two allowed paths.
+  deliverables: [Exact two-path Candidate, focused behavior proof, concise handoff explaining Task-local plan writes versus Workspace edit denial.]
+  modules:
+    - name: Grok native tool and deny projection
+      responsibility: Keep native Planner plan dependencies registered while enforcing the existing Task edit contract at the Workspace boundary.
+      consumes: [execution mode, allowEdits, Task-local Grok home, Workspace path, Session id.]
+      produces: [Native tool allowlist and exact conditional permission-deny argv.]
+      boundaries: [No new permission system, state field, timer, retry or background-control change.]
+    - name: Runtime argv regression tests
+      responsibility: Prove native read-only safety, native editable continuity and non-native read-only non-expansion.
+      consumes: [grokNativeAllowTools, grokNativeDenyArgs, buildGrokCliArgs.]
+      produces: [Focused deterministic exact-pair assertions.]
+      boundaries: [No live Provider call or broad test rewrite.]
+  callChain: [ForkLight resolves native-goal and allowEdits, adapter registers Planner dependencies, read-only branch denies Workspace Write/Edit, Planner writes only Task-local plan, native Goal classifies complete plus achieved, ForkLight independently verifies Candidate.]
+  scenarios:
+    - name: Read-only native Goal persists its plan without editing the product
+      given: A native Goal Task has allowEdits false and distinct Workspace plus Task-local Grok home paths.
+      when: ForkLight builds Grok CLI argv.
+      then: search_replace/write are registered, exact Workspace Write/Edit denials are present, Task-local plan paths are not broadly denied, and existing protected-path plus Bash denials remain.
+    - name: Editable native Goal remains editable
+      given: A native Goal Task has allowEdits true.
+      when: ForkLight builds Grok CLI argv.
+      then: plan mutators are registered and no Workspace-wide Write/Edit denial is added.
+    - name: Persistent session stays narrow
+      given: A non-native read-only Grok Task.
+      when: ForkLight builds Grok CLI argv.
+      then: search_replace/write remain absent and the existing whole-GROK_HOME denial remains.
+  risks:
+    - Registering mutators without Workspace denials would allow a read-only Task to edit product files; exact argv assertions prevent that regression.
+    - Denying all Task-local Grok home would recreate the plan-persistence failure; focused tests reject that shape.
+  changeBudget: { maxFiles: 2, maxDiffLines: 140 }
+advancedPolicy: { maxDurationMs: null, observedTokenCeiling: null, noProgressTimeoutMs: null, fileLimit: null, fileLimitMode: warn, changedLineLimit: null, changedLineLimitMode: warn, baseMaxAttempts: 1, maxExtraAttempts: 0, maxMainCorrections: 0, maxMainReverifications: 0, maxWorkerValidationRepairs: 0, maxConcurrency: 1, completionMode: warn, changeBudgetMode: warn, maxAdaptationRounds: 0 }
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/workers/grok.ts
+    - tests/worker-runtime.test.ts
+acceptance:
+  criteria:
+    - Both native allowEdits branches register search_replace and write exactly once alongside all existing native registrations.
+    - Native read-only argv adds exact Workspace Write/Edit deny pairs without broadly denying Task-local Grok home and preserves credential, configuration, state, MCP and Bash denials.
+    - Native editable argv has no Workspace-wide Write/Edit denial; persistent-session read-only still omits mutators and retains whole-GROK_HOME denial.
+    - Candidate changes only the two approved paths and explains the Task-local-plan versus Workspace-edit safety boundary.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/worker-runtime.test.ts
+    - git diff --check

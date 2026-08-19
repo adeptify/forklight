@@ -1,0 +1,102 @@
+version: 2
+name: M2-A inspect post-Integration execution truth
+project: /Users/yijunwang/code/forklight
+taskClass: m2-grok-46-post-integration-truth
+taskFamily: forklight-runtime-recovery
+workerProfileId: local-grok-builder
+provider:
+  name: xai
+  model: grok-4.6
+  keychainService: forklight.xai.api-key
+runtime:
+  name: grok-build
+  executable: grok
+  effort: xhigh
+  maxBudgetUsd: null
+contract:
+  outcome: Verify from the integrated source that Grok 4.6 Xhigh is projected as persistent-session, native Goal stays unsupported, and omitted legacy execution remains single-run, without editing files.
+  presentation:
+    summary: 合入后只读核对 Grok 4.6 Xhigh 的执行真相，防止 persistent-session、native-goal 和 legacy 语义混淆。
+    language: zh-CN
+  context:
+    - This Task starts only after the M2-A implementation Candidate is safely integrated.
+    - The Task was registered before that Integration, so its own frozen legacy mode is not evidence for new-Task resolution.
+  inScope:
+    - Inspect the integrated canonical resolver, default Profile/catalog, Grok capabilities, and focused tests.
+    - Report any mismatch between persistent-session, nativeGoal unsupported, and legacy single-run semantics.
+  outOfScope:
+    - No edits, retries, fallback, Hub, settings mutation, Integration, commit, or push.
+  executionSteps:
+    - Read the focused integrated modules and tests.
+    - Compare their inputs, outputs, and compatibility rules against the acceptance criteria.
+    - Return a concise evidence-based inspection result.
+  deliverables:
+    - A read-only post-Integration execution-truth report.
+  modules:
+    - name: Integrated execution truth
+      responsibility: Expose the canonical requested mode, resolved mode, Runtime capability, and exact Grok identity.
+      consumes:
+        - Integrated resolver, Profile/catalog, adapter capability, and focused regression tests.
+      produces:
+        - A bounded pass or named semantic mismatch.
+      boundaries:
+        - No file or settings mutation and no native Goal inference.
+  callChain:
+    - Goal waits for M2-A safe Integration.
+    - This isolated read-only Task prepares from the updated source.
+    - Grok inspects the canonical modules and ForkLight runs the focused acceptance suite.
+    - Machine evidence unlocks the next legacy/recovery audit milestone once only.
+  scenarios:
+    - name: Integrated truth agrees
+      given: M2-A source is integrated.
+      when: Resolver, Profile, adapter, and tests are inspected.
+      then: New Grok resolves persistent-session, native Goal remains unsupported, and omitted legacy stays single-run.
+    - name: Semantic mismatch
+      given: Any integrated surface disagrees.
+      when: Inspection or focused tests run.
+      then: The Task fails with the exact mismatch and the Goal does not advance.
+  risks:
+    - This pre-registered Task has legacy frozen execution truth; do not use its own Task mode as proof of post-Integration new-Task behavior.
+  changeBudget:
+    maxFiles: 1
+    maxDiffLines: 20
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude: [.git, node_modules, dist, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: false
+  allowedCommands: []
+  focusPaths:
+    - src/core/execution-mode.ts
+    - src/core/settings.ts
+    - src/core/worker-profiles.ts
+    - src/workers/grok.ts
+    - tests/task.test.ts
+    - tests/worker-runtime.test.ts
+acceptance:
+  criteria:
+    - Integrated source and focused tests agree on Grok persistent-session, nativeGoal unsupported, exact 4.6 Xhigh identity, and legacy single-run.
+    - No source file changes.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/task.test.ts tests/worker-profiles.test.ts tests/worker-runtime.test.ts
+    - git diff --check

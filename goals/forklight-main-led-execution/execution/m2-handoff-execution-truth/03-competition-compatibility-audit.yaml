@@ -1,0 +1,62 @@
+version: 2
+name: M2 audit activated Competition handoff and legacy compatibility
+project: /Users/yijunwang/code/forklight
+taskClass: m2-competition-handoff-execution-compatibility-audit
+taskFamily: forklight-runtime-continuation
+workerProfileId: volcengine-glm52-1m
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 0
+  reason: Read-only deterministic Competition and legacy compatibility audit changes no files and creates no handoff.
+contract:
+  outcome: Verify the same activated builder gives Competition successors destination-owned execution truth while preserving selected-path materialization, one-hop replay guards, network and advanced policy, authentic legacy handoff reads, and explicit single-run freezing for new successors whose destination Profile omits a preference.
+  presentation: { summary: 只读核对 Competition 共用修复和 legacy 行为没有回归。, language: zh-CN }
+  context:
+    - Starts only after the activated direct Goal audit passes.
+    - The shared builder serves Goal and Competition. Read the accepted spec and do not manufacture real Competition or rewrite Store history.
+  inScope:
+    - Inspect activated Competition authorization, destination selection, successor storage, compatibility tests, and shared execution resolver.
+  outOfScope:
+    - No edits, real Home, Provider call, Competition run, handoff, Store mutation, migration, docs, review, Integration, Hub, commit, or push.
+  executionSteps:
+    - Trace the Competition entry to the same builder and canonical destination mode freeze.
+    - Confirm destination Profile omission explicitly freezes single-run on the new successor, historical field absence stays readable, unsupported forced modes fail before mutation, and existing handoff policies/read shapes remain intact.
+    - Run approved commands and return pass or one exact compatibility gap.
+  deliverables: [One bounded Competition and legacy compatibility verdict with zero Candidate change.]
+  modules:
+    - name: Shared Competition successor boundary
+      responsibility: Audit shared execution correction and unchanged Competition handoff semantics.
+      consumes: [Integrated source, Competition tests, Profile resolution tests, and accepted contract.]
+      produces: [Pass or one exact regression.]
+      boundaries: [No real execution, migration, policy expansion, or UI.]
+  callChain:
+    - Competition Main decision retains approved paths and selects a different Profile.
+    - Shared admission resolves destination preference/mode and stores one successor.
+    - Existing materialization, replay, policy and read compatibility remain authoritative.
+  scenarios:
+    - name: Shared correction reaches Competition
+      given: Source and destination use different Runtime capability classes.
+      when: Activated Competition handoff tests create the successor.
+      then: Destination mode is truthful without a Competition-specific branch.
+    - name: New omission and historical absence stay distinct
+      given: Destination Profile omits preference or old handoff evidence is read.
+      when: Compatibility tests run.
+      then: New successor explicitly stores single-run and old durable evidence stays readable without rewrite.
+  risks: [A Goal-only patch or broad legacy migration is a blocker.]
+  changeBudget: { maxFiles: 1, maxDiffLines: 20 }
+advancedPolicy: { maxDurationMs: null, observedTokenCeiling: null, noProgressTimeoutMs: null, fileLimit: null, fileLimitMode: warn, changedLineLimit: null, changedLineLimitMode: warn, baseMaxAttempts: 1, maxExtraAttempts: 0, maxMainCorrections: 0, maxMainReverifications: 0, maxConcurrency: 1, completionMode: warn, changeBudgetMode: warn, maxAdaptationRounds: 0 }
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: false
+  allowedCommands: []
+  focusPaths: [src/core/candidate-handoff.ts, src/core/execution-mode.ts, src/core/worker-profiles.ts, tests/competition.test.ts, tests/worker-profiles.test.ts]
+acceptance:
+  criteria:
+    - Activated Competition successors share destination-owned execution truth and preserve legacy, policy, materialization, and one-hop behavior with zero source change.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/competition.test.ts tests/worker-profiles.test.ts
+    - git diff --check

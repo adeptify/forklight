@@ -1,0 +1,139 @@
+version: 2
+name: M4-E Daemon socket probe permission safety
+project: /Users/yijunwang/code/forklight
+taskClass: m4-daemon-socket-probe-permission-safety
+taskFamily: orchestration-efficiency
+directCodexProfileId: codex-main-gpt-5.6-sol-xhigh-v1
+workerProfileId: grok-4-6-xhigh
+executionPreference: auto
+routingDecision:
+  taskFamily: orchestration-efficiency
+  shortlist:
+    - provider: xai
+      model: grok-4.6
+      runtime: grok-build
+      effort: xhigh
+      workerProfileId: grok-4-6-xhigh
+  selectedWorker:
+    provider: xai
+    model: grok-4.6
+    runtime: grok-build
+    effort: xhigh
+    workerProfileId: grok-4-6-xhigh
+  selectedBecause:
+    code: user-specified
+    note: Current AUTH_OK smoke and matched health prove the user-preferred Grok 4.6 Xhigh native Goal is launchable for the exact M4 blocker.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+reviewRequirement:
+  requiredJudges: 2
+  reason: Daemon startup owns the local control socket; two different-view Judges must inspect destructive-path safety and stale-socket compatibility.
+contract:
+  outcome: A permission-denied or indeterminate local Daemon socket probe fails closed without unlinking the existing endpoint, while a genuinely refused stale Unix socket remains safely recoverable through the existing inode guard.
+  presentation:
+    summary: 修复本地Daemon启动误删健康socket的问题，只把明确拒绝连接的旧socket视为可回收。
+    language: zh-CN
+  context:
+    - Read AGENTS.md and specs/m4-e-main-efficient-delivery/work-items/daemon-socket-probe-permission-safety/spec.md completely before editing; that accepted Work Item is the unique boundary.
+    - Read only src/daemon/server.ts and the focused daemon tests needed for active, stale, replaced and close ownership behavior.
+    - "Real evidence is exact: probeSocketEndpoint currently collapses EPERM and ECONNREFUSED to false, after which start unlinks the same inode and listen fails EPERM."
+    - ForkLight serves one local developer. Use a minimal error-aware socket probe; do not add locks, leases, PID registries, hashes, version handshakes or distributed coordination.
+    - This Task fixes the product blocker only. It does not resume or replace the stopped Main Token comparison.
+  inScope:
+    - Distinguish successful, explicitly refused/stale and indeterminate socket-probe outcomes in the current Daemon start path.
+    - Permit the existing inode-checked unlink only for the supported explicit stale condition.
+    - Fail closed and preserve the socket for EPERM, EACCES, timeout and unknown probe failures.
+    - Add focused deterministic tests using temporary homes or a controlled private probe seam.
+  outOfScope:
+    - Client/protocol/coordinator, Store/schema, CLI/MCP, Runtime/Profile, Main Token, calibration/evidence, Hub/UI or any path beyond the exact two focus paths.
+    - Real operator-Home mutation, automatic retry, replacement, fallback, model switch, Competition, third Judge, commit, push or reset.
+  executionSteps:
+    - Trace the exact start/probe/unlink/listen and current active/stale/replacement tests.
+    - Define the smallest typed probe outcome that preserves concrete error meaning without leaking paths or adding state.
+    - Implement fail-closed branching while retaining the existing inode recheck for the one allowed unlink path.
+    - Add focused EPERM and introduced-branch regressions; run the full accepted daemon test file and inspect the exact diff.
+  deliverables:
+    - One two-path Candidate implementing permission-safe stale-socket detection.
+    - Focused tests proving both socket preservation and genuine stale recovery.
+    - Concise handoff naming behavior, changed paths, commands and remaining uncertainty.
+  modules:
+    - name: Daemon socket probe
+      responsibility: Preserve the concrete outcome of a local endpoint connection attempt.
+      consumes: [Canonical Unix socket path and connection result.]
+      produces: [Connected, explicitly refused/stale, or indeterminate outcome.]
+      boundaries: [No persistent state, retry, lock, lease or process registry.]
+    - name: Startup unlink gate
+      responsibility: Allow destructive stale-socket removal only after explicit refusal and current inode equality.
+      consumes: [Probe outcome and existing socket identity.]
+      produces: [Safe reject or existing stale cleanup followed by normal listen.]
+      boundaries: [No unlink for permission denial, timeout, unknown error or replaced socket.]
+  callChain:
+    - Daemon start discovers an existing Unix socket and captures its identity.
+    - Probe connects, receives explicit refusal, or returns an indeterminate error/timeout.
+    - Connected rejects as already running; indeterminate rejects without mutation; explicit refusal enters the existing same-inode recheck and unlink.
+    - Normal listen and close ownership behavior continue unchanged.
+  scenarios:
+    - name: Sandboxed permission denial
+      given: A socket exists but the starting process receives EPERM while probing it.
+      when: A second Daemon starts.
+      then: Startup rejects truthfully and the exact existing socket remains intact.
+    - name: Genuine stale socket
+      given: A real Unix socket path exists with no listener and connection is explicitly refused.
+      when: Daemon starts.
+      then: The same inode is rechecked, removed and replaced by one healthy endpoint.
+    - name: Active or replaced socket
+      given: The endpoint connects or changes identity during the probe.
+      when: Daemon starts.
+      then: It refuses to steal or unlink the endpoint.
+  risks:
+    - Over-broad error matching could disable stale recovery; assert the exact supported refusal code with a real stale-socket test.
+    - A test-only seam could leak into public behavior; keep it private and narrow or use existing controlled method replacement.
+    - Error text could disclose a private path; use a bounded diagnostic without credential or Store content.
+  changeBudget:
+    maxFiles: 2
+    maxDiffLines: 300
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 60000
+  fileLimit: 2
+  fileLimitMode: hard
+  changedLineLimit: 300
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxWorkerValidationRepairs: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test, plans]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/daemon/server.ts
+    - tests/daemon.test.ts
+acceptance:
+  criteria:
+    - A controlled EPERM socket probe rejects startup while preserving the exact existing socket path and inode and never entering unlink/listen.
+    - EACCES, timeout and unknown introduced outcomes share the same fail-closed non-mutating branch with focused coverage proportional to the implementation.
+    - Active endpoint rejection, real stale Unix socket recovery, replaced-after-probe protection and close ownership behavior remain compatible.
+    - Candidate changes exactly src/daemon/server.ts and tests/daemon.test.ts with no new dependency or coordination state.
+    - No client, Store, protocol, Runtime, Token, calibration, Hub/UI, credential, Git history or unrelated behavior changes.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/daemon.test.ts
+    - git diff --check

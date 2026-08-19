@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "name": "M2 Coding reviewed-delivery journey",
+  "objective": "Deliver a bounded safe restart continuation for source-only Integration operations through one interrupted-and-resumed ForkLight Worker Task, independent verification, two Judges, serial Main Integration, and integrated-source audits.",
+  "planFile": "./plan.json",
+  "policy": {
+    "maxDurationMs": null,
+    "noProgressTimeoutMs": null,
+    "maxCorrectionRounds": 1,
+    "maxReviewRounds": 2,
+    "maxNoNewEvidenceCycles": 2
+  },
+  "milestones": [
+    { "itemId": "source-only-recovery", "gate": "integration" },
+    { "itemId": "integrated-recovery-audit", "gate": "machine" },
+    { "itemId": "wrong-candidate-safety-audit", "gate": "machine" },
+    { "itemId": "operation-surface-audit", "gate": "machine" }
+  ]
+}

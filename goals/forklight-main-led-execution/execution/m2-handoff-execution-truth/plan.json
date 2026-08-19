@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "name": "M2 handoff destination execution truth recovery",
+  "objective": "Apply one bounded shared successor-admission correction, verify and review it before serial Main Integration, then run three zero-change activated-source audits covering Goal, Competition, capability, compatibility, and scope truth.",
+  "items": [
+    { "id": "destination-execution-fix", "task": "./01-implementation.yaml", "dependsOn": [] },
+    { "id": "goal-handoff-truth-audit", "task": "./02-goal-handoff-audit.yaml", "dependsOn": ["destination-execution-fix"] },
+    { "id": "competition-compatibility-audit", "task": "./03-competition-compatibility-audit.yaml", "dependsOn": ["goal-handoff-truth-audit"] },
+    { "id": "execution-scope-audit", "task": "./04-execution-scope-audit.yaml", "dependsOn": ["competition-compatibility-audit"] }
+  ]
+}

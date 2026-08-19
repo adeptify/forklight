@@ -193,6 +193,8 @@ export function describeReason(reason: WorkerReadinessResult["reason"]): string 
       return "saved model is missing or invalid";
     case "native-goal-unsupported":
       return "the Runtime cannot prove a native Goal for the forced mode";
+    case "persistent-session-unsupported":
+      return "the Runtime cannot prove a persistent Session for the forced mode";
   }
 }
 
@@ -213,6 +215,6 @@ export function describeNextAction(action: WorkerReadinessResult["nextAction"]):
     case "choose-model":
       return "choose a valid model for this Worker";
     case "choose-execution-mode":
-      return "choose auto, one normal run, or a Runtime-native Goal";
+      return "choose auto, one normal run, a persistent Session, or a Runtime-native Goal";
   }
 }

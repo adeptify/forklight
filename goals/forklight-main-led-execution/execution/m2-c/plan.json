@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "name": "M2-C auditable Task storage lifecycle delivery",
+  "objective": "Implement, safely integrate, and independently audit a single-user Task storage audit, preview, confirmed reclaim, durable disposition, and Store/process integrity path without deleting durable or unknown content.",
+  "items": [
+    { "id": "implement", "task": "./01-implement.yaml", "dependsOn": [] },
+    { "id": "protection-audit", "task": "./02-protection-audit.yaml", "dependsOn": ["implement"] },
+    { "id": "surface-audit", "task": "./03-surface-audit.yaml", "dependsOn": ["protection-audit"] },
+    { "id": "boundary-audit", "task": "./04-boundary-audit.yaml", "dependsOn": ["surface-audit"] }
+  ]
+}

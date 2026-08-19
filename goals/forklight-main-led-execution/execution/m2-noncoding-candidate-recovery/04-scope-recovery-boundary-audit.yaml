@@ -1,0 +1,55 @@
+version: 2
+name: M2 audit recovered runbook scope and recovery boundaries
+project: /Users/yijunwang/code/forklight
+taskClass: m2-noncoding-runbook-boundary-audit
+taskFamily: forklight-operations-runbook
+workerProfileId: grok-4-6-xhigh
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 0
+  reason: Read-only boundary audit changes no product file and repeats deterministic integrated-document checks after meaningful Grok delivery is proven.
+contract:
+  outcome: Verify the recovered integrated runbook never turns restart, timeout, disconnect, review disagreement, or terminal storage cleanup into unsupported replay, scope expansion, or destructive authority.
+  presentation: { summary: 最终核对中断、分歧与空间清理的边界没有被写成自动重做或危险授权。, language: zh-CN }
+  context:
+    - Read the accepted non-Coding Work Item, integrated runbook, and delivered source-only recovery boundary completely.
+    - Grok remains persistent-session, not native-goal. ForkLight is a one-local-developer product and no distributed coordination belongs here.
+  inScope: [Same-Task and same-operation re-observation, two-no-new-evidence stop, partial-path reuse, source-only recovery limit, build and activation refusal, protected workspaces, ordinary eligible reclaim, privacy, and zero diff.]
+  outOfScope: [Edits, another recovery design, automated retry or Competition, manual deletion, historical cleanup approval, multi-user guidance, locks, leases, checksums, version handshakes, Hub, commit, push, or credentials.]
+  executionSteps: [Trace every interruption and destructive decision point, compare it with accepted product truth, run approved commands, report pass or one exact unsafe claim.]
+  deliverables: [One read-only scope and recovery verdict.]
+  modules:
+    - name: Recovery and disposition boundary audit
+      responsibility: Ensure observation failures remain observation-only and destructive authority remains explicit and narrow.
+      consumes: [Integrated runbook, accepted recovery and storage contracts, current CLI help.]
+      produces: [Pass or one exact unsafe claim with zero diff.]
+      boundaries: [No edit, replay, new authority, distributed mechanism, or UI work.]
+  callChain: [Observe durable progress, resume or re-observe the same identity, stop on repeated no-evidence, integrate only exact Candidate, reclaim only eligible ordinary space after durable delivery.]
+  scenarios:
+    - name: Observation ends while work continues
+      given: A wait or transport call ends without terminal durable evidence.
+      when: The operator follows the runbook.
+      then: They re-observe the same identity and do not cancel, recreate, reroute, replay, or infer failure.
+    - name: Workspace is unresolved
+      given: A Task is active, under review, or has reusable partial output.
+      when: Storage is audited or previewed.
+      then: The runbook preserves it and never authorizes manual or automatic deletion.
+  risks: [Documentation that widens observation or cleanup authority can cause duplicate Integration or loss of reusable work.]
+  changeBudget: { maxFiles: 1, maxDiffLines: 20 }
+advancedPolicy: { maxDurationMs: null, observedTokenCeiling: null, noProgressTimeoutMs: null, workerStopGraceMs: 60000, fileLimit: null, fileLimitMode: warn, changedLineLimit: null, changedLineLimitMode: warn, baseMaxAttempts: 1, maxExtraAttempts: 0, maxMainCorrections: 0, maxMainReverifications: 0, maxConcurrency: 1, completionMode: warn, changeBudgetMode: warn, maxAdaptationRounds: 0 }
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: false
+  allowedCommands: []
+  focusPaths: [docs/main-led-delivery.md, docs/operations.md, README.md, src/core/integration.ts, src/core/storage-lifecycle.ts]
+acceptance:
+  criteria: [Integrated documentation preserves honest Runtime labels, observation-only timeout semantics, source-only recovery limits, evidence-based stop, and protected storage without widening destructive authority.]
+  commands:
+    - npm run build
+    - node dist/src/cli.js --help
+    - >-
+      node -e "const fs=require('node:fs'); const readme=fs.readFileSync('README.md','utf8'); const operations=fs.readFileSync('docs/operations.md','utf8'); if(!fs.existsSync('docs/main-led-delivery.md') || !readme.includes('docs/main-led-delivery.md') || !operations.includes('main-led-delivery')) process.exit(1)"
+    - git diff --check

@@ -1,0 +1,81 @@
+{
+  "schemaVersion": 1,
+  "family": "worker-runtime",
+  "taskClass": "m4-fresh-checkpoint-worker-runtime",
+  "taskLabel": "M4-E fresh worker-runtime checkpoint pair",
+  "presentationSummary": "生成新的 M4-E worker-runtime checkpoint 单份可验证事实，不重放旧 M4-D，不修改产品。",
+  "selectionNote": "The accepted M4-E post-activation proof requires one fresh Grok 4.6 Xhigh native Goal delegated delivery through the two checkpoints.",
+  "directCodexProfileId": "codex-main-gpt-5.6-sol-xhigh-v1",
+  "outputPath": "goals/forklight-main-led-execution/evidence/m4-calibration/worker-runtime-checkpoint.json",
+  "acceptanceCommand": "node validate-artifact.mjs calibration-input.json goals/forklight-main-led-execution/evidence/m4-calibration/worker-runtime-checkpoint.json",
+  "task": "Project the newly activated M4-E Grok native Goal delivery from supplied durable evidence. Report the exact Runtime, Task, Session, Attempt, native Goal, verification, dual review, Main decision, fresh bound receipt, Integration and checkpoint semantics. This is a new M4-E subject and must not reuse the old M3-C2 calibration artifact.",
+  "evidence": {
+    "accepted": {
+      "subject": "m4-e-main-efficient-delivery",
+      "taskId": "3e2740eb-4c4e-4a55-9a80-86c51c35a5b5",
+      "sessionId": "04ef556b-465e-43f7-8dd5-44171857fda4",
+      "attemptId": "4d93ffd7-2078-4b5f-a3cf-dfebdd690eed",
+      "runtime": "grok-build",
+      "provider": "xai",
+      "model": "grok-4.6",
+      "effort": "xhigh",
+      "executionMode": "native-goal",
+      "nativeGoal": {
+        "id": "3f210d75-9ed5-4c99-bbac-a7d0f4fd53c7",
+        "status": "complete",
+        "phase": "Idle",
+        "classifier": "achieved",
+        "workerRounds": 1,
+        "resumed": false
+      },
+      "verification": {
+        "eventSequence": 2646,
+        "passed": true,
+        "focusedTestsPassed": 461
+      },
+      "review": {
+        "graphId": "013c2594-c9cf-4f3c-ab15-e30a1239b5bf",
+        "usableJudges": 2,
+        "disposition": "agreement-accept"
+      },
+      "mainReview": {
+        "eventSequence": 2654,
+        "decision": "accept"
+      },
+      "candidate": {
+        "revisionId": "fe127fd9-d4c3-42c2-826e-21eea52af2f4",
+        "digest": "42a6a2b51220d33a96bea8d279a6f6e068d89c595a8ab61b17f06b1d7998a371",
+        "affectedPaths": 19
+      },
+      "delivery": {
+        "receiptId": "2b0075f8-b7fa-4dd0-b6e4-1b9de1e9b844",
+        "freshPostReview": true,
+        "resultId": "c3879c21-0b57-4b64-be68-3dd666942181",
+        "eventSequence": 2664,
+        "status": "applied",
+        "passedStages": [
+          "source-applied",
+          "source-verified",
+          "artifact-built",
+          "runtime-activated"
+        ]
+      },
+      "checkpoints": {
+        "prepareStopsForMainDecision": true,
+        "decideRequiresExactRevisionDigest": true,
+        "acceptCreatesFreshBoundPreflight": true,
+        "exactReentryReusesReceiptAndOperation": true,
+        "observationTimeoutCancelsUnderlyingWork": false
+      }
+    },
+    "predecessors": []
+  },
+  "requiredProjection": {
+    "evidenceMode": "current-durable-delivery-read-only",
+    "runtimeMutationOccurred": false
+  },
+  "sourceRefs": [
+    "goals/forklight-main-led-execution/evidence/m4-e-main-efficient-delivery.md",
+    "specs/m4-e-main-efficient-delivery/work-items/fresh-preflight-binding/spec.md"
+  ]
+}

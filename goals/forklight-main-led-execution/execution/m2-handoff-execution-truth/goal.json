@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "name": "M2 handoff destination execution truth",
+  "objective": "Make every newly authorized direct Goal or Competition handoff successor freeze execution preference and mode from its selected destination Worker Profile and Runtime, verify the shared fix independently, review it from two core-runtime views, integrate it safely, and audit activated truth without rewriting history.",
+  "planFile": "./plan.json",
+  "policy": {
+    "maxDurationMs": null,
+    "noProgressTimeoutMs": null,
+    "maxCorrectionRounds": 1,
+    "maxReviewRounds": 2,
+    "maxNoNewEvidenceCycles": 2
+  },
+  "milestones": [
+    { "itemId": "destination-execution-fix", "gate": "integration" },
+    { "itemId": "goal-handoff-truth-audit", "gate": "machine" },
+    { "itemId": "competition-compatibility-audit", "gate": "machine" },
+    { "itemId": "execution-scope-audit", "gate": "machine" }
+  ]
+}

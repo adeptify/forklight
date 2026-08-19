@@ -1,6 +1,8 @@
-import { mkdirSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, unlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import { backup, DatabaseSync } from "node:sqlite";
+import { STORE_DATABASE_NAME } from "../core/config.js";
 import type {
   AdaptationTransitionRecord,
   AttemptRecord,
@@ -29,11 +31,28 @@ import type {
   ReviewGraphRecord,
   ReviewGraphStatus,
   StagedTaskRegistration,
+  StoreIntegrityCheck,
   TaskRecord,
   TaskStatus,
 } from "../core/types.js";
 import { normalizeDirectCodexPairedSample, normalizeDirectCodexProfileId, normalizeDirectCodexProfilePublication, type DirectCodexPairedSample, type DirectCodexProfilePublication } from "../core/direct-codex-calibration.js";
 import { normalizeDirectCodexSampleReview, type DirectCodexSampleReview } from "../core/direct-codex-review.js";
+import {
+  CORRUPT_MAIN_USAGE_SAMPLE,
+  SAMPLE_IDENTITY_MISMATCH,
+  SAMPLE_UNKNOWN_TASK,
+  UNKNOWN_MAIN_USAGE_SAMPLE,
+  normalizeMainUsageComparisonId,
+  normalizeMainUsageSample,
+  type MainUsageSample,
+} from "../core/main-token-usage.js";
+import {
+  ASSESSMENT_UNKNOWN_TASK,
+  CORRUPT_MAIN_PAIR_ASSESSMENT,
+  UNKNOWN_MAIN_PAIR_ASSESSMENT,
+  normalizeMainPairAssessment,
+  type MainPairAssessment,
+} from "../core/main-token-pair.js";
 import { SELF_UPGRADE_DELIVERY_PROFILE_ID } from "../core/self-upgrade-evidence.js";
 import { normalizeDirectCodexCalibrationRecord, normalizeOrchestrationExchangeReceipt, type DirectCodexCalibrationRecord, type OrchestrationExchangeReceipt } from "../core/token-efficiency.js";
 import { isoTimestamp as now } from "../core/time.js";
@@ -96,6 +115,76 @@ function parseCheckpointOperationRecord(value: unknown): CheckpointOperationReco
   return parsed;
 }
 
+/** Stable content-free corruption error for candidate-handoff reads. The
+ *  message never contains JSON, ids, or stored content. */
+export const CANDIDATE_HANDOFF_CORRUPTION_ERROR =
+  "Corrupt candidate handoff record in state database";
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+/** Current typed origin written after the origin field existed. */
+function hasCurrentHandoffOrigin(value: Record<string, unknown>): boolean {
+  const origin = value.origin;
+  if (origin === null || typeof origin !== "object" || Array.isArray(origin)) {
+    return false;
+  }
+  const fields = origin as Record<string, unknown>;
+  if (fields.kind === "competition") {
+    return isNonEmptyString(fields.competitionId) && isNonEmptyString(fields.sourceCandidateId);
+  }
+  if (fields.kind === "goal-task") {
+    return isNonEmptyString(fields.goalId) && isNonEmptyString(fields.itemId);
+  }
+  return false;
+}
+
+/** Authentic pre-origin Competition JSON: top-level identity, no typed origin. */
+function hasAuthenticLegacyCompetitionIdentity(value: Record<string, unknown>): boolean {
+  const origin = Object.hasOwn(value, "origin") ? value.origin : undefined;
+  return (
+    (origin === undefined || origin === null)
+    && isNonEmptyString(value.competitionId)
+    && isNonEmptyString(value.sourceCandidateId)
+  );
+}
+
+/** Shared durable read boundary for every candidate-handoff Store reader.
+ *  Current origin rows return unchanged. The authentic old Competition field
+ *  pair is lifted to an in-memory origin only. Unparseable JSON fails closed.
+ *  Origin-less rows without that field pair stay collectable; semantic
+ *  projection, not generic listing, rejects an unproven origin. */
+function parseCandidateHandoffRecord(value: unknown): CandidateHandoffRecord {
+  if (typeof value !== "string") {
+    throw new Error(CANDIDATE_HANDOFF_CORRUPTION_ERROR);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error(CANDIDATE_HANDOFF_CORRUPTION_ERROR);
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(CANDIDATE_HANDOFF_CORRUPTION_ERROR);
+  }
+  const record = parsed as Record<string, unknown>;
+  if (hasCurrentHandoffOrigin(record)) {
+    return parsed as CandidateHandoffRecord;
+  }
+  if (hasAuthenticLegacyCompetitionIdentity(record)) {
+    return {
+      ...record,
+      origin: {
+        kind: "competition",
+        competitionId: record.competitionId,
+        sourceCandidateId: record.sourceCandidateId,
+      },
+    } as CandidateHandoffRecord;
+  }
+  return parsed as CandidateHandoffRecord;
+}
+
 interface CalibrationRow {
   id: string;
   task_class: string;
@@ -142,7 +231,7 @@ export class StateStore {
 
   constructor(home: string) {
     mkdirSync(home, { recursive: true, mode: 0o700 });
-    this.databasePath = path.join(home, "forklight.sqlite");
+    this.databasePath = path.join(home, STORE_DATABASE_NAME);
     this.db = new DatabaseSync(this.databasePath);
     // Let concurrent CLI and daemon connections briefly wait for one another
     // instead of failing immediately while SQLite is opening the shared store.
@@ -461,6 +550,33 @@ export class StateStore {
       );
       CREATE INDEX IF NOT EXISTS idx_outcome_intakes_status
         ON outcome_intakes(status, updated_at DESC);
+      CREATE TABLE IF NOT EXISTS main_usage_samples (
+        sample_id TEXT PRIMARY KEY,
+        forklight_task_id TEXT NOT NULL REFERENCES tasks(id),
+        comparison_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        task_class TEXT NOT NULL,
+        task_family TEXT NOT NULL,
+        profile_id TEXT NOT NULL,
+        run_ref TEXT NOT NULL UNIQUE,
+        captured_at TEXT NOT NULL,
+        record_json TEXT NOT NULL,
+        UNIQUE(comparison_id, role)
+      );
+      CREATE INDEX IF NOT EXISTS idx_main_usage_samples_task_comparison
+        ON main_usage_samples(forklight_task_id, comparison_id, captured_at, sample_id);
+      CREATE TABLE IF NOT EXISTS main_pair_assessments (
+        assessment_id TEXT PRIMARY KEY,
+        forklight_task_id TEXT NOT NULL REFERENCES tasks(id),
+        comparison_id TEXT NOT NULL UNIQUE,
+        decision TEXT NOT NULL,
+        rejection_reason TEXT,
+        profile_id TEXT,
+        assessed_at TEXT NOT NULL,
+        record_json TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_main_pair_assessments_task
+        ON main_pair_assessments(forklight_task_id, assessed_at, assessment_id);
     `);
     // Idempotent legacy primary Plan backfill: each Goal's goals.plan_id becomes
     // ordinal 0. Safe on every open; INSERT OR IGNORE never duplicates or reorders.
@@ -1430,7 +1546,7 @@ export class StateStore {
     const asSuccessor = this.getCandidateHandoffBySuccessorTaskId(taskId);
     if (
       asSuccessor !== undefined
-      && asSuccessor.origin.kind === "goal-task"
+      && asSuccessor.origin?.kind === "goal-task"
     ) {
       try {
         return this.getGoal(asSuccessor.origin.goalId);
@@ -2375,6 +2491,278 @@ export class StateStore {
     });
   }
 
+  // --- Complete Main usage samples (M4-A) ---
+
+  private static parseMainUsageSampleRow(
+    row: {
+      sample_id: string; forklight_task_id: string; comparison_id: string; role: string;
+      task_class: string; task_family: string; profile_id: string; run_ref: string;
+      captured_at: string; record_json: string;
+    },
+  ): MainUsageSample {
+    let parsed: unknown;
+    try { parsed = JSON.parse(row.record_json); }
+    catch { throw new Error(CORRUPT_MAIN_USAGE_SAMPLE); }
+    let sample: MainUsageSample;
+    try { sample = normalizeMainUsageSample(parsed); }
+    catch { throw new Error(CORRUPT_MAIN_USAGE_SAMPLE); }
+    if (
+      sample.sampleId !== row.sample_id
+      || sample.forklightTaskId !== row.forklight_task_id
+      || sample.comparisonId !== row.comparison_id
+      || sample.role !== row.role
+      || sample.taskClass !== row.task_class
+      || sample.taskFamily !== row.task_family
+      || sample.directCodexProfileId !== row.profile_id
+      || sample.runRef !== row.run_ref
+      || sample.capturedAt !== row.captured_at
+    ) {
+      throw new Error(CORRUPT_MAIN_USAGE_SAMPLE);
+    }
+    return sample;
+  }
+
+  private verifyMainUsageTaskIdentity(sample: MainUsageSample): void {
+    let task: TaskRecord;
+    try { task = this.getTask(sample.forklightTaskId); }
+    catch { throw new Error(CORRUPT_MAIN_USAGE_SAMPLE); }
+    if (
+      !task.spec.taskClass || task.spec.taskClass !== sample.taskClass
+      || !task.spec.taskFamily || task.spec.taskFamily !== sample.taskFamily
+      || !task.spec.directCodexProfileId || task.spec.directCodexProfileId !== sample.directCodexProfileId
+    ) {
+      throw new Error(CORRUPT_MAIN_USAGE_SAMPLE);
+    }
+  }
+
+  saveMainUsageSample(input: unknown): void {
+    const sample = normalizeMainUsageSample(input);
+    let task: TaskRecord;
+    try { task = this.getTask(sample.forklightTaskId); }
+    catch { throw new Error(SAMPLE_UNKNOWN_TASK); }
+    if (
+      !task.spec.taskClass || task.spec.taskClass !== sample.taskClass
+      || !task.spec.taskFamily || task.spec.taskFamily !== sample.taskFamily
+      || !task.spec.directCodexProfileId || task.spec.directCodexProfileId !== sample.directCodexProfileId
+    ) {
+      throw new Error(SAMPLE_IDENTITY_MISMATCH);
+    }
+    const bound = this.listMainUsageSamplesByComparison(sample.comparisonId);
+    for (const existing of bound) {
+      if (
+        existing.forklightTaskId !== sample.forklightTaskId
+        || existing.taskClass !== sample.taskClass
+        || existing.taskFamily !== sample.taskFamily
+        || existing.directCodexProfileId !== sample.directCodexProfileId
+      ) {
+        throw new Error(SAMPLE_IDENTITY_MISMATCH);
+      }
+    }
+    this.db
+      .prepare(
+        `INSERT INTO main_usage_samples (
+           sample_id, forklight_task_id, comparison_id, role,
+           task_class, task_family, profile_id, run_ref, captured_at, record_json
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        sample.sampleId, sample.forklightTaskId, sample.comparisonId, sample.role,
+        sample.taskClass, sample.taskFamily, sample.directCodexProfileId,
+        sample.runRef, sample.capturedAt, JSON.stringify(sample),
+      );
+  }
+
+  getMainUsageSample(sampleId: string): MainUsageSample {
+    StateStore.validateSampleId(sampleId);
+    const row = this.db
+      .prepare(
+        `SELECT sample_id, forklight_task_id, comparison_id, role,
+                task_class, task_family, profile_id, run_ref, captured_at, record_json
+         FROM main_usage_samples WHERE sample_id = ?`,
+      )
+      .get(sampleId) as {
+        sample_id: string; forklight_task_id: string; comparison_id: string; role: string;
+        task_class: string; task_family: string; profile_id: string; run_ref: string;
+        captured_at: string; record_json: string;
+      } | undefined;
+    if (!row) throw new Error(UNKNOWN_MAIN_USAGE_SAMPLE);
+    const sample = StateStore.parseMainUsageSampleRow(row);
+    this.verifyMainUsageTaskIdentity(sample);
+    return sample;
+  }
+
+  listMainUsageSamples(taskId: unknown, comparisonId: unknown): MainUsageSample[] {
+    if (typeof taskId !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(taskId)) {
+      throw new TypeError(UNKNOWN_MAIN_USAGE_SAMPLE);
+    }
+    const exactComparison = normalizeMainUsageComparisonId(comparisonId);
+    const rows = this.db
+      .prepare(
+        `SELECT sample_id, forklight_task_id, comparison_id, role,
+                task_class, task_family, profile_id, run_ref, captured_at, record_json
+         FROM main_usage_samples
+         WHERE forklight_task_id = ? AND comparison_id = ?
+         ORDER BY CASE role WHEN 'direct-main' THEN 0 ELSE 1 END, captured_at, sample_id`,
+      )
+      .all(taskId, exactComparison) as unknown as Array<{
+        sample_id: string; forklight_task_id: string; comparison_id: string; role: string;
+        task_class: string; task_family: string; profile_id: string; run_ref: string;
+        captured_at: string; record_json: string;
+      }>;
+    return rows.map((row) => {
+      const sample = StateStore.parseMainUsageSampleRow(row);
+      this.verifyMainUsageTaskIdentity(sample);
+      return sample;
+    });
+  }
+
+  listMainUsageSamplesByComparison(comparisonId: unknown): MainUsageSample[] {
+    const exactComparison = normalizeMainUsageComparisonId(comparisonId);
+    const rows = this.db
+      .prepare(
+        `SELECT sample_id, forklight_task_id, comparison_id, role,
+                task_class, task_family, profile_id, run_ref, captured_at, record_json
+         FROM main_usage_samples
+         WHERE comparison_id = ?
+         ORDER BY CASE role WHEN 'direct-main' THEN 0 ELSE 1 END, captured_at, sample_id`,
+      )
+      .all(exactComparison) as unknown as Array<{
+        sample_id: string; forklight_task_id: string; comparison_id: string; role: string;
+        task_class: string; task_family: string; profile_id: string; run_ref: string;
+        captured_at: string; record_json: string;
+      }>;
+    return rows.map((row) => {
+      const sample = StateStore.parseMainUsageSampleRow(row);
+      this.verifyMainUsageTaskIdentity(sample);
+      return sample;
+    });
+  }
+
+  countMainUsageSamples(): number {
+    const row = this.db.prepare("SELECT COUNT(*) AS n FROM main_usage_samples").get() as { n: number };
+    return row.n;
+  }
+
+  // --- Main Token pair assessments (M4-B) ---
+
+  private static parseMainPairAssessmentRow(
+    row: {
+      assessment_id: string;
+      forklight_task_id: string;
+      comparison_id: string;
+      decision: string;
+      rejection_reason: string | null;
+      profile_id: string | null;
+      assessed_at: string;
+      record_json: string;
+    },
+  ): MainPairAssessment {
+    let parsed: unknown;
+    try { parsed = JSON.parse(row.record_json); }
+    catch { throw new Error(CORRUPT_MAIN_PAIR_ASSESSMENT); }
+    let assessment: MainPairAssessment;
+    try { assessment = normalizeMainPairAssessment(parsed); }
+    catch { throw new Error(CORRUPT_MAIN_PAIR_ASSESSMENT); }
+    if (
+      assessment.assessmentId !== row.assessment_id
+      || assessment.forklightTaskId !== row.forklight_task_id
+      || assessment.comparisonId !== row.comparison_id
+      || assessment.decision !== row.decision
+      || assessment.assessedAt !== row.assessed_at
+      || (assessment.rejectionReason ?? null) !== row.rejection_reason
+      || (assessment.directCodexProfileId ?? null) !== row.profile_id
+    ) {
+      throw new Error(CORRUPT_MAIN_PAIR_ASSESSMENT);
+    }
+    return assessment;
+  }
+
+  saveMainPairAssessment(input: unknown): void {
+    const assessment = normalizeMainPairAssessment(input);
+    try { this.getTask(assessment.forklightTaskId); }
+    catch { throw new Error(ASSESSMENT_UNKNOWN_TASK); }
+    this.db
+      .prepare(
+        `INSERT INTO main_pair_assessments (
+           assessment_id, forklight_task_id, comparison_id, decision,
+           rejection_reason, profile_id, assessed_at, record_json
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        assessment.assessmentId,
+        assessment.forklightTaskId,
+        assessment.comparisonId,
+        assessment.decision,
+        assessment.rejectionReason ?? null,
+        assessment.directCodexProfileId ?? null,
+        assessment.assessedAt,
+        JSON.stringify(assessment),
+      );
+  }
+
+  getMainPairAssessment(assessmentId: string): MainPairAssessment {
+    if (typeof assessmentId !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(assessmentId)) {
+      throw new TypeError(UNKNOWN_MAIN_PAIR_ASSESSMENT);
+    }
+    const row = this.db
+      .prepare(
+        `SELECT assessment_id, forklight_task_id, comparison_id, decision,
+                rejection_reason, profile_id, assessed_at, record_json
+         FROM main_pair_assessments WHERE assessment_id = ?`,
+      )
+      .get(assessmentId) as {
+        assessment_id: string; forklight_task_id: string; comparison_id: string; decision: string;
+        rejection_reason: string | null; profile_id: string | null; assessed_at: string; record_json: string;
+      } | undefined;
+    if (!row) throw new Error(UNKNOWN_MAIN_PAIR_ASSESSMENT);
+    return StateStore.parseMainPairAssessmentRow(row);
+  }
+
+  getMainPairAssessmentByComparison(comparisonId: unknown): MainPairAssessment | undefined {
+    const exactComparison = normalizeMainUsageComparisonId(comparisonId);
+    const row = this.db
+      .prepare(
+        `SELECT assessment_id, forklight_task_id, comparison_id, decision,
+                rejection_reason, profile_id, assessed_at, record_json
+         FROM main_pair_assessments WHERE comparison_id = ?`,
+      )
+      .get(exactComparison) as {
+        assessment_id: string; forklight_task_id: string; comparison_id: string; decision: string;
+        rejection_reason: string | null; profile_id: string | null; assessed_at: string; record_json: string;
+      } | undefined;
+    if (!row) return undefined;
+    return StateStore.parseMainPairAssessmentRow(row);
+  }
+
+  countMainPairAssessments(): number {
+    const row = this.db.prepare("SELECT COUNT(*) AS n FROM main_pair_assessments").get() as { n: number };
+    return row.n;
+  }
+
+  hasLegacyMainPairEvidence(taskId: string): boolean {
+    const sampleRow = this.db
+      .prepare("SELECT COUNT(*) AS n FROM direct_codex_paired_samples WHERE forklight_task_id = ?")
+      .get(taskId) as { n: number };
+    if (sampleRow.n > 0) return true;
+    const reviewRow = this.db
+      .prepare(
+        `SELECT COUNT(*) AS n
+         FROM direct_codex_review_decisions
+         WHERE sample_id IN (
+           SELECT sample_id FROM direct_codex_paired_samples WHERE forklight_task_id = ?
+         )`,
+      )
+      .get(taskId) as { n: number };
+    if (reviewRow.n > 0) return true;
+    let task: TaskRecord;
+    try { task = this.getTask(taskId); }
+    catch { return false; }
+    const taskClass = task.spec.taskClass;
+    const profileId = task.spec.directCodexProfileId;
+    if (!taskClass || !profileId) return false;
+    return this.listDirectCodexProfilePublications(taskClass, profileId).length > 0;
+  }
+
   // --- Direct-Codex review-decision registry ---
 
   saveDirectCodexSampleReview(input: unknown): void {
@@ -2662,7 +3050,7 @@ export class StateStore {
       .prepare(`SELECT record_json FROM candidate_handoffs WHERE id = ?`)
       .get(id) as { record_json: string } | undefined;
     if (row === undefined) throw new Error(`Candidate handoff ${id} was not found`);
-    return parseRecord<CandidateHandoffRecord>(row.record_json, "candidate handoff");
+    return parseCandidateHandoffRecord(row.record_json);
   }
 
   getCandidateHandoffBySourceRevisionId(
@@ -2674,7 +3062,7 @@ export class StateStore {
       )
       .get(sourceRevisionId) as { record_json: string } | undefined;
     if (row === undefined) return undefined;
-    return parseRecord<CandidateHandoffRecord>(row.record_json, "candidate handoff");
+    return parseCandidateHandoffRecord(row.record_json);
   }
 
   getCandidateHandoffBySuccessorTaskId(
@@ -2686,7 +3074,7 @@ export class StateStore {
       )
       .get(successorTaskId) as { record_json: string } | undefined;
     if (row === undefined) return undefined;
-    return parseRecord<CandidateHandoffRecord>(row.record_json, "candidate handoff");
+    return parseCandidateHandoffRecord(row.record_json);
   }
 
   listCandidateHandoffsBySourceTaskId(sourceTaskId: string): CandidateHandoffRecord[] {
@@ -2698,7 +3086,7 @@ export class StateStore {
       )
       .all(sourceTaskId) as unknown as Array<{ record_json: string }>;
     return rows.map((row) =>
-      parseRecord<CandidateHandoffRecord>(row.record_json, "candidate handoff"),
+      parseCandidateHandoffRecord(row.record_json),
     );
   }
 
@@ -2711,7 +3099,7 @@ export class StateStore {
       )
       .all(competitionId) as unknown as Array<{ record_json: string }>;
     return rows.map((row) =>
-      parseRecord<CandidateHandoffRecord>(row.record_json, "candidate handoff"),
+      parseCandidateHandoffRecord(row.record_json),
     );
   }
 
@@ -2723,7 +3111,7 @@ export class StateStore {
       )
       .all() as unknown as Array<{ record_json: string }>;
     return rows.map((row) =>
-      parseRecord<CandidateHandoffRecord>(row.record_json, "candidate handoff"),
+      parseCandidateHandoffRecord(row.record_json),
     );
   }
 
@@ -3100,6 +3488,97 @@ export class StateStore {
     );
   }
 
+  getReviewAssignmentByRepairTaskId(repairTaskId: string): ReviewAssignmentRecord | undefined {
+    const rows = this.db
+      .prepare("SELECT record_json FROM review_assignments")
+      .all() as unknown as Array<{ record_json: string }>;
+    for (const row of rows) {
+      const assignment = parseRecord<ReviewAssignmentRecord>(row.record_json, "review assignment");
+      if (assignment.resultRepair?.taskId === repairTaskId) return assignment;
+    }
+    return undefined;
+  }
+
+  listReviewAssignmentsWithActiveResultRepair(): ReviewAssignmentRecord[] {
+    const rows = this.db
+      .prepare("SELECT record_json FROM review_assignments")
+      .all() as unknown as Array<{ record_json: string }>;
+    return rows
+      .map((row) => parseRecord<ReviewAssignmentRecord>(row.record_json, "review assignment"))
+      .filter((assignment) => {
+        const status = assignment.resultRepair?.status;
+        return status === "queued" || status === "running";
+      });
+  }
+
+  /** Atomically persist one append-only result repair and its derived Task.
+   *  Original assignment status, failureCode, reviewerTaskId, and result stay unchanged. */
+  createReviewResultRepairExecution(params: {
+    assignment: ReviewAssignmentRecord;
+    repairTask: TaskRecord;
+    candidateEvent: { summary: string; payload?: Record<string, unknown> };
+    repairCreationEvent: { summary: string; payload?: Record<string, unknown> };
+    graph: ReviewGraphRecord;
+  }): void {
+    const stored = this.getReviewAssignment(params.assignment.id);
+    if (stored.resultRepair !== undefined) {
+      throw new Error("review result repair rejected: one-shot allowance already consumed");
+    }
+    if (params.assignment.resultRepair === undefined) {
+      throw new Error("review result repair requires an append-only repair record");
+    }
+    if (
+      stored.status !== params.assignment.status
+      || stored.failureCode !== params.assignment.failureCode
+      || stored.reviewerTaskId !== params.assignment.reviewerTaskId
+      || stored.graphId !== params.assignment.graphId
+      || stored.candidateTaskId !== params.assignment.candidateTaskId
+    ) {
+      throw new Error("review result repair rejected: original assignment evidence must stay unchanged");
+    }
+    if (params.assignment.resultRepair.taskId !== params.repairTask.id) {
+      throw new Error("review result repair must reference the repair Task");
+    }
+    if (params.graph.id !== stored.graphId) {
+      throw new Error("review result repair must belong to the assignment graph");
+    }
+    this.transact(() => {
+      this.insertTask(params.repairTask);
+      this.insertEvent(
+        params.repairTask.id,
+        undefined,
+        "task.created",
+        params.repairCreationEvent.summary,
+        params.repairCreationEvent.payload,
+      );
+      this.db
+        .prepare(
+          `UPDATE review_assignments
+           SET record_json = ?, updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(
+          JSON.stringify(params.assignment),
+          params.assignment.updatedAt,
+          params.assignment.id,
+        );
+      this.db
+        .prepare(
+          `UPDATE review_graphs
+           SET record_json = ?, updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(JSON.stringify(params.graph), params.graph.updatedAt, params.graph.id);
+      this.insertEvent(
+        stored.candidateTaskId,
+        undefined,
+        "review.result-repair.created",
+        params.candidateEvent.summary,
+        params.candidateEvent.payload,
+      );
+    });
+  }
+
   /** Atomically update assignment + graph records after reconcile. */
   updateReviewAssignmentAndGraph(
     assignment: ReviewAssignmentRecord,
@@ -3271,5 +3750,85 @@ export class StateStore {
       throw new Error(STALE_OUTCOME_INTAKE_REASON);
     }
     return record;
+  }
+
+  /** SQLite durability check. Detects corruption or schema unreadability.
+   *  Does not add general distributed consistency machinery. */
+  checkStoreIntegrity(): StoreIntegrityCheck {
+    return readIntegrityFromDatabase(this.db);
+  }
+}
+
+/** Content-free failure when a Store file cannot be opened. */
+export const STORE_UNREADABLE_ERROR = "Store is unreadable";
+
+function readIntegrityFromDatabase(db: DatabaseSync): StoreIntegrityCheck {
+  const quickRows = db.prepare("PRAGMA quick_check").all() as Array<Record<string, unknown>>;
+  const quickValues = quickRows.map((row) => String(Object.values(row)[0] ?? ""));
+  const quickCheck = quickValues.length === 1 && quickValues[0] === "ok"
+    ? "ok"
+    : (quickValues.join("; ") || "error");
+  const foreignKeyRows = db.prepare("PRAGMA foreign_key_check").all() as unknown[];
+  return {
+    quickCheck,
+    foreignKeyViolationCount: foreignKeyRows.length,
+  };
+}
+
+function integrityFromOpenFile(databasePath: string, readOnly: boolean): StoreIntegrityCheck {
+  const db = new DatabaseSync(databasePath, {
+    readOnly,
+    enableForeignKeyConstraints: true,
+  });
+  try {
+    return readIntegrityFromDatabase(db);
+  } finally {
+    db.close();
+  }
+}
+
+/** Check Store integrity on a disposable copy so the source is never written. */
+export function checkDatabaseFileIntegrity(databasePath: string): StoreIntegrityCheck {
+  if (!existsSync(databasePath)) {
+    throw new Error(STORE_UNREADABLE_ERROR);
+  }
+  const copyPath = path.join(
+    tmpdir(),
+    `forklight-store-check-${process.pid}-${Date.now()}.sqlite`,
+  );
+  try {
+    copyFileSync(databasePath, copyPath);
+    return integrityFromOpenFile(copyPath, false);
+  } catch {
+    throw new Error(STORE_UNREADABLE_ERROR);
+  } finally {
+    for (const suffix of ["", "-wal", "-shm"]) {
+      try {
+        unlinkSync(`${copyPath}${suffix}`);
+      } catch {
+        // Best-effort cleanup of the disposable integrity copy.
+      }
+    }
+  }
+}
+
+/** Consistent SQLite snapshot via the Node online backup API. Never copies WAL/SHM. */
+export async function backupStoreDatabase(
+  sourcePath: string,
+  destinationPath: string,
+): Promise<void> {
+  if (!existsSync(sourcePath)) {
+    throw new Error(STORE_UNREADABLE_ERROR);
+  }
+  let source: DatabaseSync;
+  try {
+    source = new DatabaseSync(sourcePath);
+  } catch {
+    throw new Error(STORE_UNREADABLE_ERROR);
+  }
+  try {
+    await backup(source, destinationPath);
+  } finally {
+    source.close();
   }
 }

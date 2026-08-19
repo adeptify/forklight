@@ -1,0 +1,51 @@
+version: 2
+name: M2 audit runbook CLI and link accuracy
+project: /Users/yijunwang/code/forklight
+taskClass: m2-noncoding-runbook-command-audit
+taskFamily: forklight-operations-runbook
+workerProfileId: minimax-m3-cn
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 0
+  reason: Read-only command and link audit changes no product file and uses current CLI help plus deterministic link checks.
+contract:
+  outcome: Independently prove every primary command shape and discovery link in the integrated runbook matches current local CLI truth without requiring Store or Home inspection.
+  presentation: { summary: 独立核对命令、占位符和入口链接都能按当前 CLI 真相使用。, language: zh-CN }
+  context:
+    - Read the accepted non-Coding Work Item and integrated runbook. Compare only the bounded primary path with current CLI help.
+    - Symbolic placeholders are required; examples must not expose real Task ids, Home paths, credentials, or hidden Store state.
+  inScope: [CLI spelling and required confirmation flags, symbolic IDs, README and operations discovery links, concise reference linking, and zero diff.]
+  outOfScope: [Edits, exhaustive option duplication, generated tutorial, Store query, product changes, Integration, Hub, commit, push, credentials, or coordination mechanisms.]
+  executionSteps: [Read current help, trace each primary command and link, run approved checks, report pass or exact mismatch.]
+  deliverables: [One read-only command and link verdict.]
+  modules:
+    - name: CLI and discovery audit
+      responsibility: Keep the runbook executable and discoverable without duplicating the full reference.
+      consumes: [Integrated documents and current CLI help.]
+      produces: [Pass or one exact mismatch with zero diff.]
+      boundaries: [No edit, raw durable data, credential step, or hidden command.]
+  callChain: [README discovers runbook, runbook invokes public CLI with placeholders, operations reference supplies detailed options.]
+  scenarios:
+    - name: Command copied by a first-time operator
+      given: The operator substitutes only documented symbolic IDs.
+      when: They follow the primary commands and confirmation points.
+      then: Each command exists in current help and no private path or Store knowledge is required.
+  risks: [A plausible but nonexistent flag or unresolved link would make the runbook unusable.]
+  changeBudget: { maxFiles: 1, maxDiffLines: 20 }
+advancedPolicy: { maxDurationMs: null, observedTokenCeiling: null, noProgressTimeoutMs: null, fileLimit: null, fileLimitMode: warn, changedLineLimit: null, changedLineLimitMode: warn, baseMaxAttempts: 1, maxExtraAttempts: 0, maxMainCorrections: 0, maxMainReverifications: 0, maxConcurrency: 1, completionMode: warn, changeBudgetMode: warn, maxAdaptationRounds: 0 }
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: false
+  allowedCommands: []
+  focusPaths: [docs/main-led-delivery.md, docs/operations.md, README.md, src/cli.ts]
+acceptance:
+  criteria: [Every primary command and discovery link matches current CLI truth and requires no real identifier, Store query, Home path, or credential instruction.]
+  commands:
+    - npm run build
+    - node dist/src/cli.js --help
+    - >-
+      node -e "const fs=require('node:fs'); const readme=fs.readFileSync('README.md','utf8'); const operations=fs.readFileSync('docs/operations.md','utf8'); if(!fs.existsSync('docs/main-led-delivery.md') || !readme.includes('docs/main-led-delivery.md') || !operations.includes('main-led-delivery')) process.exit(1)"
+    - git diff --check

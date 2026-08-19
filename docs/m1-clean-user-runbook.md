@@ -2,8 +2,9 @@
 
 更新时间：2026-07-30
 
-这份手册只用于证明 ForkLight 是否真的能被一个全新本地用户使用。操作者按 Hub
-页面完成配置，不编辑 ForkLight 数据库、状态文件、Main JSON、Task YAML 或项目源码。
+这份手册只用于证明 ForkLight 是否真的能被一个全新本地用户使用。首次 Provider、
+内置 Worker 和 Main 连接通过公开 CLI 完成，不必打开旧 Hub，也不编辑 ForkLight
+数据库、状态文件、Main JSON、Task YAML 或项目源码。
 手册只记录不含秘密的事实；API Key、Hub 私有 URL、Prompt 和 Provider 响应不得抄入记录。
 
 ## 验收环境
@@ -91,36 +92,50 @@ clean run 必须使用证据文件指向的精确 tarball；若源码、包内 b
 
 只记录“存在 / 不存在”，不要输出 Keychain 内容或完整 Hub URL。
 
-### 2. 安装并打开 Hub
+### 2. 安装并用 CLI 完成首次设置
 
 操作者只执行：
 
 ```bash
 npm install -g /path/to/forklight-0.2.0.tgz
-forklight hub
+forklight setup status
 ```
 
 记录：
 
 - 安装完成时间；
 - `forklight` 版本和 build identity；
-- 是否只出现一个 Hub；
-- 页面是否不用解释就能指出下一步。
+- `setup status` 是否用一句话说明现状、原因和唯一下一步；
+- 是否没有要求打开旧 Hub。
 
-不得在失败后改用源码目录、`npm link` 或手工启动多个端口来掩盖安装问题。
+然后按打印出的下一步完成设置，例如：
 
-### 3. 从 Hub 完成配置
+```bash
+# 本机已登录 Grok 时，不要输入 API key
+forklight setup provider select --provider xai
 
-按 Overview 的顺序完成：
+# 或在确认后从 stdin 写入一个 API-key Provider
+printf '%s' "$KEY" | forklight setup provider select --provider deepseek --variant default --confirm
 
-1. Models：选择 Provider 和模型，通过页面写入 Keychain；
-2. Workers：创建 Worker，展开 Advanced 检查实际生效的质量、Token、时长、文件、代码量、
-   Attempt 和自适应策略；
-3. Main：从页面安装 Codex Plugin、MCP 或 Skill 所需部分；
-4. Services：确认 Task service 可以使用。
+forklight setup worker list
+forklight setup worker select --profile grok-4-6-xhigh
+forklight setup main install --client grok-build --component mcp --confirm
+forklight doctor
+```
 
-记录每一步：页面说了什么、操作者做了什么、是否遇到 macOS 权限提示、用了多久。
-模型/Worker 预览和保存后的生效结果必须一致；不一致即为失败证据，不能手改数据库修正。
+不得把 API key 写在命令行参数、设置文件或验收记录里。Main 安装必须显式
+`--confirm`；记录是否提示需要新开 Main 会话。不得在失败后改用源码目录、
+`npm link` 或手工改设置文件来掩盖安装问题。
+
+### 3. 可选：打开 Hub 做后续监督
+
+首次设置完成后，如需 Hub 监督界面：
+
+```bash
+forklight hub
+```
+
+记录是否只出现一个 Hub。首次 Provider / Worker / Main 设置不得再依赖 Hub 页面。
 
 ### 4. 新建 Main 会话
 
@@ -170,6 +185,20 @@ Integration Preflight 通过后，操作者才明确授权把示例补丁合入 
 不需要 activation 的示例应显示“已交付”，不能显示“已激活”。
 
 ### 8. 恢复验证
+
+Home 备份与恢复（可选，在 Daemon/Hub 都已停止后）：
+
+```bash
+forklight backup preview --destination /safe/outside/forklight-backup
+forklight backup create --destination /safe/outside/forklight-backup --confirm
+forklight backup inspect /safe/outside/forklight-backup
+forklight daemon stop
+# 退出 Hub 进程后再恢复。恢复不会代为停止 Daemon 或 Hub。
+forklight backup restore /safe/outside/forklight-backup --confirm
+```
+
+备份不包含 Keychain、本机 Grok/Codex 登录或外部 Main 配置，请单独重连。
+备份目录可能含项目代码与日志，须保持私有。
 
 完成或执行中任选一个安全检查点：
 

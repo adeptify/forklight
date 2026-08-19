@@ -18,6 +18,7 @@ import {
   setDefaultWorkerProfile,
   upsertWorkerProfile,
   validateWorkerProfile,
+  validateWorkerProfilesSettings,
   type WorkerProfile,
 } from "../src/core/worker-profiles.js";
 import {
@@ -829,14 +830,27 @@ test("legacy worker profile without executionPreference preserves single-run", (
   assert.equal(resolved.executionPreference, undefined);
 });
 
+test("forced native-goal profile on Grok is accepted", () => {
+  const validated = validateWorkerProfile({
+    id: "grok-native",
+    label: "Grok native",
+    runtime: "grok-build",
+    provider: "xai",
+    model: "grok-4.6",
+    effort: "xhigh",
+    executionPreference: "native-goal",
+  }, "workerProfile", cloneDefaults().modelCatalog);
+  assert.equal(validated.executionPreference, "native-goal");
+});
+
 test("forced native-goal profile on an unsupported Runtime fails validation", () => {
   assert.throws(
     () => validateWorkerProfile({
       id: "bad-native",
       label: "Bad native",
-      runtime: "grok-build",
-      provider: "xai",
-      model: "grok-4.5",
+      runtime: "claude-code",
+      provider: "deepseek",
+      model: "deepseek-v4-flash",
       executionPreference: "native-goal",
     } as unknown as WorkerProfile, "workerProfile", cloneDefaults().modelCatalog),
     /native-goal.*proven native Goal contract/,
@@ -850,8 +864,77 @@ test("forced native-goal profile on an unsupported Runtime fails validation", ()
       model: "deepseek-v4-flash",
       executionPreference: "goal-magic",
     } as unknown as WorkerProfile, "workerProfile", cloneDefaults().modelCatalog),
-    /executionPreference must be auto, single-run, or native-goal/,
+    /executionPreference must be auto, single-run, persistent-session, or native-goal/,
   );
+});
+
+test("forced persistent-session profile on Grok is accepted", () => {
+  const validated = validateWorkerProfile({
+    id: "grok-persist",
+    label: "Grok persist",
+    runtime: "grok-build",
+    provider: "xai",
+    model: "grok-4.6",
+    effort: "xhigh",
+    executionPreference: "persistent-session",
+  }, "workerProfile", cloneDefaults().modelCatalog);
+  assert.equal(validated.executionPreference, "persistent-session");
+});
+
+test("forced persistent-session profile on an unsupported Runtime fails validation", () => {
+  assert.throws(
+    () => validateWorkerProfile({
+      id: "bad-session",
+      label: "Bad session",
+      runtime: "claude-code",
+      provider: "deepseek",
+      model: "deepseek-v4-flash",
+      executionPreference: "persistent-session",
+    } as unknown as WorkerProfile, "workerProfile", cloneDefaults().modelCatalog),
+    /persistent-session.*stable session identity/,
+  );
+});
+
+test("default catalog and Profile materialize exact Grok 4.6 Xhigh identity", () => {
+  const settings = cloneDefaults();
+  const model = settings.modelCatalog.models.find((entry) => entry.id === "xai-grok-4-6");
+  assert.equal(model?.provider, "xai");
+  assert.equal(model?.model, "grok-4.6");
+  assert.ok(model?.supportedEfforts?.includes("xhigh"));
+  const profile = settings.workerProfiles.profiles.find((entry) => entry.id === "grok-4-6-xhigh");
+  assert.equal(profile?.runtime, "grok-build");
+  assert.equal(profile?.modelConfigId, "xai-grok-4-6");
+  assert.equal(profile?.effort, "xhigh");
+  assert.equal(profile?.executionPreference, "auto");
+  const resolved = resolveWorkerSelection({ workerProfileId: "grok-4-6-xhigh" }, {
+    execution: settings.execution,
+    providerDefaults: settings.providerDefaults,
+    workerProfiles: settings.workerProfiles,
+    modelCatalog: settings.modelCatalog,
+  });
+  assert.equal(resolved.runtime, "grok-build");
+  assert.equal(resolved.provider, "xai");
+  assert.equal(resolved.model, "grok-4.6");
+  assert.equal(resolved.effort, "xhigh");
+  assert.equal(resolved.executionPreference, "auto");
+});
+
+test("persisted Profile arrays are not rewritten when validating a legacy set", () => {
+  const settings = cloneDefaults();
+  const legacy = validateWorkerProfilesSettings({
+    defaultProfileId: "legacy-only",
+    profiles: [{
+      id: "legacy-only",
+      label: "Legacy only",
+      runtime: "claude-code",
+      provider: "deepseek",
+      model: "deepseek-v4-flash",
+    }],
+  }, "workerProfiles", settings.modelCatalog);
+  assert.equal(legacy.profiles.length, 1);
+  assert.equal(legacy.profiles[0]?.id, "legacy-only");
+  assert.equal(legacy.profiles[0]?.executionPreference, undefined);
+  assert.equal(legacy.profiles.some((profile) => profile.id === "grok-4-6-xhigh"), false);
 });
 
 test("forced native-goal profile on Codex is accepted", () => {
@@ -885,6 +968,11 @@ test("default Worker Profile defaults to auto execution", () => {
   assert.equal(
     profiles.profiles.find((profile) => profile.id === "default")?.executionPreference,
     "auto",
+  );
+  assert.equal(
+    profiles.profiles.some((profile) => profile.id === "grok-4-6-xhigh"),
+    false,
+    "fallback defaultWorkerProfiles must not inject a saved Grok Profile",
   );
 });
 

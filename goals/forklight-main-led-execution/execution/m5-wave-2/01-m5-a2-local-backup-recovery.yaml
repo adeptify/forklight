@@ -1,0 +1,191 @@
+version: 2
+name: M5-A2 understandable local backup and recovery
+project: /Users/yijunwang/code/forklight
+taskClass: m5-local-backup-recovery
+taskFamily: forklight-product-graduation
+workerProfileId: grok-4-6-xhigh
+deliveryProfileId: forklight-self-upgrade
+executionPreference: auto
+routingDecision:
+  taskFamily: forklight-product-graduation
+  shortlist:
+    - provider: xai
+      model: grok-4.6
+      runtime: grok-build
+      effort: xhigh
+      workerProfileId: grok-4-6-xhigh
+    - provider: openai
+      model: gpt-5.6-luna
+      runtime: codex-cli
+      effort: max
+      workerProfileId: codex-luna-max
+  selectedWorker:
+    provider: xai
+    model: grok-4.6
+    runtime: grok-build
+    effort: xhigh
+    workerProfileId: grok-4-6-xhigh
+  selectedBecause:
+    code: user-specified
+    note: 一骏 has standing authorization to prefer Grok CLI 4.6 Xhigh native Goal; current matched health and the immediately preceding successful Grok Task prove the runtime launchable.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+reviewRequirement:
+  requiredJudges: 2
+  reason: Backup and restore can replace durable Store and protected Workspace evidence. Two different-view read-only Judges inspect data safety, path safety, rollback and human contract before Main Integration.
+contract:
+  outcome: Let one local developer preview, create, inspect and safely restore a self-contained ForkLight backup through public CLI and lifecycle-appropriate agent/API surfaces, without database knowledge, credential copying, live-owner termination or distributed integrity machinery.
+  presentation:
+    summary: 看得懂备份包含什么，也能在不破坏当前数据的前提下恢复。
+    language: zh-CN
+  context:
+    - Read AGENTS.md, specs/m5-product-graduation/work-items/local-backup-recovery/spec.md and goals/forklight-main-led-execution/evidence/m5-entry-audit.md completely before editing. The Spec is the sole accepted boundary; create no second spec or status source.
+    - M5-A1 is graduated. A2 is the only ready serial Work Item, and no Hub UI path is writable.
+    - Current durable Home truth is `forklight.sqlite` plus ForkLight-owned durable roots such as runs, competitions, review-projects and samples. Unknown ordinary top-level data must not be silently discarded.
+    - Known transient entries are the Daemon socket/log, Hub claim/descriptor and SQLite WAL/SHM sidecars. Task logs, result diffs, reviews, Integration evidence and protected partial/resumable Workspaces are durable and must remain recoverable.
+    - Reuse StateStore `quick_check` and foreign-key validation plus Node SQLite online backup. Add no per-file checksum, content hash, lock, lease, version handshake or duplicate consistency layer.
+    - Current Home contains internal and external symlinks. Never follow an external link into Runtime auth or a project. A produced backup must be self-contained; modified backups with escaping links fail before Home mutation.
+    - Keychain credentials, local Grok/Codex sign-in state and external Main client configuration are not ForkLight Home data and must never be read, copied or claimed as backed up.
+    - Restore is direct local lifecycle work. It refuses while Daemon or Hub owns the Home and explains the exact stop action; it never signals, kills, starts or restarts either owner.
+    - Preserve all source work. Never touch the real current Home in automated tests, integrate, commit, push, reset or reclaim.
+  inScope:
+    - Add shared backup preview/create/inspect/restore projections with concise fact, reason, impact and next action in human and JSON forms.
+    - Create a consistent SQLite snapshot and copy all other non-transient ForkLight-owned/unknown ordinary Home entries into a new outside-Home directory through a private staging directory and final rename.
+    - Publish one minimal readable manifest with schema marker, creation facts, included/excluded names, external-link exclusion count and Store integrity result.
+    - Inspect and restore only after manifest, containment, entry type and staged Store integrity pass; reject malformed, unreadable, escaping or foreign-key-invalid input before mutation.
+    - Preserve the current Home as a named pre-restore recovery copy, switch same-filesystem staged content into place, and put the old Home back on activation failure.
+    - Expose CLI for all four actions and lifecycle-appropriate MCP/local API tools for read/create paths using the same core projections.
+    - Add focused temp-home round-trip, failure, privacy and human-output tests plus concise operations/configuration/install documentation.
+  outOfScope:
+    - Hub UI, GoalBoard, cloud/scheduled backup, encryption/key management, remote sync, Keychain or external Main/runtime auth files.
+    - Live Task restore, automatic Daemon/Hub stop, general archive utility, per-file hashes, content addressing, locks, leases, version negotiation, multi-user or distributed coordination.
+    - Real current-Home restore in tests, A3, Hub redesign, commit, push, reset or unrelated refactor.
+  executionSteps:
+    - Trace only StateStore integrity/online backup, canonical Home paths, Daemon/Hub read-only owner observations, existing CLI/MCP command conventions and focused tests.
+    - Define one small manifest and shared typed result family; keep public wording to included, excluded, integrity, impact and next action.
+    - Implement backup preview/create/inspect first, proving consistent Store and no external-link following, then implement owner-refusing staged restore and rollback.
+    - Add CLI and lifecycle-appropriate MCP/API surfaces over the same core service; no UI or parallel control plane.
+    - Run all accepted commands, inspect the exact diff and stop when contract passes. Return a decision packet instead of widening if safe restore requires a new product boundary.
+  deliverables:
+    - One exact Candidate implementing understandable local backup and recovery without Hub dependency.
+    - Focused deterministic tests for round trip, Store integrity, external-link exclusion, malicious link/path escape, live-owner refusal and interrupted activation rollback.
+    - Human/JSON and MCP/API results that state Keychain/Main auth absence, private-backup warning, impact and next action.
+    - Concise documentation and final-response-only handoff naming changed paths, commands, round-trip evidence and remaining A3 dependency.
+  modules:
+    - name: Backup service
+      responsibility: Project, stage and publish one consistent self-contained local backup without following external links.
+      consumes: [ForkLight Home, destination, StateStore online backup/integrity, explicit confirmation.]
+      produces: [Read-only preview or new backup directory with manifest and consistent Store.]
+      boundaries: [No Keychain/Main auth, live-owner termination, per-file hash, lock or existing destination overwrite.]
+    - name: Restore service
+      responsibility: Validate backup and ownership, stage restored content, retain the previous Home and roll back failed activation.
+      consumes: [Backup directory, exact preview, explicit confirmation, Daemon/Hub observation, staged Store integrity.]
+      produces: [Completed restore plus pre-restore recovery copy, or a refusal/failure leaving the previous Home usable.]
+      boundaries: [No live Task restore, signal, auto-start, path escape, partial-success claim or cross-machine negotiation.]
+    - name: Public control surfaces
+      responsibility: Give people and agents the same bounded backup facts and next actions through CLI and lifecycle-appropriate local tools.
+      consumes: [Shared backup/restore projections and confirmations.]
+      produces: [Human and JSON CLI output plus read/create MCP/API tool results.]
+      boundaries: [No Hub UI, raw private path content beyond user-supplied backup/recovery locations, secret bytes or second state system.]
+  callChain:
+    - User previews a new destination and sees included durable roots, excluded transient/auth state, Store integrity, privacy impact and next action.
+    - Confirmed create uses SQLite online backup plus bounded filesystem copy into a private sibling stage, validates it and renames it to the new destination.
+    - Inspect reads only the backup manifest/files and verifies containment plus staged Store integrity without starting Daemon or Hub.
+    - Restore preview observes Daemon and Hub without starting or signalling them; any live/unverified owner refuses with the stop/investigate action.
+    - Confirmed restore copies into a sibling stage, validates again, renames current Home to a named recovery copy, activates the stage and restores the old Home on failure.
+    - Normal subsequent ForkLight startup regenerates transient ownership files and opens the restored Store.
+  scenarios:
+    - name: Temp-home round trip
+      given: A temp Home contains settings, Store records, durable Task evidence, an unknown top-level file and a protected partial Workspace.
+      when: Preview, confirmed create, inspect and stopped-owner confirmed restore run.
+      then: All durable content is restored byte-for-byte where relevant, transient/auth state is absent, integrity is ok and the previous Home remains as a recovery copy.
+    - name: Live owner refuses restore
+      given: A matching Daemon or authenticated Hub owns the target Home.
+      when: Restore preview or confirmed restore runs.
+      then: No process is signalled, no file is moved, the result explains which owner to stop and the old Home remains usable.
+    - name: External link is not followed
+      given: Current Home contains a symlink whose target is outside Home.
+      when: A backup is created.
+      then: External target bytes are not copied, the link is excluded with a bounded reason/count and the published backup contains no escaping entry.
+    - name: Modified backup tries to escape
+      given: A backup contains a symlink, manifest path or filesystem entry that escapes its root.
+      when: Inspect or restore runs.
+      then: It fails before Home mutation with content-free path-safety evidence.
+    - name: Activation fails after recovery copy
+      given: Staging and Store integrity pass but the final activation rename is injected to fail.
+      when: Confirmed restore runs.
+      then: The prior Home is put back, no partial Home is claimed active and the recovery/staging disposition is explicit.
+  risks:
+    - Copying `forklight.sqlite` directly while WAL is active can lose committed rows; use the existing Node SQLite online backup and validate the copied Store.
+    - A recursive copy can follow external auth/project symlinks; use lstat/realpath containment and never traverse an outside target.
+    - Restore can strand a partly replaced Home; keep stage and recovery siblings on one filesystem and test every rename/rollback branch with injected I/O.
+    - MCP cannot safely replace a Home held by its own live owner; share projections where lifecycle permits and keep direct stopped-owner restore truthful.
+  changeBudget:
+    maxFiles: 18
+    maxDiffLines: 3000
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 60000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxWorkerValidationRepairs: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test, .forklight-boundary-capture, .forklight-receipt-retry, plans]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/config.ts
+    - src/core/storage-lifecycle.ts
+    - src/core/types.ts
+    - src/state/store.ts
+    - src/daemon/client.ts
+    - src/daemon/protocol.ts
+    - src/daemon/coordinator.ts
+    - src/daemon/server.ts
+    - src/hub/instance.ts
+    - src/cli.ts
+    - src/cli
+    - src/mcp/server.ts
+    - tests/local-backup-recovery.test.ts
+    - tests/store.test.ts
+    - tests/daemon.test.ts
+    - tests/daemon-cli.test.ts
+    - tests/mcp.test.ts
+    - README.md
+    - docs/operations.md
+    - docs/configuration.md
+    - docs/m1-clean-user-runbook.md
+acceptance:
+  criteria:
+    - Preview/create/inspect/restore expose concise human and JSON included, excluded, integrity, impact and next-action facts without starting or signalling owners.
+    - A temp-home round trip restores settings, Store records, durable Task evidence, unknown top-level data and a protected partial Workspace while keeping the previous Home as a recovery copy.
+    - Keychain, external Main/runtime auth and transient socket/log/owner/WAL/SHM entries are explicitly absent and no secret is read or printed.
+    - Existing/inside-Home destination, live owner, malformed manifest, unreadable or foreign-key-invalid Store, escaping link/path and interrupted activation fail without corrupting the prior Home.
+    - Backup creation never follows an external link; produced backup is self-contained and modified escaping input is rejected before mutation.
+    - No per-file integrity mechanism, lock, lease, version handshake, automatic owner termination, Hub UI or unrelated path exists in the Candidate.
+    - Grok 4.6 Xhigh uses native Goal, ForkLight independently verifies exact commands, two different-view Judges review exact Revision and Main alone decides serial Integration.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/local-backup-recovery.test.ts tests/store.test.ts tests/daemon.test.ts tests/daemon-cli.test.ts tests/mcp.test.ts
+    - git diff --check

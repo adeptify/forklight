@@ -1,0 +1,174 @@
+version: 2
+name: M5-A1 final executable-wrapper accepted-Candidate delivery
+project: /Users/yijunwang/code/forklight
+taskClass: m5-cli-api-first-setup-final-wrapper-mode-delivery
+taskFamily: forklight-product-graduation
+workerProfileId: grok-4-6-xhigh
+executionPreference: auto
+routingDecision:
+  taskFamily: forklight-product-graduation
+  shortlist:
+    - provider: xai
+      model: grok-4.6
+      runtime: grok-build
+      effort: xhigh
+      workerProfileId: grok-4-6-xhigh
+  selectedWorker:
+    provider: xai
+    model: grok-4.6
+    runtime: grok-build
+    effort: xhigh
+    workerProfileId: grok-4-6-xhigh
+  selectedBecause:
+    code: user-specified
+    note: 一骏 explicitly revoked the no-further-replacement boundary after Task fbecf3af failed before Grok on wrapper mode 0644. Main admits exactly one final wrapper-mode-only delivery with the same accepted Candidate and no product change.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+reviewRequirement:
+  requiredJudges: 2
+  reason: Credential transport and external Main-client configuration remain a security-sensitive setup path; two different-view read-only Judges inspect the exact recovered Candidate before Main Integration.
+runtime:
+  name: grok-build
+  executable: /Users/yijunwang/code/forklight/goals/forklight-main-led-execution/execution/m5-wave-1/m5-a1-accepted-candidate-bootstrap.mjs
+  effort: xhigh
+  maxBudgetUsd: null
+contract:
+  outcome: Use the now-executable Task-local wrapper to materialize exactly the already verified and Main-accepted 16-path M5-A1 Candidate, change no product behavior, and complete one fresh two-Judge evidence chain for safe serial Integration.
+  presentation:
+    summary: 只修启动脚本的执行权限，原样交付已经验收通过的A1成果。
+    language: zh-CN
+  context:
+    - Read AGENTS.md, specs/m5-product-graduation/work-items/cli-api-setup/spec.md and goals/forklight-main-led-execution/evidence/m5-a1-delivery-replacement-bootstrap-stop.md completely before doing anything. They are the sole product and replacement boundary.
+    - Task fbecf3af-9d43-434f-b8fe-422462daacbe stopped before Grok because the new wrapper had mode 0644. It produced zero model turns, no seed materialization, Candidate, verification or Judge. The wrapper is now 0755 and the focused policy test asserts execute permission before admission.
+    - ForkLight independently passed the bootstrap policy test, build, all 121 focused tests and diff validation. Main reviewed and accepted the exact 16-path diff.
+    - Review Graph 4748202f-33a0-4857-a71d-0a5c3cc914d5 retained one usable Codex accept. The DeepSeek result was rejected as unsafe-content, so Integration preflight correctly refused fewer than two usable opinions.
+    - The frozen Graph cannot add or replace a Judge. Its same-Judge repair is correctly limited to an otherwise-valid overlong summary and is ineligible for unsafe-content.
+    - This replacement carries the exact accepted Candidate as a Workspace-local patch. It validates the exact path set and runs `git apply --check` before materialization. Add no checksum, content hash, manifest, lock, lease or version handshake.
+    - Do not rewrite, polish or expand the passing Candidate. If the unchanged acceptance passes, return it. Change product code only if a concrete A1 acceptance regression is reproduced, and then stop because that would exceed this evidence-only replacement boundary.
+    - This is the one final explicitly authorized Grok 4.6 Xhigh current-model-only native Goal. It is not continuity with any prior Goal and has no repair, correction, reverify, retry, fallback, model switch, Competition or further replacement.
+    - No absolute Worker duration, Token or no-progress limit applies.
+  inScope:
+    - Materialize the exact already accepted 16-path Candidate from this Task's source snapshot.
+    - Inspect the accepted spec, Candidate and prior verification evidence.
+    - Run the unchanged A1 acceptance and return the Candidate without behavior changes when it passes.
+    - Produce one fresh Candidate Revision eligible for exactly two new different-view read-only Judges and Main serial Integration.
+  outOfScope:
+    - Product redesign, copy polish, new tests for their own sake, any path outside the exact 16, Hub UI, GoalBoard, backup/recovery, Store schema, Task/Integration semantics or automatic work.
+    - Candidate repair after a failing acceptance, additional Attempt, correction, reverify, adaptation, fallback, model switch, Competition, third Judge, Judge replacement, further replacement, commit, push or reset.
+    - Mutation, relabeling, Integration or reclamation of earlier Tasks and their Workspaces.
+  executionSteps:
+    - Confirm the configured wrapper is executable, then prove the Workspace-local accepted-Candidate seed applies to the fresh source base and contains exactly the approved 16 paths.
+    - Read the accepted spec and inspect the materialized diff without changing it.
+    - Run the bootstrap policy check, build, full 121-test focused suite and diff check.
+    - If acceptance passes, stop and return concise evidence. If a real behavior gap appears, report it without editing or widening this replacement.
+  deliverables:
+    - One exact 16-path Candidate byte-equivalent in behavior and content to Revision 56181554-d009-436b-96a9-1208ea236e87.
+    - Passing build, 121 focused tests and diff validation under ForkLight independent acceptance.
+    - Concise handoff naming exact reuse, no product correction, verification and the fresh two-Judge/Main gate.
+  modules:
+    - name: Exact accepted-Candidate materialization
+      responsibility: Validate and apply the Workspace-local accepted Candidate before Grok starts.
+      consumes: [Workspace-local exact Candidate patch, fresh isolated Workspace, exact 16 paths.]
+      produces: [Materialized accepted A1 Candidate and Task-local marker.]
+      boundaries: [Operational only; no cross-Task read, product manifest/hash/lock, old Workspace mutation or source Integration.]
+    - name: Evidence-only native Goal
+      responsibility: Inspect and verify the accepted Candidate without rewriting passing behavior.
+      consumes: [Accepted A1 spec, materialized Candidate, unchanged acceptance commands.]
+      produces: [Fresh exact Candidate Revision and concise handoff.]
+      boundaries: [No product change, repair, new feature, extra Attempt or fallback.]
+    - name: Fresh independent decision evidence
+      responsibility: Allow exactly two new read-only Judges and Main to evaluate the fresh exact Revision.
+      consumes: [Fresh Revision, ForkLight verification, frozen two-Judge policy.]
+      produces: [Two usable opinions or a terminal stop packet.]
+      boundaries: [No third/replacement Judge, automatic retry, vote or automatic Integration.]
+  callChain:
+    - Main-owned bootstrap validates the Workspace-local exact Candidate path set and apply feasibility, then materializes it in the fresh Task Workspace.
+    - Grok starts one fresh native Goal, inspects the accepted spec and Candidate, runs self-checks and makes no behavior change when acceptance passes.
+    - ForkLight independently runs the bootstrap policy test, build, 121-test focused suite and diff check against one exact Candidate.
+    - Two fresh independent Judges inspect security/human behavior; Main alone accepts/revises/rejects and may integrate serially.
+  scenarios:
+    - name: Signed-in Grok selection
+      given: Grok is locally signed in and no ForkLight xAI Keychain item exists.
+      when: The user selects xAI setup.
+      then: One settings update selects xAI plus grok-build, asks for no key and points to the built-in Grok Worker.
+    - name: Signed-in Codex selection
+      given: Codex is locally signed in.
+      when: The user selects OpenAI setup.
+      then: One settings update selects OpenAI plus codex-cli and the API-key path remains refused.
+    - name: Existing API-key path remains safe
+      given: A supported API-key Provider is selected with a stdin credential.
+      when: Setup commits it after confirmation.
+      then: Existing transactional Keychain/settings behavior and content-free output remain unchanged.
+    - name: Wrong source or partial stops before Worker
+      given: The Workspace-local patch has a wrong path set or does not apply to the fresh source base.
+      when: The recovery bootstrap starts.
+      then: It exits before Grok and applies no knowingly mismatched recovery.
+  risks:
+    - Rewriting passing behavior would turn evidence recovery into a new product change; the Goal must stop instead.
+    - A wrong source base or path set could integrate the wrong Candidate; exact path parsing and `git apply --check` fail before Grok launch.
+    - Any wrapper, acceptance or Judge failure stops the Task without another replacement.
+  changeBudget:
+    maxFiles: 16
+    maxDiffLines: 2600
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 60000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxWorkerValidationRepairs: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test, .forklight-boundary-capture, .forklight-receipt-retry, plans]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - README.md
+    - docs/configuration.md
+    - docs/m1-clean-user-runbook.md
+    - docs/operations.md
+    - src/cli.ts
+    - src/cli/setup.ts
+    - src/core/providers.ts
+    - src/hub/server.ts
+    - src/setup/service.ts
+    - src/setup/status.ts
+    - src/setup/types.ts
+    - tests/cli-setup.test.ts
+    - tests/hub-main-install.test.ts
+    - tests/hub-settings.test.ts
+    - tests/main-install-skill.test.ts
+    - tests/setup-service.test.ts
+acceptance:
+  criteria:
+    - The Workspace-local bootstrap validates exactly 16 paths and `git apply --check` before materializing the already accepted Candidate and one fresh Grok native Goal; all earlier Tasks stay immutable.
+    - Build passes with no unused CLI parameter, and the unchanged full focused suite passes all 121 tests.
+    - Signed-in xAI atomically selects grok-build and signed-in OpenAI atomically selects codex-cli without asking for, reading or storing an API key.
+    - API-key Providers retain stdin-only transport, transactional rollback and no secret in argv, output, Store, receipts or failures.
+    - Built-in Worker selection, Main install/status/uninstall, existing authenticated setup API and plain-language fact/reason/next output remain compatible.
+    - No path outside the exact 16, Hub UI, backup/recovery, Store schema, automatic work, coordination machinery or unrelated behavior exists.
+    - ForkLight independently verifies one exact Candidate, exactly two fresh different-view Judges produce usable results and Main alone decides serial Integration; any unusable Judge stops this replacement.
+  commands:
+    - node goals/forklight-main-led-execution/execution/m5-wave-1/m5-a1-accepted-candidate-bootstrap.test.mjs
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/cli-setup.test.ts tests/setup-service.test.ts tests/hub-main-install.test.ts tests/main-install-skill.test.ts tests/hub-settings.test.ts
+    - git diff --check

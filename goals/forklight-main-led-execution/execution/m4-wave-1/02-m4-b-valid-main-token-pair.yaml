@@ -1,0 +1,170 @@
+version: 2
+name: M4-B valid Main Token pair and quality gate
+project: /Users/yijunwang/code/forklight
+taskClass: m4-main-token-pair-quality-gate
+taskFamily: forklight-main-token-leverage
+workerProfileId: grok-4-6-xhigh
+executionPreference: auto
+routingDecision:
+  taskFamily: forklight-main-token-leverage
+  shortlist:
+    - provider: xai
+      model: grok-4.6
+      runtime: grok-build
+      effort: xhigh
+      workerProfileId: grok-4-6-xhigh
+    - provider: openai
+      model: gpt-5.6-luna
+      runtime: codex-cli
+      effort: max
+      workerProfileId: codex-luna-max
+  selectedWorker:
+    provider: xai
+    model: grok-4.6
+    runtime: grok-build
+    effort: xhigh
+    workerProfileId: grok-4-6-xhigh
+  selectedBecause:
+    code: user-specified
+    note: M4 has no comparable exact-class history; Main follows 一骏's standing Grok 4.6 Xhigh preference after matched health, without claiming a routing recommendation.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+reviewRequirement:
+  requiredJudges: 2
+  reason: Main Token pair validity and quality gates authorize a value claim; two different-view Judges must inspect identity, current delivery truth, stale-evidence rejection and arithmetic before Integration.
+contract:
+  outcome: Admit and report a direct-main versus delegated-main Token pair only when both complete samples share exact stored identity and Main explicitly confirms same scope, same acceptance and delegated quality not lower against current verification, Main accept and successful Integration truth.
+  presentation:
+    summary: 只有工作范围、验收和质量真正可比，并且委派交付已通过当前完整质量链时，才计算Main Token变化；证据不足就明确说无法判断。
+    language: zh-CN
+  context:
+    - Read AGENTS.md, specs/m4-b-valid-main-token-pair/spec.md, goals/forklight-main-led-execution/evidence/m4-entry-audit.md and goals/forklight-main-led-execution/evidence/m4-a-complete-main-usage-delivery.md completely before editing. They are the unique accepted boundary; do not create another spec or roadmap.
+    - M4-A is integrated and activated. Reuse its immutable count-only samples and canonical Store/Daemon/CLI/MCP services; do not reinterpret CLI/MCP exchange estimates, Worker usage or legacy direct-Codex publications as either Main side.
+    - Existing current Candidate Revision, independent verification, exact Main review and four-stage Integration truth are the delegated-side authority. Compose them; do not create another delivery authority.
+    - Direct verification is an explicit bounded Main-attested reference. Token similarity, labels, paths or Candidate digests cannot infer direct-side quality.
+    - ForkLight serves one local developer. Current Store truth plus serial Main assessment is sufficient; add no checksum, content hash, lock, lease, version handshake or distributed consistency mechanism.
+    - This Task is M4-B only. Family aggregation, Worker economics, representative calibration runs and Hub/UI remain dependency-held in M4-C/D.
+  inScope:
+    - Add one immutable accepted-or-rejected Main pair assessment per comparison with a closed rejection vocabulary.
+    - Require exactly one complete opposite-role sample pair with the same Task, comparison, class, family, Main profile and codex-terminal-result source.
+    - For acceptance, require explicit sameScope, sameAcceptance and delegatedQualityNotLower true, one bounded direct-verification reference and the exact successful delegated Integration operation id.
+    - Re-read current delegated verification, exact Main accept and successful Integration before persisting or reporting an accepted pair; stale or missing truth yields cannot-determine and no claim.
+    - Add one canonical read-only pair report with direct/delegated gross Main Token, signed direct-minus-delegated change, percentage only for a nonzero direct baseline, exact method/profile and bounded evidence references.
+    - Preserve zero and negative results honestly; report saving only when an accepted pair has a positive signed change.
+    - Expose the shared assessment/report service through Daemon, CLI and MCP with focused Store, arithmetic, privacy and compatibility tests.
+  outOfScope:
+    - Family aggregation, Worker Token/cost/time/corrections, representative calibration execution, model ranking, automatic Competition, Task, Judge, retry, correction, Integration or Provider call.
+    - Automatic quality inference from Token counts, matching names, taskClass, paths, source similarity, Candidate digest or existing legacy calibration acceptance.
+    - Raw prompt/response/source/diff/path/log/credential/free-form notes, legacy backfill, pricing changes, Hub/UI or coordination mechanisms.
+    - Commit, push, reset or any path outside the accepted focus set.
+  executionSteps:
+    - Trace only M4-A sample reads plus current verification, Main review and Integration result lookups used by the accepted contract.
+    - Define the smallest closed assessment and read-only report shapes, including cannot-determine and zero-baseline behavior.
+    - Implement the Store/service/Daemon/CLI/MCP vertical slice inside the focus paths without altering delivery authority.
+    - Run every approved command, inspect the exact diff and stop immediately when all M4-B acceptance passes.
+  deliverables:
+    - One exact Candidate implementing explicit pair assessment and truthful read-only Token-change reporting.
+    - Focused proof for exact role/profile identity, three quality gates, current delivery truth, stale/missing rejection, signed arithmetic, zero baseline, privacy and legacy separation.
+    - Concise handoff naming paths, public shapes, closed reasons, commands and still dependency-held M4-C/D work.
+  modules:
+    - name: Main pair contract
+      responsibility: Normalize explicit Main assessment and derive a claim only from two complete same-identity M4-A samples plus all three confirmed comparison gates.
+      consumes: [M4-A role samples, explicit gates, direct verification reference, delegated Integration operation id.]
+      produces: [Immutable accepted or rejected assessment with closed reasons.]
+      boundaries: [No automatic equivalence or quality inference, raw content or legacy promotion.]
+    - name: Current delegated delivery gate
+      responsibility: Resolve canonical latest verification, exact Main accept and successful Integration for the stored delegated Task and reject stale evidence.
+      consumes: [Task, Candidate Revision, verification events, Main review and Integration Store truth.]
+      produces: [Accepted current delivery reference or typed unavailable reason.]
+      boundaries: [No change to Task, Review Graph, Main Review or Integration authority.]
+    - name: Canonical pair report
+      responsibility: Return exact gross counters and signed direct-minus-delegated result through Daemon, CLI and MCP.
+      consumes: [Stored role samples and one stored pair assessment.]
+      produces: [Validity, reasons, exact method/profile, signed absolute change and typed percentage availability.]
+      boundaries: [No Worker/economics substitute, aggregate family claim, auto-work or Hub/UI.]
+  callChain:
+    - Main provides explicit comparison gates, direct verification reference and exact delegated Integration operation after both M4-A roles exist.
+    - CLI or MCP sends the bounded assessment request to the Daemon.
+    - Coordinator re-reads M4-A identity and current delegated delivery truth, then persists one immutable accepted or rejected assessment.
+    - Pair report re-reads the same Store records and returns exact arithmetic without mutation or hidden evidence selection.
+  scenarios:
+    - name: Comparable delivered pair
+      given: Both complete roles share one exact Task/comparison/profile and the delegated Candidate has current verification, exact Main accept and successful Integration.
+      when: Main confirms all three gates and supplies bounded direct/delegated evidence references.
+      then: One accepted assessment persists and the read-only report exposes the exact signed Token change.
+    - name: Quality or scope gate fails
+      given: One required gate is false or direct verification is incomplete.
+      when: Main records the assessment.
+      then: Only a closed rejection reason persists and no saving is available.
+    - name: Delegated evidence is stale
+      given: The referenced Integration is not the current successful delivery for the exact accepted Revision.
+      when: Assessment or report is requested.
+      then: ForkLight returns a stable cannot-determine reason and writes no accepted claim.
+    - name: Zero or negative result remains truthful
+      given: A valid pair has a zero direct baseline or delegated Main Token is equal/higher.
+      when: The report is read.
+      then: Absolute change remains signed, zero-baseline percentage is unavailable and no positive saving is invented.
+  risks:
+    - Labels alone could make unlike work look comparable; require explicit Main gates and direct-verification reference.
+    - Old verification or Integration could authorize a new sample pair; bind assessment to current exact delivery truth and test stale evidence.
+    - Arithmetic could hide negative results; preserve signed values and type zero-baseline percentage as unavailable.
+  changeBudget:
+    maxFiles: 13
+    maxDiffLines: 2400
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 60000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxWorkerValidationRepairs: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test, .forklight-boundary-capture, .forklight-receipt-retry, plans]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/main-token-pair.ts
+    - src/state/store.ts
+    - src/daemon/coordinator.ts
+    - src/daemon/protocol.ts
+    - src/daemon/server.ts
+    - src/cli.ts
+    - src/mcp/server.ts
+    - tests/main-token-pair.test.ts
+    - tests/store.test.ts
+    - tests/daemon.test.ts
+    - tests/daemon-cli.test.ts
+    - tests/mcp.test.ts
+acceptance:
+  criteria:
+    - Accepted pairs require two complete opposite-role samples with exact same stored Task/comparison/class/family/profile/source identity and all three explicit comparison gates.
+    - Accepted assessment requires a bounded direct verification reference plus current independent verification, exact Main accept and the exact successful delegated Integration operation.
+    - Missing, stale, mismatched or rejected evidence returns a closed reason and never produces a saving or calibration claim.
+    - Pair report uses terminal counters only, preserves signed zero/negative results and types percentage unavailable for a zero direct baseline.
+    - Assessment/report are privacy-safe, read-only where declared, create no work and leave existing delivery authority and legacy evidence unchanged.
+    - No family aggregation, automatic work, Hub/UI, coordination mechanism or unrelated path exists.
+    - One Grok 4.6 Xhigh native Goal, ForkLight independent verification, two different-view Judges and Main serial Integration complete the quality chain.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/main-token-usage.test.ts tests/main-token-pair.test.ts tests/store.test.ts tests/daemon.test.ts tests/daemon-cli.test.ts tests/mcp.test.ts
+    - git diff --check

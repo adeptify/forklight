@@ -1,0 +1,53 @@
+version: 2
+name: M2 audit activated public storage lifecycle compatibility
+project: /Users/yijunwang/code/forklight
+taskClass: m2-resolved-terminal-public-storage-audit
+taskFamily: forklight-storage-lifecycle
+workerProfileId: minimax-m3-cn
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 0
+  reason: Read-only deterministic activated-source audit changes no product files and verifies existing daemon, CLI, and MCP storage behavior.
+contract:
+  outcome: Verify the internal resolution-precedence correction preserves daemon, CLI, and MCP storage audit/preview/reclaim contracts and introduces no public schema or command change.
+  presentation: { summary: 合入后只读核对 daemon、CLI、MCP 存储接口兼容。, language: zh-CN }
+  context:
+    - Starts only after the activated classifier regression audit passes with zero diff.
+    - Read the accepted resolved-terminal storage disposition spec and inspect only its public consumption boundary.
+  inScope: [Storage audit, preview, confirmed reclaim projections through daemon, CLI, and MCP; existing reasons and integrity output; zero diff.]
+  outOfScope: [Edits, real Home mutation, broad cleanup, schema/protocol addition, correction, review, Integration, Hub, commit, or push.]
+  executionSteps: [Trace classifier results into daemon protocol, CLI and MCP output, run approved commands, and return pass or one exact blocker.]
+  deliverables: [One bounded public-compatibility verdict with zero Candidate change.]
+  modules:
+    - name: Public storage surfaces
+      responsibility: Audit that existing lifecycle output and safety contracts consume the corrected classification without API drift.
+      consumes: [Integrated classifier, daemon/coordinator, CLI, MCP, focused public tests.]
+      produces: [Pass or one exact compatibility blocker.]
+      boundaries: [No public addition, real reclaim, or source edit.]
+  callChain: [Storage classifier projects Task disposition, daemon returns existing result shape, CLI and MCP expose it without mutation or replay.]
+  scenarios:
+    - name: Existing public contract stays stable
+      given: The classifier now admits a safe resolved terminal Task.
+      when: Public storage tests exercise audit, preview, and reclaim on temporary Homes.
+      then: Existing schemas, reasons, integrity evidence, and safety refusals remain compatible.
+    - name: Public refusal stays fail closed
+      given: A requested Task is active, ambiguous, or missing durable Candidate evidence.
+      when: Daemon, CLI, or MCP preview and confirmed reclaim are exercised.
+      then: Existing protected output is returned and no public call deletes its targets.
+  risks: [A source-only classifier pass is insufficient if public projections drift.]
+  changeBudget: { maxFiles: 1, maxDiffLines: 20 }
+advancedPolicy: { maxDurationMs: null, observedTokenCeiling: null, noProgressTimeoutMs: null, fileLimit: null, fileLimitMode: warn, changedLineLimit: null, changedLineLimitMode: warn, baseMaxAttempts: 1, maxExtraAttempts: 0, maxMainCorrections: 0, maxMainReverifications: 0, maxConcurrency: 1, completionMode: warn, changeBudgetMode: warn, maxAdaptationRounds: 0 }
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: false
+  allowedCommands: []
+  focusPaths: [src/core/storage-lifecycle.ts, src/daemon/protocol.ts, src/daemon/coordinator.ts, src/cli.ts, src/mcp/server.ts, tests/daemon.test.ts, tests/daemon-cli.test.ts, tests/mcp.test.ts]
+acceptance:
+  criteria: [Activated daemon, CLI, and MCP storage lifecycle contracts remain compatible with zero source change.]
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/daemon.test.ts tests/daemon-cli.test.ts tests/mcp.test.ts
+    - git diff --check

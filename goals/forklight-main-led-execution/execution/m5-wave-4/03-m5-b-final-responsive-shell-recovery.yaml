@@ -1,0 +1,175 @@
+version: 2
+name: M5-B final responsive shell recovery
+project: /Users/yijunwang/code/forklight
+taskClass: m5-human-first-hub-responsive-shell-recovery
+taskFamily: forklight-product-graduation
+workerProfileId: grok-4-6-xhigh
+executionPreference: auto
+routingDecision:
+  taskFamily: forklight-product-graduation
+  shortlist:
+    - provider: xai
+      model: grok-4.6
+      runtime: grok-build
+      effort: xhigh
+      workerProfileId: grok-4-6-xhigh
+  selectedWorker:
+    provider: xai
+    model: grok-4.6
+    runtime: grok-build
+    effort: xhigh
+    workerProfileId: grok-4-6-xhigh
+  selectedBecause:
+    code: user-specified
+    note: 一骏持续授权优先使用 Grok CLI 4.6 Xhigh 原生 Goal；本任务原样复用机器验收通过的 M5-B Candidate，只关闭真实浏览器证明的最后一个响应式壳层缺口。
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+reviewRequirement:
+  requiredJudges: 2
+  reason: 最终 Hub 仍同时影响用户理解、响应式交互和安全动作可达性；产品理解与交互技术两个独立视角必须检查最终同一 Revision。
+runtime:
+  name: grok-build
+  executable: /Users/yijunwang/code/forklight/goals/forklight-main-led-execution/execution/m5-wave-4/m5-b-responsive-review-recovery-bootstrap.mjs
+  effort: xhigh
+  maxBudgetUsd: null
+contract:
+  outcome: Preserve the verified Goal-first M5-B Candidate while making its permanent mobile shell genuinely compact, single-line and resize-correct so the first Goal content is readable at 360-390px and desktop remains unchanged.
+  presentation:
+    summary: 保留已经通过机器验收的新版 Hub，只把手机顶部壳层收紧到真正可读，并修正窄屏返回按钮在桌面残留的问题。
+    language: zh-CN
+  context:
+    - Read AGENTS.md and specs/m5-product-graduation/work-items/hub-redesign/spec.md completely. Its final responsive-shell recovery section is the sole accepted boundary; create no second spec or roadmap.
+    - Task 0be03566-54d9-4e01-8224-a3b1088c1128 and original Task 24f8000a-5810-43e3-9f15-098ccf94203c stay immutable and protected. Do not resume, relabel, mutate or read either Workspace.
+    - The Workspace-local seed is exactly independently verified seven-path Candidate Revision a80ae711-e345-4c14-95b6-2c011cbb03db. Bootstrap validates its exact path set and source apply feasibility before materialization.
+    - "Desktop 1440x900 QA already passes the intended composition: product bar 52px, topbar 67px, Goal prose about 68ch, one-line status, Goal Tree and independent Decision Center body. Preserve that result."
+    - "Real 390x844 QA is the blocker: product bar 123px plus topbar 73px, theme/language controls consume permanent rows, 返回 and 工作 wrap vertically, and returning to desktop leaves Back visible until rerender."
+    - The mobile Goal file itself now starts at scrollTop zero and Back restores tree state. Keep those behaviors while repairing only the permanent shell and viewport transition.
+    - Existing theme/language behavior and connection truth must remain reachable. It is acceptable and preferred to place those utilities inside the existing quiet System disclosure on mobile instead of showing them as permanent rows; do not duplicate state or actions.
+    - The Impeccable detector already ran exactly once for M5-B. Do not run it again.
+    - The product serves one local developer. Add no checksum, lock, lease, version handshake, responsive state store or coordination mechanism. Path-set and apply checks exist only to prevent a wrong Candidate/source base.
+    - No absolute Worker duration, Token or no-progress limit applies. One base Attempt plus at most one automatic same-Worker validation repair is the final authority; no Main correction, extra Attempt, adaptation, fallback, reroute, model switch or further replacement.
+  inScope:
+    - Materialize and preserve the complete verified seven-path M5-B Candidate.
+    - Recompose only the existing product bar, page topbar and utility placement at 760px and below so combined permanent chrome is at most 112px at 390x844 and 360px.
+    - Keep ForkLight identity plus Work, Decision Center and System reachable; keep Back horizontal and visible only in narrow file/detail state; keep existing theme/language and connection truth reachable without permanent multi-row chrome.
+    - Make a narrow-to-wide viewport transition hide Back immediately without a data refresh or new state model.
+    - Add focused assertions for height/one-line/no-overflow intent and resize-safe Back presentation without weakening current mobile Goal-entry, action, continuity or safety tests.
+  outOfScope:
+    - Any Goal file, Goal Tree, Decision Center, Task detail, copy/data adapter, i18n string, action, API, backend, Core, Store, daemon, schema, dependency or framework redesign.
+    - Rewriting DESIGN.md, changing canonical status, hiding primary navigation, removing mobile access to theme/language/System, or satisfying the test by loosening dimensions and assertions.
+    - Detector rerun, broad CSS cleanup, new responsive persistence, commit, push, reset, Main correction, extra Attempt, adaptation, Competition, third/replacement Judge or further replacement.
+  executionSteps:
+    - Confirm the exact Candidate seed and inspect only index shell markup, the final Goal-first CSS/mobile rules, workUpdateMobileBack/init resize behavior and focused shell tests.
+    - "Choose one simple shell hierarchy: permanent mobile chrome must stay one compact product row plus one compact page row; secondary theme/language/connection utilities move behind the existing System disclosure or another existing quiet disclosure without duplicate controls."
+    - Implement responsive CSS so labels cannot break character-by-character, product/page rows do not wrap into utility grids, and desktop always hides the narrow-only Back control even if the prior narrow state had shown it.
+    - Add the smallest viewport listener or matchMedia handling only if CSS cannot fully restore Back semantics; it must call the existing presentation helper and create no durable state.
+    - Update focused tests to prove the new shell contract at 360/390 and the narrow-to-wide transition while preserving exact Goal-entry zero scroll and Back-to-tree assertions.
+    - Run all five acceptance commands, inspect the exact delta from the retained Candidate and return a concise handoff for Main's final browser QA, two Judges and serial Integration.
+  deliverables:
+    - One complete seven-path M5-B Candidate whose only substantive delta is the final responsive shell and its focused tests.
+    - Compact horizontal mobile product/page bars with reachable navigation/utilities, correct Back visibility across viewport changes and no horizontal overflow.
+    - Passing unchanged full focused acceptance plus a handoff naming the exact responsive behavior and remaining Main browser/Judge gates.
+  modules:
+    - name: retained Candidate materialization
+      responsibility: Apply exactly the verified M5-B Candidate before Grok starts.
+      consumes: [Workspace-local Candidate patch, fresh isolated Workspace, exact seven paths]
+      produces: [Verified Goal-first Hub and Task-local seed marker]
+      boundaries: [No sibling Workspace read, source mutation or extra integrity machinery]
+    - name: compact product shell
+      responsibility: Present product identity, primary routes, Back and secondary utilities at phone width without vertical label wrapping or content starvation.
+      consumes: [existing index shell controls, 760px breakpoint, current mobile pane state]
+      produces: [at most 112px combined chrome, horizontal labels, reachable Work/Decision/System/utilities]
+      boundaries: [No duplicate action/state, no Goal content change, desktop composition preserved]
+    - name: viewport-safe Back
+      responsibility: Keep Back bound to narrow file/detail state and hide it immediately on wide viewports.
+      consumes: [workIsNarrowViewport, workMobilePane, detail state, viewport change]
+      produces: [correct Back visibility without refresh or persisted responsive state]
+      boundaries: [No data fetch, lifecycle inference or scroll-context regression]
+  callChain:
+    - Bootstrap materializes the exact verified Candidate and launches one Grok current-model-only native Goal.
+    - Existing shell markup and CSS place secondary utilities behind quiet System access at mobile width while primary routes stay in one compact row.
+    - Existing workUpdateMobileBack computes semantic pane visibility; responsive CSS and, only if needed, one viewport listener prevent a narrow Back control from appearing above 760px.
+    - Goal selection still focuses then resets scroll to zero; Back still restores tree context; polling still retains semantic DOM and reading state.
+    - ForkLight runs unchanged independent acceptance. Main then performs the final real-browser pass, two different-view Judges inspect one Revision and Main alone may integrate serially.
+  scenarios:
+    - name: 390px Goal file
+      given: The user opens a selected Goal at 390x844.
+      when: The file pane becomes active.
+      then: Product and page bars total at most 112px, ForkLight and primary routes remain understandable, Back and 工作 are horizontal, and the Goal header/result begins the content viewport.
+    - name: 360px tree
+      given: The Hub is 360px wide on the tree pane.
+      when: Work loads with no Back requirement.
+      then: There is no horizontal overflow or multi-row utility grid; Now/History and Goal items remain reachable.
+    - name: utilities on mobile
+      given: Theme, language or connection truth is needed on a phone.
+      when: The user opens System or the accepted quiet utility disclosure.
+      then: The existing controls and truth are reachable without a second implementation or permanent first-viewport rows.
+    - name: narrow to desktop
+      given: Back is visible in a narrow Goal file.
+      when: The viewport grows above 760px without new data.
+      then: Back hides immediately and the accepted 1440px Goal Tree/document layout returns without rerender-dependent residue.
+    - name: desktop regression guard
+      given: The Hub opens at 1440x900.
+      when: Work and Decision Center are used.
+      then: The 52px product bar, readable Goal document, independent Decision Center body, one-line status and existing safe actions remain intact.
+  risks:
+    - Hiding utilities outright would make language/theme unavailable on mobile; relocate or expose the existing controls through System instead of deleting them.
+    - Flex wrapping can reappear with Chinese labels or English locale; test both 360 and 390 intent and force single-line labels where appropriate.
+    - A resize listener could create redundant state or polling side effects; prefer CSS and reuse workUpdateMobileBack if JavaScript is necessary.
+  changeBudget:
+    maxFiles: 7
+    maxDiffLines: 3300
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 60000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxWorkerValidationRepairs: 1
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, coverage]
+  generatedPaths: [dist/**, coverage/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - DESIGN.md
+    - src/hub/public/index.html
+    - src/hub/public/app.css
+    - src/hub/public/app.js
+    - src/hub/public/i18n.js
+    - tests/hub-ui-assets.test.ts
+    - tests/hub-responsive-layout.test.ts
+acceptance:
+  criteria:
+    - The exact verified seven-path Candidate is materialized on a matching source base; both prior Tasks remain immutable and Grok reads no sibling Workspace.
+    - At 390x844 and 360px, permanent product plus page chrome is at most 112px, primary labels and Back stay horizontal on one line, and no horizontal overflow or permanent theme/language grid starves Goal content.
+    - Work, Decision Center, System, theme/language and connection truth remain reachable through one existing control path; no duplicate utility state or action implementation exists.
+    - Back appears only for narrow file/detail state, tree-to-file still starts at exact scrollTop zero, Back restores tree context, and narrow-to-wide resize hides Back without data refresh.
+    - Desktop retains the accepted Goal Tree, 68ch Goal file, one-line status, independent Decision Center route/body, safe actions, focus and reduced-motion behavior.
+    - DESIGN.md, Goal/Decision content, i18n strings, data/actions and all backend paths remain unchanged; detector is not rerun and visible copy has no em dash or en dash.
+    - ForkLight independently verifies the complete Candidate; exactly two different-view read-only Judges inspect the final Revision and Main alone decides serial Integration. Same visual failure after this round stops without another replacement.
+  commands:
+    - node --check goals/forklight-main-led-execution/execution/m5-wave-4/m5-b-responsive-review-recovery-bootstrap.mjs
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/hub-ui-assets.test.ts tests/hub-responsive-layout.test.ts tests/hub-contract-quality.test.ts tests/hub-settings.test.ts tests/hub-operations.test.ts tests/hub-ops-mutations.test.ts
+    - node -e "const fs=require('fs'); const src=fs.readFileSync('src/hub/public/app.js','utf8'); new Function(src); const visible=[fs.readFileSync('src/hub/public/index.html','utf8'),src,fs.readFileSync('src/hub/public/i18n.js','utf8')].join('\\n'); if(/[—–]/.test(visible)) throw new Error('page-visible Hub source contains em/en dash');"
+    - git diff --check

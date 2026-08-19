@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "name": "M2 Coding final environment-correct audits",
+  "objective": "Prove the acceptance-contract boundary and complete the three remaining serial zero-change Coding audits under environment-correct acceptance after preserving the stopped admission evidence, without reopening implementation, review, or Integration.",
+  "planFile": "./plan.json",
+  "policy": {
+    "maxDurationMs": null,
+    "noProgressTimeoutMs": null,
+    "maxCorrectionRounds": 0,
+    "maxReviewRounds": 0,
+    "maxNoNewEvidenceCycles": 1
+  },
+  "milestones": [
+    { "itemId": "acceptance-contract-boundary", "gate": "machine" },
+    { "itemId": "activated-runtime-boundary", "gate": "machine" },
+    { "itemId": "wrong-candidate-safety", "gate": "machine" },
+    { "itemId": "operation-surface", "gate": "machine" }
+  ]
+}

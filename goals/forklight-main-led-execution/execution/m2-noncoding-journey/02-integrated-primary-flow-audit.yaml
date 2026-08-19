@@ -1,0 +1,51 @@
+version: 2
+name: M2 audit integrated Main-led runbook primary flow
+project: /Users/yijunwang/code/forklight
+taskClass: m2-noncoding-runbook-primary-flow-audit
+taskFamily: forklight-operations-runbook
+workerProfileId: deepseek-flash-1m
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 0
+  reason: Read-only post-Integration audit changes no product file and uses deterministic build, help, link, and diff checks.
+contract:
+  outcome: Verify the integrated runbook gives one complete and truthful Main-led path from readiness through terminal workspace disposition with no edits.
+  presentation: { summary: 合入后只读核对本地主路径完整、顺序正确、角色清楚。, language: zh-CN }
+  context:
+    - Start only after the runbook Candidate passed ForkLight verification, one Judge, Main accept, safe Integration, build, and activation.
+    - Read the accepted non-Coding Work Item and integrated documents completely; audit them rather than proposing a redesign.
+  inScope: [Primary path order, Main versus Worker responsibility, durable IDs, restart continuation, verification, review, Integration, storage disposition, links, and zero diff.]
+  outOfScope: [Edits, correction, new documentation scope, product code, Integration, Hub, Store inspection, commit, push, credentials, or coordination machinery.]
+  executionSteps: [Trace the integrated checklist end to end, compare commands with CLI help, run approved commands, return pass or one exact blocker.]
+  deliverables: [One read-only primary-flow verdict.]
+  modules:
+    - name: Integrated primary-flow audit
+      responsibility: Confirm a local operator can follow the delivered sequence without hidden state or unsupported authority.
+      consumes: [Accepted spec, integrated runbook and references, current CLI help.]
+      produces: [Pass or one exact blocker with zero diff.]
+      boundaries: [No edit, duplicate tutorial, Store query, or product expansion.]
+  callChain: [Check readiness, retain Goal and Task IDs, continue across restart, verify and review, integrate exact Candidate, dispose terminal workspace.]
+  scenarios:
+    - name: Complete primary path
+      given: The documentation Candidate is integrated.
+      when: A new local operator follows it in order.
+      then: Every required M2 delivery stage and decision owner is visible without a hidden prerequisite.
+  risks: [Do not accept a list of disconnected commands as a complete operator journey.]
+  changeBudget: { maxFiles: 1, maxDiffLines: 20 }
+advancedPolicy: { maxDurationMs: null, observedTokenCeiling: null, noProgressTimeoutMs: null, fileLimit: null, fileLimitMode: warn, changedLineLimit: null, changedLineLimitMode: warn, baseMaxAttempts: 1, maxExtraAttempts: 0, maxMainCorrections: 0, maxMainReverifications: 0, maxConcurrency: 1, completionMode: warn, changeBudgetMode: warn, maxAdaptationRounds: 0 }
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: false
+  allowedCommands: []
+  focusPaths: [docs/main-led-delivery.md, docs/operations.md, README.md]
+acceptance:
+  criteria: [Integrated documentation exposes one complete and truthful Main-led local delivery path without source changes.]
+  commands:
+    - npm run build
+    - node dist/src/cli.js --help
+    - >-
+      node -e "const fs=require('node:fs'); const readme=fs.readFileSync('README.md','utf8'); const operations=fs.readFileSync('docs/operations.md','utf8'); if(!fs.existsSync('docs/main-led-delivery.md') || !readme.includes('docs/main-led-delivery.md') || !operations.includes('main-led-delivery')) process.exit(1)"
+    - git diff --check

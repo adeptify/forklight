@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "family": "worker-runtime",
+  "evidenceMode": "historical-and-current-read-only",
+  "accepted": {
+    "taskId": "68f16585-1fec-447c-8799-4867a4731b0f",
+    "sessionId": "a218f235-4a26-4514-affe-45953cd75b22",
+    "attemptId": "6e4afaf2-e140-4c80-b48d-1c7e4c92a2c2",
+    "runtime": "grok-build",
+    "provider": "xai",
+    "model": "grok-4.6",
+    "effort": "xhigh",
+    "executionMode": "native-goal",
+    "nativeGoal": {
+      "id": "847f8b7c-afdd-42ed-be1a-5fdb893614f1",
+      "status": "complete",
+      "phase": "Idle",
+      "classifier": "achieved",
+      "workerRounds": 1,
+      "resumed": false
+    },
+    "verification": {
+      "eventSequence": 3023,
+      "passed": true
+    },
+    "review": {
+      "graphId": "8a2ebcf3-675c-496e-8f4a-44c918a9c5fe",
+      "usableJudges": 2,
+      "disposition": "agreement-accept"
+    },
+    "mainReview": {
+      "eventSequence": 3030,
+      "decision": "accept"
+    },
+    "candidate": {
+      "revisionId": "5d3ee57c-be94-48ee-bdc2-458dcadc302c",
+      "digestPrefix": "d42635d3a9bb"
+    },
+    "integration": {
+      "operationId": "a0d07d2d-2261-4036-ba65-da124663567c",
+      "eventSequence": 3040,
+      "status": "applied"
+    }
+  },
+  "predecessors": [
+    {
+      "taskId": "bbec21f9-ae21-4bfd-9cc4-9476aea3f73a",
+      "outcome": "failed-connectivity",
+      "nativeGoalId": "9b022da8-45a9-46de-be6a-c104272fcf94",
+      "resumedIntoAccepted": false
+    },
+    {
+      "taskId": "588fc40f-afad-448e-8306-e05859166842",
+      "outcome": "failed-before-native-goal",
+      "nativeGoalId": null,
+      "resumedIntoAccepted": false
+    }
+  ],
+  "runtimeMutationOccurred": false,
+  "sourceRefs": [
+    "goals/forklight-main-led-execution/evidence/m3-c2-infra-pause-decision-packet.md",
+    "goals/forklight-main-led-execution/evidence/m3-routing-graduation.md"
+  ]
+}

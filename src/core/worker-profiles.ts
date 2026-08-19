@@ -25,8 +25,10 @@ import type {
   TaskSpec,
 } from "./types.js";
 import {
+  EXECUTION_PREFERENCE_LIST,
   isExecutionPreference,
   nativeGoalSupportForRuntime,
+  persistentSessionSupportForRuntime,
 } from "./execution-mode.js";
 import {
   validateAdvancedPolicyPatch as validateAdvancedPolicyRaw,
@@ -81,8 +83,8 @@ export interface WorkerProfile {
   pricingRoute?: string;
   /** Optional per-Worker execution preference.
    *  Legacy profiles with no field remain single-run; the Hub defaults newly
-   *  created Workers to `auto`. Forced `native-goal` fails validation when the
-   *  selected Runtime cannot prove a native Goal contract. */
+   *  created Workers to `auto`. Forced `persistent-session` and `native-goal`
+   *  fail validation when the selected Runtime cannot prove that contract. */
   executionPreference?: ExecutionPreference;
   /** Optional per-Worker network policy. Legacy profiles with no field inherit
    *  the Daemon network environment exactly as before. */
@@ -156,8 +158,8 @@ export function defaultWorkerProfiles(
               ...(preferred.endpoint === undefined ? {} : { endpoint: preferred.endpoint }),
             }),
         effort: execution.defaultEffort,
-        // New Workers default to `auto` execution: the Runtime's proven native
-        // Goal mode wins when available, otherwise one ordinary single run.
+        // New Workers default to `auto` execution: proven native Goal first,
+        // then proven persistent Session, otherwise one ordinary single run.
         executionPreference: "auto",
         // maxBudgetUsd / noProgressTimeoutMs omitted → inherit execution defaults
       },
@@ -339,12 +341,20 @@ export function validateWorkerProfile(
   let executionPreference: ExecutionPreference | undefined;
   if (o.executionPreference !== undefined) {
     if (!isExecutionPreference(o.executionPreference)) {
-      throw new Error(`${label}.executionPreference must be auto, single-run, or native-goal`);
+      throw new Error(`${label}.executionPreference must be ${EXECUTION_PREFERENCE_LIST}`);
     }
     executionPreference = o.executionPreference;
     if (executionPreference === "native-goal" && !nativeGoalSupportForRuntime(o.runtime)) {
       throw new Error(
         `${label}.executionPreference=native-goal requires a Runtime with a proven native Goal contract; runtime ${o.runtime} is not supported`,
+      );
+    }
+    if (
+      executionPreference === "persistent-session"
+      && !persistentSessionSupportForRuntime(o.runtime)
+    ) {
+      throw new Error(
+        `${label}.executionPreference=persistent-session requires a Runtime with a proven stable session identity and resume path; runtime ${o.runtime} is not supported`,
       );
     }
   }
@@ -577,7 +587,7 @@ export function resolveWorkerSelection(
   let executionPreference: ExecutionPreference | undefined;
   if (input.executionPreference !== undefined) {
     if (!isExecutionPreference(input.executionPreference)) {
-      throw new Error("executionPreference must be auto, single-run, or native-goal");
+      throw new Error(`executionPreference must be ${EXECUTION_PREFERENCE_LIST}`);
     }
     executionPreference = input.executionPreference;
   } else if (base?.executionPreference !== undefined) {
@@ -586,6 +596,14 @@ export function resolveWorkerSelection(
   if (executionPreference === "native-goal" && !nativeGoalSupportForRuntime(runtimeName)) {
     throw new Error(
       `executionPreference=native-goal requires a Runtime with a proven native Goal contract; runtime ${runtimeName} is not supported`,
+    );
+  }
+  if (
+    executionPreference === "persistent-session"
+    && !persistentSessionSupportForRuntime(runtimeName)
+  ) {
+    throw new Error(
+      `executionPreference=persistent-session requires a Runtime with a proven stable session identity and resume path; runtime ${runtimeName} is not supported`,
     );
   }
 

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -16,9 +17,11 @@ import type {
   EffectivePolicySnapshot,
   CompetitionCandidateRecord,
   CompetitionRecord,
+  FrozenRoutingAdvisorySnapshot,
   IntegrationReceiptRecord,
   IntegrationResultRecord,
   IntegrationStageEvidence,
+  RoutingDecisionSnapshot,
   TaskRecord,
   TaskSpec,
   VerificationResult,
@@ -34,6 +37,9 @@ import { prepareWorkspace } from "../src/workspace/copy.js";
 import { createPathPolicy } from "../src/workspace/path-policy.js";
 import { writeWorkspacePatchReport } from "../src/workspace/patch.js";
 import { recordMainReview } from "../src/core/main-review.js";
+import { SettingsService } from "../src/core/settings.js";
+import { captureCandidateRevision } from "../src/core/candidate-revision.js";
+import { createReviewGraph, reconcileAllReviewGraphs } from "../src/core/review-graph.js";
 
 test("MCP remediation_verify carries optional amendment without leaking command text in receipts", async () => {
   const src = await readFile(new URL("../src/mcp/server.ts", import.meta.url), "utf8");
@@ -74,6 +80,9 @@ test("MCP exposes ForkLight tools and reaches the daemon", async () => {
       [
         "forklight_adaptation_apply",
         "forklight_adaptation_preview",
+        "forklight_backup_create",
+        "forklight_backup_inspect",
+        "forklight_backup_preview",
         "forklight_candidate_reverify",
         "forklight_compete_submit",
         "forklight_competition_compare",
@@ -84,6 +93,8 @@ test("MCP exposes ForkLight tools and reaches the daemon", async () => {
         "forklight_competition_status",
         "forklight_correct",
         "forklight_correction_eligibility",
+        "forklight_delivery_decide",
+        "forklight_delivery_prepare",
         "forklight_direct_codex_capture",
         "forklight_direct_codex_capture_task",
         "forklight_direct_codex_inbox",
@@ -112,6 +123,12 @@ test("MCP exposes ForkLight tools and reaches the daemon", async () => {
         "forklight_main_direct_status",
         "forklight_main_failure_attribution",
         "forklight_main_review",
+        "forklight_main_token_assess",
+        "forklight_main_token_capture",
+        "forklight_main_token_capture_episode",
+        "forklight_main_token_pair_report",
+        "forklight_main_token_status",
+        "forklight_main_token_value_report",
         "forklight_model_routing",
         "forklight_outcome_intake_confirm",
         "forklight_outcome_intake_create",
@@ -126,12 +143,17 @@ test("MCP exposes ForkLight tools and reaches the daemon", async () => {
         "forklight_remediation_verify", // optional amendment: structured failed-command replacements only
         "forklight_resume",
         "forklight_review_graph_create",
+        "forklight_review_graph_repair_result",
         "forklight_review_graph_status",
         "forklight_settings_get",
         "forklight_settings_reset",
         "forklight_settings_update",
         "forklight_statistics",
         "forklight_status",
+        "forklight_storage_audit",
+        "forklight_storage_preview",
+        "forklight_storage_reclaim",
+        "forklight_storage_retain",
         "forklight_submit",
         "forklight_task_reopen",
         "forklight_task_resolve",
@@ -160,6 +182,193 @@ test("MCP exposes ForkLight tools and reaches the daemon", async () => {
     await client.close();
     await server.close();
     await daemon.close();
+  }
+});
+
+test("MCP storage audit and reclaim share daemon lifecycle semantics", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-storage-"));
+  const taskId = "mcp-storage-delivered";
+  const store = new StateStore(home);
+  const timestamp = "2026-08-14T00:00:00.000Z";
+  const paths = taskPaths(home, taskId);
+  store.createTask({
+    id: taskId,
+    name: taskId,
+    status: "succeeded",
+    sourcePath: "/source",
+    taskFile: "/task.yaml",
+    spec: {
+      provider: { name: "deepseek", model: "deepseek-v4-pro[1M]" },
+      runtime: { name: "claude-code" },
+    } as TaskRecord["spec"],
+    paths,
+    sessionId: "session-mcp-storage",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    startedAt: timestamp,
+    finishedAt: timestamp,
+  });
+  store.addEvent(taskId, undefined, "integration.operation.started", "started", {
+    operationId: "mcp-storage-op",
+    taskId,
+    receiptId: "mcp-storage-receipt",
+  });
+  store.saveIntegrationReceipt({
+    id: "mcp-storage-receipt",
+    taskId,
+    patchDigest: "d".repeat(64),
+    affectedFiles: ["src/cli.ts"],
+    rejectionReasons: [],
+    sourceEvidence: {},
+    createdAt: timestamp,
+    expiresAt: "2099-01-01T00:00:00.000Z",
+    consumed: true,
+  });
+  store.saveIntegrationResult({
+    id: "mcp-storage-op",
+    receiptId: "mcp-storage-receipt",
+    taskId,
+    status: "applied",
+    appliedAt: timestamp,
+    createdAt: timestamp,
+    stages: [
+      { stage: "source-applied", status: "passed" },
+      { stage: "source-verified", status: "passed" },
+      { stage: "artifact-built", status: "not-applicable" },
+      { stage: "runtime-activated", status: "not-applicable" },
+    ],
+  });
+  store.close();
+  await mkdir(paths.workspace, { recursive: true });
+  await writeFile(path.join(paths.workspace, "gone.ts"), "workspace");
+  await mkdir(paths.logs, { recursive: true });
+  await writeFile(path.join(paths.logs, "worker.log"), "durable");
+
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  const server = createForkLightMcpServer(home);
+  const client = new Client({ name: "forklight-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const audit = await client.callTool({ name: "forklight_storage_audit", arguments: {} });
+    assert.equal(audit.isError, undefined);
+    const auditData = audit.structuredContent as {
+      kind?: string;
+      entries?: Array<{ taskId?: string; classification?: string }>;
+    };
+    assert.equal(auditData.kind, "storage-audit");
+    assert.equal(
+      auditData.entries?.find((entry) => entry.taskId === taskId)?.classification,
+      "reclaimable",
+    );
+    const reclaim = await client.callTool({
+      name: "forklight_storage_reclaim",
+      arguments: { taskId, confirm: true },
+    });
+    assert.equal(reclaim.isError, undefined);
+    const reclaimData = reclaim.structuredContent as {
+      kind?: string;
+      results?: Array<{ applied?: boolean }>;
+    };
+    assert.equal(reclaimData.kind, "storage-reclaim");
+    assert.equal(reclaimData.results?.[0]?.applied, true);
+    await assert.rejects(() => readFile(path.join(paths.workspace, "gone.ts"), "utf8"));
+    assert.equal(await readFile(path.join(paths.logs, "worker.log"), "utf8"), "durable");
+  } finally {
+    await client.close();
+    await server.close();
+    await daemon.close();
+    await rm(home, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test("MCP storage audit and preview write no exchange receipts", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-storage-noreceipt-"));
+  const taskId = "mcp-storage-preview-task";
+  const store = new StateStore(home);
+  const timestamp = "2026-08-14T00:00:00.000Z";
+  const paths = taskPaths(home, taskId);
+  store.createTask({
+    id: taskId,
+    name: taskId,
+    status: "succeeded",
+    sourcePath: "/source",
+    taskFile: "/task.yaml",
+    spec: {
+      provider: { name: "deepseek", model: "deepseek-v4-pro[1M]" },
+      runtime: { name: "claude-code" },
+    } as TaskRecord["spec"],
+    paths,
+    sessionId: "session-mcp-storage-preview",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    startedAt: timestamp,
+    finishedAt: timestamp,
+  });
+  store.addEvent(taskId, undefined, "integration.operation.started", "started", {
+    operationId: "mcp-storage-preview-op",
+    taskId,
+    receiptId: "mcp-storage-preview-receipt",
+  });
+  store.saveIntegrationReceipt({
+    id: "mcp-storage-preview-receipt",
+    taskId,
+    patchDigest: "d".repeat(64),
+    affectedFiles: ["src/cli.ts"],
+    rejectionReasons: [],
+    sourceEvidence: {},
+    createdAt: timestamp,
+    expiresAt: "2099-01-01T00:00:00.000Z",
+    consumed: true,
+  });
+  store.saveIntegrationResult({
+    id: "mcp-storage-preview-op",
+    receiptId: "mcp-storage-preview-receipt",
+    taskId,
+    status: "applied",
+    appliedAt: timestamp,
+    createdAt: timestamp,
+    stages: [
+      { stage: "source-applied", status: "passed" },
+      { stage: "source-verified", status: "passed" },
+      { stage: "artifact-built", status: "not-applicable" },
+      { stage: "runtime-activated", status: "not-applicable" },
+    ],
+  });
+  store.close();
+
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  const server = createForkLightMcpServer(home);
+  const client = new Client({ name: "forklight-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const audit = await client.callTool({ name: "forklight_storage_audit", arguments: {} });
+    assert.equal(audit.isError, undefined);
+    const preview = await client.callTool({
+      name: "forklight_storage_preview",
+      arguments: { taskId },
+    });
+    assert.equal(preview.isError, undefined);
+    const after = new StateStore(home);
+    try {
+      assert.equal(after.listExchangeReceipts(taskId).length, 0);
+    } finally {
+      after.close();
+    }
+    const mcpSource = await readFile(new URL("../src/mcp/server.ts", import.meta.url), "utf8");
+    const auditIdx = mcpSource.indexOf('"forklight_storage_audit"');
+    const previewIdx = mcpSource.indexOf('"forklight_storage_preview"');
+    const reclaimIdx = mcpSource.indexOf('"forklight_storage_reclaim"');
+    assert.ok(auditIdx > 0 && previewIdx > auditIdx && reclaimIdx > previewIdx);
+    assert.ok(!mcpSource.slice(auditIdx, reclaimIdx).includes("withMcpExchangeReceipt"));
+  } finally {
+    await client.close();
+    await server.close();
+    await daemon.close();
+    await rm(home, { recursive: true, force: true }).catch(() => undefined);
   }
 });
 
@@ -675,10 +884,16 @@ test("MCP model_routing returns privacy-safe advisory for empty history", async 
     assert.equal(advisory.taskClass, "nonexistent-class");
     assert.equal((advisory.candidates as unknown[]).length, 2);
     assert.equal(advisory.knowledge, "unknown");
+    assert.equal(advisory.overallResult, "cannot-determine");
+    assert.ok(Array.isArray(advisory.cannotDetermineReasons));
     assert.equal(advisory.evidenceScope, "none");
     assert.equal(advisory.shouldRunCompetition, false);
     const comp = advisory.competition as Record<string, unknown>;
     assert.equal(comp.intent, "none");
+    const strategyPolicy = advisory.strategyPolicy as Record<string, unknown> | undefined;
+    assert.ok(strategyPolicy);
+    assert.equal((strategyPolicy.strategy as Record<string, unknown>).createsWork, false);
+    assert.equal((strategyPolicy.competitionPolicy as Record<string, unknown>).determination, "not-advised");
     // Privacy-safe: no Task ids, logs, or credentials
     const json = JSON.stringify(advisory);
     assert.doesNotMatch(json, /error/);
@@ -779,6 +994,90 @@ test("MCP model_routing resolves saved Worker Profiles and preserves identity", 
     });
     assert.equal(dup.isError, true);
     assert.match(toolErrorText(dup), /duplicate/i);
+  } finally {
+    await client.close();
+    await server.close();
+    await daemon.close();
+  }
+});
+
+test("MCP model_routing projects overall result, readiness, and no automatic Competition", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-mr-exec-"));
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  await daemonRequest("settings_update", {
+    patch: {
+      workerProfiles: {
+        defaultProfileId: "deepseek-primary",
+        profiles: [
+          {
+            id: "deepseek-primary", label: "DeepSeek Primary",
+            runtime: "claude-code", modelConfigId: "deepseek-flash", effort: "high",
+          },
+          {
+            id: "qwen-secondary", label: "Qwen Secondary",
+            runtime: "claude-code", modelConfigId: "qwen-plus", effort: "medium",
+          },
+        ],
+      },
+    },
+  }, home);
+  const server = createForkLightMcpServer(home);
+  const client = new Client({ name: "forklight-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const empty = await client.callTool({
+      name: "forklight_model_routing",
+      arguments: {
+        taskClass: "nonexistent-class",
+        workerProfileIds: ["deepseek-primary", "qwen-secondary"],
+        competitionIntent: "none",
+      },
+    });
+    assert.equal(empty.isError, undefined);
+    const emptyAdvisory = empty.structuredContent as Record<string, unknown>;
+    assert.equal(emptyAdvisory.overallResult, "cannot-determine");
+    assert.equal(emptyAdvisory.shouldRunCompetition, false);
+    const emptyComp = emptyAdvisory.competition as Record<string, unknown>;
+    assert.equal(emptyComp.intent, "none");
+    const emptyStrategy = emptyAdvisory.strategyPolicy as Record<string, unknown>;
+    assert.ok(emptyStrategy);
+    assert.equal((emptyStrategy.strategy as Record<string, unknown>).createsWork, false);
+    assert.equal((emptyStrategy.competitionPolicy as Record<string, unknown>).determination, "not-advised");
+    assert.equal((emptyStrategy.judgePolicy as Record<string, unknown>).votes, false);
+    assert.match(toolErrorText(empty), /cannot determine/i);
+    const emptyCands = emptyAdvisory.candidates as Array<Record<string, unknown>>;
+    for (const candidate of emptyCands) {
+      assert.ok(candidate.workerProfileId);
+      assert.ok("canLaunch" in candidate);
+      assert.ok("resolvedExecutionMode" in candidate);
+    }
+    const legacy = await client.callTool({
+      name: "forklight_model_routing",
+      arguments: {
+        taskClass: "nonexistent-class",
+        candidates: [
+          { provider: "deepseek", model: "v4" },
+          { provider: "qwen", model: "plus" },
+        ],
+        competitionIntent: "none",
+      },
+    });
+    const legacyAdvisory = legacy.structuredContent as Record<string, unknown>;
+    assert.equal(legacyAdvisory.overallResult, "cannot-determine");
+    const legacyCands = legacyAdvisory.candidates as Array<Record<string, unknown>>;
+    for (const candidate of legacyCands) {
+      assert.equal(candidate.workerProfileId, undefined);
+      assert.equal(candidate.resolvedExecutionMode, undefined);
+      assert.equal(candidate.canLaunch, undefined);
+    }
+    const json = JSON.stringify(emptyAdvisory) + JSON.stringify(legacyAdvisory);
+    assert.doesNotMatch(json, /api[_-]?key/i);
+    assert.doesNotMatch(json, /endpoint/i);
+    assert.doesNotMatch(json, /keychain/i);
+    assert.doesNotMatch(json, /\/Users\//);
+    assert.doesNotMatch(json, /auth\.json/);
   } finally {
     await client.close();
     await server.close();
@@ -2251,6 +2550,88 @@ test("MCP list_summaries path returns progress on forklight_list", async () => {
   }
 });
 
+test("MCP compact inspect exposes the same decision packet semantics", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-packet-"));
+  const store = new StateStore(home);
+  const taskId = randomUUID();
+  const frozenAt = "2026-07-25T11:00:00.000Z";
+  store.createTask({
+    id: taskId,
+    name: "packet-inspect",
+    status: "succeeded",
+    sourcePath: path.join(home, "src"),
+    taskFile: path.join(home, "task.yaml"),
+    spec: {
+      version: 1,
+      name: "packet-inspect",
+      project: path.join(home, "src"),
+      provider: { name: "deepseek", model: "deepseek-v4-flash", keychainService: "forklight.deepseek.api-key" },
+      runtime: { name: "claude-code", executable: "claude", effort: "low", maxBudgetUsd: 0.1 },
+      workspace: { exclude: [] },
+      worker: { allowEdits: true, allowedCommands: [], focusPaths: ["src"] },
+      goal: "packet",
+      constraints: [],
+      acceptance: { commands: ["true"] },
+      reviewRequirement: { requiredJudges: 2, reason: "High-risk Integration authority" },
+    },
+    paths: {
+      root: path.join(home, "task"),
+      baseline: path.join(home, "baseline"),
+      workspace: path.join(home, "workspace"),
+      logs: path.join(home, "logs"),
+      claudeConfig: path.join(home, "claude"),
+      diff: path.join(home, "diff.patch"),
+    },
+    sessionId: "s1",
+    createdAt: frozenAt,
+    updatedAt: frozenAt,
+    finishedAt: frozenAt,
+  });
+  store.addEvent(taskId, undefined, "verification.completed", "Independent verification passed", {
+    passed: true,
+    behaviorPassed: true,
+    policyPassed: true,
+    sourceCompatible: true,
+    commands: [{
+      command: "true", exitCode: 0, stdout: "SECRET_STDOUT", stderr: "", durationMs: 1, timedOut: false,
+    }],
+    diffPath: path.join(home, "diff.patch"),
+    sourceUnchanged: true,
+  });
+  store.close();
+
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  const server = createForkLightMcpServer(home);
+  const client = new Client({ name: "forklight-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const inspected = await client.callTool({
+      name: "forklight_inspect",
+      arguments: { taskId, summary: true, eventLimit: 5 },
+    });
+    assert.equal(inspected.isError, undefined);
+    const body = inspected.structuredContent as {
+      decisionPacket?: {
+        kind?: string;
+        nextActionCode?: string;
+        review?: { status?: string; requiredJudges?: number; missingOpinions?: number };
+      };
+    };
+    assert.equal(body.decisionPacket?.kind, "main-decision-packet");
+    assert.equal(body.decisionPacket?.review?.status, "missing");
+    assert.equal(body.decisionPacket?.review?.requiredJudges, 2);
+    assert.equal(body.decisionPacket?.review?.missingOpinions, 2);
+    assert.equal(body.decisionPacket?.nextActionCode, "await-required-review");
+    assert.doesNotMatch(JSON.stringify(body.decisionPacket), /SECRET_STDOUT|sk-[A-Za-z0-9_-]{8,}/);
+  } finally {
+    await client.close();
+    await server.close();
+    await daemon.close();
+  }
+});
+
 test("MCP wait returns terminal without requiring full inspect", async () => {
   const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-wait-"));
   const store = new StateStore(home);
@@ -2351,7 +2732,9 @@ const DEFAULT_FROZEN_WORKER = {
   workerProfileId: "default",
 };
 
-function routingDecisionFixture(overrides: Record<string, unknown> = {}) {
+function routingDecisionFixture(
+  overrides: Record<string, unknown> = {},
+): RoutingDecisionSnapshot {
   return {
     taskFamily: "main-orchestration-metadata",
     shortlist: [
@@ -2377,7 +2760,7 @@ function routingDecisionFixture(overrides: Record<string, unknown> = {}) {
       },
     },
     ...overrides,
-  };
+  } as RoutingDecisionSnapshot;
 }
 
 test("MCP tool discovery describes taskClass, taskFamily, and routingDecision", async () => {
@@ -2406,6 +2789,13 @@ test("MCP tool discovery describes taskClass, taskFamily, and routingDecision", 
         "competition",
         "evidenceSnapshot",
         "exactSampleCounts",
+        "advisory",
+        "overallResult",
+        "followed-recommendation",
+        "manual-override",
+        "selected-after-cannot-determine",
+        "cannotDetermineReasons",
+        "selectedExecution",
       ]) {
         assert.ok(schemaText.includes(key), `${name} schema describes ${key}`);
       }
@@ -2462,6 +2852,7 @@ test("inlineTask + parseTaskSpec preserve exact routing metadata without inferen
   assert.equal(spec.provider.model, spec.routingDecision!.selectedWorker.model);
   assert.equal(spec.runtime.name, spec.routingDecision!.selectedWorker.runtime);
   assert.equal(spec.runtime.effort, spec.routingDecision!.selectedWorker.effort);
+  assert.equal(spec.routingDecision!.advisory, undefined);
 });
 
 test("MCP validate/submit preserve routingDecision; identity drift and omit stay compatible", async () => {
@@ -2534,6 +2925,11 @@ test("MCP validate/submit preserve routingDecision; identity drift and omit stay
     });
     assert.equal(legacy.isError, undefined, toolErrorText(legacy));
     assert.equal((legacy.structuredContent as { passed?: boolean }).passed, true);
+    assert.equal(
+      (legacy.structuredContent as { routingExplanation?: { advisory?: unknown } }).routingExplanation?.advisory,
+      null,
+      "legacy omit must not invent an advisory relationship",
+    );
 
     // Submit persists the exact snapshot on the stored Task.
     const submit = await client.callTool({
@@ -2564,6 +2960,214 @@ test("MCP validate/submit preserve routingDecision; identity drift and omit stay
     assert.equal(legacyStored.spec.taskClass, undefined);
     assert.equal(legacyStored.spec.taskFamily, undefined);
     assert.equal(legacyStored.spec.routingDecision, undefined);
+  } finally {
+    await client.close();
+    await server.close();
+    await daemon.close();
+  }
+});
+
+const MCP_QWEN_WORKER = {
+  provider: "qwen",
+  model: "qwen3.7-plus",
+  runtime: "claude-code",
+  effort: "high",
+};
+const MCP_SELECTED_EXECUTION = {
+  resolvedExecutionMode: "single-run" as const,
+  readinessState: "launchable" as const,
+  canLaunch: true,
+  nextAction: "none" as const,
+};
+
+test("MCP validate/submit carry frozen advisory relationship and hide private fields", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-rd-adv-"));
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  const server = createForkLightMcpServer(home);
+  const client = new Client({ name: "forklight-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const followedAdvisory: FrozenRoutingAdvisorySnapshot = {
+      overallResult: "recommended",
+      selection: "followed-recommendation",
+      recommendedWorker: DEFAULT_FROZEN_WORKER,
+      confidence: 0.91,
+      selectedExecution: MCP_SELECTED_EXECUTION,
+    };
+    const followed = routingDecisionFixture({
+      selectedBecause: {
+        code: "user-specified",
+        note: "PRIVATE_MCP_M3B_NOTE",
+      },
+      evidenceSnapshot: {
+        scope: "none",
+        exactSampleCounts: { SECRET_MCP_SAMPLE_KEY: 0 },
+        settingsDigest: "SECRET_MCP_SETTINGS_DIGEST",
+      },
+      advisory: followedAdvisory,
+    });
+    const followedArgs = qualityContractArgs(home, {
+      taskClass: "m3-b-durable-routing-override",
+      taskFamily: "main-orchestration-metadata",
+      routingDecision: followed,
+    });
+    const valid = await client.callTool({ name: "forklight_validate", arguments: followedArgs });
+    assert.equal(valid.isError, undefined, toolErrorText(valid));
+    const body = valid.structuredContent as {
+      passed?: boolean;
+      routingExplanation?: {
+        advisory?: {
+          selection?: string;
+          confidence?: number;
+          recommendedWorker?: unknown;
+          overallResult?: string;
+        };
+      };
+    };
+    assert.equal(body.passed, true);
+    assert.equal(body.routingExplanation?.advisory?.selection, "followed-recommendation");
+    assert.equal(body.routingExplanation?.advisory?.overallResult, "recommended");
+    assert.equal(body.routingExplanation?.advisory?.confidence, 0.91);
+    assert.deepEqual(body.routingExplanation?.advisory?.recommendedWorker, DEFAULT_FROZEN_WORKER);
+    const serialized = JSON.stringify(valid);
+    assert.ok(!serialized.includes("PRIVATE_MCP_M3B_NOTE"));
+    assert.ok(!serialized.includes("SECRET_MCP_SAMPLE_KEY"));
+    assert.ok(!serialized.includes("SECRET_MCP_SETTINGS_DIGEST"));
+
+    const override = routingDecisionFixture({
+      selectedBecause: { code: "user-specified", note: "PRIVATE_MCP_M3B_NOTE" },
+      advisory: {
+        overallResult: "recommended",
+        selection: "manual-override",
+        recommendedWorker: MCP_QWEN_WORKER,
+        confidence: 0.84,
+        selectedExecution: MCP_SELECTED_EXECUTION,
+      },
+    });
+    const overrideValid = await client.callTool({
+      name: "forklight_validate",
+      arguments: qualityContractArgs(home, {
+        taskClass: "m3-b-durable-routing-override",
+        taskFamily: "main-orchestration-metadata",
+        routingDecision: override,
+      }),
+    });
+    assert.equal(overrideValid.isError, undefined, toolErrorText(overrideValid));
+    const overrideBody = overrideValid.structuredContent as {
+      routingExplanation?: { advisory?: { selection?: string; recommendedWorker?: unknown } };
+    };
+    assert.equal(overrideBody.routingExplanation?.advisory?.selection, "manual-override");
+    assert.deepEqual(overrideBody.routingExplanation?.advisory?.recommendedWorker, MCP_QWEN_WORKER);
+
+    const cannotDetermine = routingDecisionFixture({
+      selectedBecause: { code: "user-specified", note: "PRIVATE_MCP_M3B_NOTE" },
+      advisory: {
+        overallResult: "cannot-determine",
+        selection: "selected-after-cannot-determine",
+        cannotDetermineReasons: ["insufficient-relevant-samples"],
+        selectedExecution: MCP_SELECTED_EXECUTION,
+      },
+    });
+    const cannotValid = await client.callTool({
+      name: "forklight_validate",
+      arguments: qualityContractArgs(home, {
+        taskClass: "m3-b-durable-routing-override",
+        taskFamily: "main-orchestration-metadata",
+        routingDecision: cannotDetermine,
+      }),
+    });
+    assert.equal(cannotValid.isError, undefined, toolErrorText(cannotValid));
+    const cannotBody = cannotValid.structuredContent as {
+      routingExplanation?: {
+        advisory?: { selection?: string; recommendedWorker?: unknown; confidence?: number };
+      };
+    };
+    assert.equal(cannotBody.routingExplanation?.advisory?.selection, "selected-after-cannot-determine");
+    assert.equal(cannotBody.routingExplanation?.advisory?.recommendedWorker, undefined);
+    assert.equal(cannotBody.routingExplanation?.advisory?.confidence, undefined);
+
+    const contradictory = await client.callTool({
+      name: "forklight_validate",
+      arguments: qualityContractArgs(home, {
+        taskClass: "m3-b-durable-routing-override",
+        routingDecision: routingDecisionFixture({
+          selectedBecause: { code: "user-specified", note: "PRIVATE_MCP_M3B_NOTE" },
+          advisory: {
+            overallResult: "recommended",
+            selection: "manual-override",
+            recommendedWorker: DEFAULT_FROZEN_WORKER,
+            confidence: 0.5,
+            selectedExecution: MCP_SELECTED_EXECUTION,
+          },
+        }),
+      }),
+    });
+    assert.equal(contradictory.isError, true, "contradictory override must fail before admission");
+    assert.match(toolErrorText(contradictory), /cannot be manual-override when selectedWorker matches/);
+    assert.ok(!toolErrorText(contradictory).includes("PRIVATE_MCP_M3B_NOTE"));
+
+    const submit = await client.callTool({
+      name: "forklight_submit",
+      arguments: followedArgs,
+    });
+    assert.equal(submit.isError, undefined, toolErrorText(submit));
+    const taskId = String((submit.structuredContent as { taskId?: string }).taskId);
+    const stored = await daemonRequest<TaskRecord>("status", { taskId }, home);
+    assert.deepEqual(stored.spec.routingDecision?.advisory, followedAdvisory);
+    assert.equal(followed.advisory?.selection, "followed-recommendation");
+    assert.equal(stored.spec.routingDecision?.selectedBecause.note, "PRIVATE_MCP_M3B_NOTE");
+
+    const twin = { ...DEFAULT_FROZEN_WORKER, workerProfileId: "default-twin" };
+    const profileOverride = await client.callTool({
+      name: "forklight_validate",
+      arguments: qualityContractArgs(home, {
+        taskClass: "m3-b-durable-routing-override",
+        taskFamily: "main-orchestration-metadata",
+        routingDecision: routingDecisionFixture({
+          shortlist: [DEFAULT_FROZEN_WORKER, twin],
+          selectedBecause: { code: "user-specified", note: "PRIVATE_MCP_M3B_NOTE" },
+          advisory: {
+            overallResult: "recommended",
+            selection: "manual-override",
+            recommendedWorker: twin,
+            confidence: 0.84,
+            selectedExecution: MCP_SELECTED_EXECUTION,
+          },
+        }),
+      }),
+    });
+    assert.equal(profileOverride.isError, undefined, toolErrorText(profileOverride));
+    const profileBody = profileOverride.structuredContent as {
+      routingExplanation?: { advisory?: { selection?: string; recommendedWorker?: { workerProfileId?: string } } };
+    };
+    assert.equal(profileBody.routingExplanation?.advisory?.selection, "manual-override");
+    assert.equal(profileBody.routingExplanation?.advisory?.recommendedWorker?.workerProfileId, "default-twin");
+    assert.ok(!JSON.stringify(profileOverride).includes("PRIVATE_MCP_M3B_NOTE"));
+
+    const modeMismatch = await client.callTool({
+      name: "forklight_validate",
+      arguments: qualityContractArgs(home, {
+        taskClass: "m3-b-durable-routing-override",
+        taskFamily: "main-orchestration-metadata",
+        routingDecision: routingDecisionFixture({
+          selectedBecause: { code: "user-specified", note: "PRIVATE_MCP_M3B_NOTE" },
+          advisory: {
+            overallResult: "cannot-determine",
+            selection: "selected-after-cannot-determine",
+            cannotDetermineReasons: ["insufficient-relevant-samples"],
+            selectedExecution: {
+              ...MCP_SELECTED_EXECUTION,
+              resolvedExecutionMode: "native-goal",
+            },
+          },
+        }),
+      }),
+    });
+    assert.equal(modeMismatch.isError, true, "mode mismatch must fail before admission");
+    assert.match(toolErrorText(modeMismatch), /does not match resolved Task executionMode/);
+    assert.ok(!toolErrorText(modeMismatch).includes("PRIVATE_MCP_M3B_NOTE"));
   } finally {
     await client.close();
     await server.close();
@@ -2892,5 +3496,821 @@ test("MCP task_resolve/reopen close and reopen a succeeded non-delivered Task", 
     await client.close();
     await server.close();
     await daemon.close();
+  }
+});
+
+test("MCP review_graph_repair_result requires confirm, is one-shot, and stays privacy-safe", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-repair-"));
+  const sourceDir = path.join(home, "source");
+  await mkdir(path.join(sourceDir, "src"), { recursive: true });
+  await writeFile(path.join(sourceDir, "readme.md"), "# hello\n\nOriginal.\n");
+  await writeFile(path.join(sourceDir, "src/app.ts"), "export const n = 1;\n");
+  const store = new StateStore(home);
+  const settings = new SettingsService(store);
+  const taskId = randomUUID();
+  const paths = taskPaths(home, taskId);
+  const spec: TaskSpec = {
+    version: 1,
+    name: "MCP repair fixture",
+    project: sourceDir,
+    goal: "Ship a small change",
+    constraints: [],
+    provider: {
+      name: "deepseek",
+      model: "deepseek-v4-flash",
+      keychainService: "forklight.deepseek.api-key",
+    },
+    runtime: {
+      name: "claude-code",
+      executable: "claude",
+      effort: "low",
+      maxBudgetUsd: 0.1,
+    },
+    workspace: { exclude: [".git", "node_modules"] },
+    worker: { allowEdits: true, allowedCommands: [], focusPaths: ["src", "readme.md"] },
+    acceptance: { commands: ["true"] },
+  };
+  await prepareWorkspace(spec, paths);
+  await mkdir(path.join(paths.workspace, "src"), { recursive: true });
+  await writeFile(path.join(paths.workspace, "readme.md"), "# hello\n\nChanged.\n");
+  await writeFile(path.join(paths.workspace, "src/app.ts"), "export const n = 2;\n");
+  await writeWorkspacePatchReport(paths, createPathPolicy(spec));
+  const now = new Date().toISOString();
+  store.createTask({
+    id: taskId,
+    name: spec.name,
+    status: "succeeded",
+    sourcePath: sourceDir,
+    taskFile: "forklight://test/mcp-repair",
+    spec,
+    paths,
+    sessionId: "session-mcp-repair",
+    currentAttemptId: "attempt-mcp-repair",
+    createdAt: now,
+    updatedAt: now,
+  });
+  store.createAttempt({
+    id: "attempt-mcp-repair",
+    taskId,
+    ordinal: 1,
+    status: "succeeded",
+    sessionId: "session-mcp-repair",
+    rawLogPath: path.join(paths.logs, "attempt-1.jsonl"),
+    startedAt: now,
+    finishedAt: now,
+    exitCode: 0,
+  });
+  const verEvent = store.addEvent(taskId, "attempt-mcp-repair", "verification.completed", "passed", {
+    passed: true,
+    behaviorPassed: true,
+    policyPassed: true,
+    sourceCompatible: true,
+    commands: [{ command: "true", exitCode: 0, stdout: "", stderr: "", durationMs: 1, timedOut: false }],
+    diffPath: paths.diff,
+    sourceUnchanged: true,
+  } satisfies VerificationResult);
+  const revision = await captureCandidateRevision(
+    store,
+    store.getTask(taskId),
+    store.getAttempt("attempt-mcp-repair"),
+    verEvent.sequence,
+    true,
+    ["readme.md", "src/app.ts"],
+    2,
+    4,
+  );
+  const profileA = settings.get().workerProfiles.defaultProfileId;
+  const profileB = settings.get().workerProfiles.profiles.find((profile) => profile.id !== profileA)!.id;
+  const created = await createReviewGraph(store, settings.get(), {
+    candidateTaskId: taskId,
+    reviewerWorkerProfileIds: [profileA, profileB],
+    reason: "MCP repair fixture",
+    confirm: true,
+  });
+  const [usable, failed] = store.listReviewAssignments(created.graph.id);
+  const finish = (reviewerTaskId: string, resultText: string) => {
+    const task = store.getTask(reviewerTaskId);
+    store.createAttempt({
+      id: `att-${reviewerTaskId}`,
+      taskId: reviewerTaskId,
+      ordinal: 1,
+      status: "succeeded",
+      sessionId: task.sessionId,
+      rawLogPath: path.join(task.paths.logs, "attempt-1.jsonl"),
+      startedAt: now,
+      finishedAt: now,
+      exitCode: 0,
+      resultText,
+    });
+    store.setTaskStatus(reviewerTaskId, "succeeded", {
+      finishedAt: now,
+      currentAttemptId: `att-${reviewerTaskId}`,
+    });
+  };
+  finish(usable!.reviewerTaskId, JSON.stringify({
+    schemaVersion: 1,
+    reviewedRevisionId: revision.id,
+    proposedDisposition: "accept",
+    summary: "Usable first opinion",
+    findings: [],
+  }));
+  finish(failed!.reviewerTaskId, JSON.stringify({
+    schemaVersion: 1,
+    reviewedRevisionId: revision.id,
+    proposedDisposition: "accept",
+    summary: "s".repeat(507),
+    findings: [],
+  }));
+  reconcileAllReviewGraphs(store);
+  const assignmentId = failed!.id;
+  store.close();
+
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  const server = createForkLightMcpServer(home);
+  const client = new Client({ name: "forklight-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const missingConfirm = await client.callTool({
+      name: "forklight_review_graph_repair_result",
+      arguments: {
+        taskId,
+        assignmentId,
+        reason: "shorten summary",
+      },
+    });
+    assert.equal(missingConfirm.isError, true);
+
+    const first = await client.callTool({
+      name: "forklight_review_graph_repair_result",
+      arguments: {
+        taskId,
+        assignmentId,
+        reason: "shorten summary",
+        confirm: true,
+      },
+    });
+    assert.equal(first.isError, undefined, toolErrorText(first));
+    const data = first.structuredContent as Record<string, unknown>;
+    assert.equal(data.created, true);
+    assert.equal(data.originalFailureCode, "schema-violation");
+    const graph = data.graph as Record<string, unknown>;
+    assert.equal((graph.assignments as unknown[]).length, 2);
+    const serialized = JSON.stringify(first);
+    assert.ok(!serialized.includes("privatePacketPath"));
+    assert.ok(!serialized.includes("packet.json"));
+    assert.ok(!serialized.includes("s".repeat(507)));
+    assert.ok(!serialized.includes("keychain"));
+    assert.ok(!/\/Users\//.test(serialized));
+
+    const second = await client.callTool({
+      name: "forklight_review_graph_repair_result",
+      arguments: {
+        taskId,
+        assignmentId,
+        reason: "shorten summary again",
+        confirm: true,
+      },
+    });
+    assert.equal(second.isError, true);
+    assert.match(toolErrorText(second), /already consumed|one-shot/i);
+  } finally {
+    await client.close();
+    await server.close();
+    await daemon.close();
+    await rm(home, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test("MCP main-token capture and status are count-only and status is read-only", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-m4a-"));
+  const store = new StateStore(home);
+  const { parseTaskSpec } = await import("../src/core/task.js");
+  const { buildTaskRecord } = await import("../src/core/runner.js");
+  const spec = parseTaskSpec({
+    version: 1, name: "mcp-mu", project: "/tmp", goal: "T",
+    taskClass: "edit-task", taskFamily: "forklight-storage-lifecycle",
+    directCodexProfileId: "codex-main-v1", acceptance: { commands: ["true"] },
+  }, "/tmp");
+  store.createTask(buildTaskRecord({
+    spec, taskFile: "/tmp/mcp-mu.yaml", home, id: "mcp-mu",
+    sessionId: "s-mcp-mu", createdAt: "2026-08-17T12:00:00.000Z",
+  }));
+  const before = {
+    samples: store.countMainUsageSamples(),
+    events: store.listEvents("mcp-mu").length,
+    receipts: store.listExchangeReceipts("mcp-mu").length,
+    tasks: store.listTasks().length,
+  };
+  store.close();
+
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  const server = createForkLightMcpServer(home);
+  const client = new Client({ name: "forklight-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  const usage = {
+    type: "turn.completed",
+    usage: {
+      input_tokens: 4000, cached_input_tokens: 1000, cache_write_input_tokens: 0,
+      output_tokens: 500, reasoning_output_tokens: 100,
+    },
+  };
+  try {
+    const empty = await client.callTool({
+      name: "forklight_main_token_status",
+      arguments: { taskId: "mcp-mu", comparisonId: "cmp-mcp" },
+    });
+    assert.equal(empty.isError, undefined, toolErrorText(empty));
+    const emptyData = empty.structuredContent as Record<string, unknown>;
+    assert.deepEqual(emptyData.missingRoles, ["direct-main", "delegated-main"]);
+    assert.equal(emptyData.countComplete, false);
+    assert.equal("saving" in emptyData, false);
+
+    const captured = await client.callTool({
+      name: "forklight_main_token_capture",
+      arguments: {
+        taskId: "mcp-mu", comparisonId: "cmp-mcp", role: "direct-main",
+        runRef: "codex-run:mcp-direct", usage,
+      },
+    });
+    assert.equal(captured.isError, undefined, toolErrorText(captured));
+    const sample = captured.structuredContent as Record<string, unknown>;
+    assert.equal(sample.inputTokens, 3000);
+    assert.equal(sample.grossTokens, 4500);
+    assert.equal(sample.source, "codex-terminal-result");
+    assert.equal("saving" in sample, false);
+
+    const status1 = await client.callTool({
+      name: "forklight_main_token_status",
+      arguments: { taskId: "mcp-mu", comparisonId: "cmp-mcp" },
+    });
+    const status2 = await client.callTool({
+      name: "forklight_main_token_status",
+      arguments: { taskId: "mcp-mu", comparisonId: "cmp-mcp" },
+    });
+    assert.deepEqual(status1.structuredContent, status2.structuredContent);
+    const status = status1.structuredContent as Record<string, unknown>;
+    assert.deepEqual(status.capturedRoles, ["direct-main"]);
+    assert.deepEqual(status.missingRoles, ["delegated-main"]);
+    assert.equal("change" in status, false);
+    assert.equal("directCodexSavings" in status, false);
+
+    const check = new StateStore(home);
+    assert.equal(check.countMainUsageSamples(), before.samples + 1);
+    assert.equal(check.listEvents("mcp-mu").length, before.events);
+    assert.equal(check.listExchangeReceipts("mcp-mu").length, before.receipts);
+    assert.equal(check.listTasks().length, before.tasks);
+    check.close();
+  } finally {
+    await client.close();
+    await server.close();
+    await daemon.close();
+  }
+});
+
+test("MCP main-token capture-episode is count-only and agrees with status", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-m4e-"));
+  const store = new StateStore(home);
+  const { parseTaskSpec } = await import("../src/core/task.js");
+  const { buildTaskRecord } = await import("../src/core/runner.js");
+  const spec = parseTaskSpec({
+    version: 1, name: "mcp-ep", project: "/tmp", goal: "T",
+    taskClass: "edit-task", taskFamily: "forklight-storage-lifecycle",
+    directCodexProfileId: "codex-main-v1", acceptance: { commands: ["true"] },
+  }, "/tmp");
+  store.createTask(buildTaskRecord({
+    spec, taskFile: "/tmp/mcp-ep.yaml", home, id: "mcp-ep",
+    sessionId: "s-mcp-ep", createdAt: "2026-08-17T12:00:00.000Z",
+  }));
+  store.close();
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  const server = createForkLightMcpServer(home);
+  const client = new Client({ name: "forklight-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  const first = {
+    type: "turn.completed",
+    usage: {
+      input_tokens: 4000, cached_input_tokens: 1000, cache_write_input_tokens: 200,
+      output_tokens: 500, reasoning_output_tokens: 100,
+    },
+  };
+  const second = {
+    type: "turn.completed",
+    usage: {
+      input_tokens: 2500, cached_input_tokens: 800, cache_write_input_tokens: 100,
+      output_tokens: 400, reasoning_output_tokens: 80,
+    },
+  };
+  try {
+    const captured = await client.callTool({
+      name: "forklight_main_token_capture_episode",
+      arguments: {
+        taskId: "mcp-ep", comparisonId: "cmp-mcp-ep", role: "delegated-main",
+        runRef: "codex-run:mcp-episode",
+        segments: [
+          { runRef: "codex-run:mcp-ep-a", usage: first },
+          { runRef: "codex-run:mcp-ep-b", usage: second },
+        ],
+      },
+    });
+    assert.equal(captured.isError, undefined, toolErrorText(captured));
+    const sample = captured.structuredContent as Record<string, unknown>;
+    assert.equal(sample.schemaVersion, 2);
+    assert.equal("saving" in sample, false);
+    assert.equal("prompt" in sample, false);
+    const segments = sample.segments as Array<Record<string, unknown>>;
+    assert.equal(segments.length, 2);
+    assert.equal(segments[0]?.runRef, "codex-run:mcp-ep-a");
+    assert.equal(
+      sample.inputTokens,
+      (segments[0]?.inputTokens as number) + (segments[1]?.inputTokens as number),
+    );
+    assert.equal(
+      sample.grossTokens,
+      (segments[0]?.grossTokens as number) + (segments[1]?.grossTokens as number),
+    );
+    const status1 = await client.callTool({
+      name: "forklight_main_token_status",
+      arguments: { taskId: "mcp-ep", comparisonId: "cmp-mcp-ep" },
+    });
+    const status2 = await client.callTool({
+      name: "forklight_main_token_status",
+      arguments: { taskId: "mcp-ep", comparisonId: "cmp-mcp-ep" },
+    });
+    assert.deepEqual(status1.structuredContent, status2.structuredContent);
+    const status = status1.structuredContent as Record<string, unknown>;
+    assert.deepEqual(status.capturedRoles, ["delegated-main"]);
+    assert.equal("saving" in status, false);
+    const statusSample = (status.samples as Array<Record<string, unknown>>)[0];
+    assert.equal(statusSample?.grossTokens, sample.grossTokens);
+    assert.equal((statusSample?.segments as unknown[]).length, 2);
+  } finally {
+    await client.close();
+    await server.close();
+    await daemon.close();
+  }
+});
+
+test("MCP main-token assess and pair-report are privacy-safe and report is read-only", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-m4b-"));
+  const store = new StateStore(home);
+  const { parseTaskSpec } = await import("../src/core/task.js");
+  const { buildTaskRecord } = await import("../src/core/runner.js");
+  const spec = parseTaskSpec({
+    version: 1, name: "mcp-pair", project: "/tmp", goal: "T",
+    taskClass: "edit-task", taskFamily: "forklight-storage-lifecycle",
+    directCodexProfileId: "codex-main-v1", acceptance: { commands: ["true"] },
+  }, "/tmp");
+  store.createTask(buildTaskRecord({
+    spec, taskFile: "/tmp/mcp-pair.yaml", home, id: "mcp-pair",
+    sessionId: "s-mcp-pair", createdAt: "2026-08-17T12:00:00.000Z",
+  }));
+  store.saveMainUsageSample({
+    sampleId: "mcppaird", forklightTaskId: "mcp-pair", comparisonId: "cmp-mcp-pair",
+    role: "direct-main", taskClass: "edit-task", taskFamily: "forklight-storage-lifecycle",
+    directCodexProfileId: "codex-main-v1", inputTokens: 4000, outputTokens: 500,
+    cacheReadInputTokens: 0, cacheCreationInputTokens: 0, grossTokens: 4500,
+    source: "codex-terminal-result", runRef: "codex-run:mcp-pair-d",
+    capturedAt: "2026-08-17T12:00:00.000Z", schemaVersion: 1,
+  });
+  store.saveMainUsageSample({
+    sampleId: "mcppairg", forklightTaskId: "mcp-pair", comparisonId: "cmp-mcp-pair",
+    role: "delegated-main", taskClass: "edit-task", taskFamily: "forklight-storage-lifecycle",
+    directCodexProfileId: "codex-main-v1", inputTokens: 1200, outputTokens: 300,
+    cacheReadInputTokens: 0, cacheCreationInputTokens: 0, grossTokens: 1500,
+    source: "codex-terminal-result", runRef: "codex-run:mcp-pair-g",
+    capturedAt: "2026-08-17T12:00:00.000Z", schemaVersion: 1,
+  });
+  const digest = "a".repeat(64);
+  const verification = store.addEvent("mcp-pair", "att-mcp-pair", "verification.completed", "passed", { passed: true });
+  store.addEvent("mcp-pair", "att-mcp-pair", "main-review.completed", "accept", {
+    decision: "accept", reason: "accepted", attemptId: "att-mcp-pair",
+    verificationEventSequence: verification.sequence,
+    candidateRevisionId: "rev-mcp-pair", acceptedPatchDigest: digest,
+  });
+  store.saveIntegrationReceipt({
+    id: "rcpt-mcp-int", taskId: "mcp-pair", patchDigest: digest, affectedFiles: ["src/cli.ts"],
+    rejectionReasons: [], sourceEvidence: {}, createdAt: "2026-08-17T12:00:00.000Z",
+    expiresAt: "2099-01-01T00:00:00.000Z", consumed: true,
+  });
+  store.saveIntegrationResult({
+    id: "intopmcp", receiptId: "rcpt-mcp-int", taskId: "mcp-pair", status: "applied",
+    appliedAt: "2026-08-17T12:00:00.000Z", createdAt: "2026-08-17T12:00:00.000Z",
+    stages: [
+      { stage: "source-applied", status: "passed" },
+      { stage: "source-verified", status: "passed" },
+      { stage: "artifact-built", status: "passed" },
+      { stage: "runtime-activated", status: "passed" },
+    ],
+  });
+  const before = {
+    events: store.listEvents("mcp-pair").length,
+    integrations: store.listIntegrationResults("mcp-pair").length,
+    tasks: store.listTasks().length,
+  };
+  store.close();
+
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  const server = createForkLightMcpServer(home);
+  const client = new Client({ name: "forklight-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  const assessArgs = {
+    taskId: "mcp-pair",
+    comparisonId: "cmp-mcp-pair",
+    confirm: true as const,
+    sameScope: true,
+    sameAcceptance: true,
+    delegatedQualityNotLower: true,
+    directVerificationRef: { referenceId: "dvref1" },
+    delegatedIntegrationOperationId: "intopmcp",
+    reviewer: "main-codex" as const,
+    assessedAt: "2026-08-17T12:30:00.000Z",
+    schemaVersion: 1 as const,
+  };
+  try {
+    const assessed = await client.callTool({ name: "forklight_main_token_assess", arguments: assessArgs });
+    assert.equal(assessed.isError, undefined, toolErrorText(assessed));
+    const assessedData = assessed.structuredContent as Record<string, unknown>;
+    assert.equal(assessedData.outcome, "accepted");
+    assert.equal("prompt" in assessedData, false);
+
+    const report1 = await client.callTool({
+      name: "forklight_main_token_pair_report",
+      arguments: { taskId: "mcp-pair", comparisonId: "cmp-mcp-pair" },
+    });
+    const report2 = await client.callTool({
+      name: "forklight_main_token_pair_report",
+      arguments: { taskId: "mcp-pair", comparisonId: "cmp-mcp-pair" },
+    });
+    assert.equal(report1.isError, undefined, toolErrorText(report1));
+    assert.deepEqual(report1.structuredContent, report2.structuredContent);
+    const report = report1.structuredContent as Record<string, unknown>;
+    assert.equal(report.validity, "accepted");
+    assert.equal(report.directGrossTokens, 4500);
+    assert.equal(report.delegatedGrossTokens, 1500);
+    assert.equal(report.signedChange, 3000);
+    assert.equal((report.saving as { status?: string }).status, "saving");
+    for (const key of ["change", "savings", "directCodexSavings", "calibration", "workerTokens", "cost", "prompt"]) {
+      assert.equal(key in report, false);
+    }
+
+    const check = new StateStore(home);
+    assert.equal(check.listEvents("mcp-pair").length, before.events);
+    assert.equal(check.listIntegrationResults("mcp-pair").length, before.integrations);
+    assert.equal(check.listTasks().length, before.tasks);
+    assert.equal(check.countMainPairAssessments(), 1);
+    check.close();
+  } finally {
+    await client.close();
+    await server.close();
+    await daemon.close();
+  }
+});
+
+test("MCP main-token value report is read-only and matches two launches", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-m4c-"));
+  const store = new StateStore(home);
+  const { parseTaskSpec } = await import("../src/core/task.js");
+  const { buildTaskRecord } = await import("../src/core/runner.js");
+  const spec = parseTaskSpec({
+    version: 1, name: "mcp-value", project: "/tmp", goal: "T",
+    taskClass: "edit-task", taskFamily: "forklight-storage-lifecycle",
+    directCodexProfileId: "codex-main-v1", acceptance: { commands: ["true"] },
+  }, "/tmp");
+  store.createTask(buildTaskRecord({
+    spec, taskFile: "/tmp/mcp-value.yaml", home, id: "mcp-value",
+    sessionId: "s-mcp-value", createdAt: "2026-08-17T12:00:00.000Z",
+  }));
+  store.saveMainUsageSample({
+    sampleId: "mcpvalued", forklightTaskId: "mcp-value", comparisonId: "cmp-mcp-value",
+    role: "direct-main", taskClass: "edit-task", taskFamily: "forklight-storage-lifecycle",
+    directCodexProfileId: "codex-main-v1", inputTokens: 4000, outputTokens: 500,
+    cacheReadInputTokens: 0, cacheCreationInputTokens: 0, grossTokens: 4500,
+    source: "codex-terminal-result", runRef: "codex-run:mcp-value-d",
+    capturedAt: "2026-08-17T12:00:00.000Z", schemaVersion: 1,
+  });
+  store.saveMainUsageSample({
+    sampleId: "mcpvalueg", forklightTaskId: "mcp-value", comparisonId: "cmp-mcp-value",
+    role: "delegated-main", taskClass: "edit-task", taskFamily: "forklight-storage-lifecycle",
+    directCodexProfileId: "codex-main-v1", inputTokens: 1200, outputTokens: 300,
+    cacheReadInputTokens: 0, cacheCreationInputTokens: 0, grossTokens: 1500,
+    source: "codex-terminal-result", runRef: "codex-run:mcp-value-g",
+    capturedAt: "2026-08-17T12:00:00.000Z", schemaVersion: 1,
+  });
+  const digest = "a".repeat(64);
+  const verification = store.addEvent("mcp-value", "att-mcp-value", "verification.completed", "passed", { passed: true });
+  store.addEvent("mcp-value", "att-mcp-value", "main-review.completed", "accept", {
+    decision: "accept", reason: "accepted", attemptId: "att-mcp-value",
+    verificationEventSequence: verification.sequence,
+    candidateRevisionId: "rev-mcp-value", acceptedPatchDigest: digest,
+  });
+  store.saveIntegrationReceipt({
+    id: "rcpt-mcp-value", taskId: "mcp-value", patchDigest: digest, affectedFiles: ["src/cli.ts"],
+    rejectionReasons: [], sourceEvidence: {}, createdAt: "2026-08-17T12:00:00.000Z",
+    expiresAt: "2099-01-01T00:00:00.000Z", consumed: true,
+  });
+  store.saveIntegrationResult({
+    id: "intopmcpv", receiptId: "rcpt-mcp-value", taskId: "mcp-value", status: "applied",
+    appliedAt: "2026-08-17T12:00:00.000Z", createdAt: "2026-08-17T12:00:00.000Z",
+    stages: [
+      { stage: "source-applied", status: "passed" },
+      { stage: "source-verified", status: "passed" },
+      { stage: "artifact-built", status: "passed" },
+      { stage: "runtime-activated", status: "passed" },
+    ],
+  });
+  const before = {
+    events: store.listEvents("mcp-value").length,
+    tasks: store.listTasks().length,
+    assessments: store.countMainPairAssessments(),
+  };
+  store.close();
+
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  const server = createForkLightMcpServer(home);
+  const client = new Client({ name: "forklight-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const listed = await client.listTools();
+    const valueTool = listed.tools.find((tool) => tool.name === "forklight_main_token_value_report");
+    assert.equal(valueTool?.annotations?.readOnlyHint, true);
+
+    const empty = await client.callTool({
+      name: "forklight_main_token_value_report",
+      arguments: { families: ["worker-runtime"] },
+    });
+    assert.equal(empty.isError, undefined, toolErrorText(empty));
+    const emptyData = empty.structuredContent as Record<string, unknown>;
+    assert.equal(emptyData.overall, "cannot-determine");
+    assert.ok((emptyData.reasons as string[]).includes("uncovered-family"));
+
+    await client.callTool({
+      name: "forklight_main_token_assess",
+      arguments: {
+        taskId: "mcp-value",
+        comparisonId: "cmp-mcp-value",
+        confirm: true,
+        sameScope: true,
+        sameAcceptance: true,
+        delegatedQualityNotLower: true,
+        directVerificationRef: { referenceId: "dvref1" },
+        delegatedIntegrationOperationId: "intopmcpv",
+        reviewer: "main-codex",
+        assessedAt: "2026-08-17T12:30:00.000Z",
+        schemaVersion: 1,
+      },
+    });
+
+    const report1 = await client.callTool({
+      name: "forklight_main_token_value_report",
+      arguments: { families: ["forklight-storage-lifecycle"] },
+    });
+    const report2 = await client.callTool({
+      name: "forklight_main_token_value_report",
+      arguments: { families: ["forklight-storage-lifecycle"] },
+    });
+    assert.equal(report1.isError, undefined, toolErrorText(report1));
+    assert.deepEqual(report1.structuredContent, report2.structuredContent);
+    const report = report1.structuredContent as Record<string, unknown>;
+    assert.equal(report.overall, "proven");
+    assert.equal(report.createdWork, false);
+    const families = report.families as Array<Record<string, unknown>>;
+    assert.equal(families[0]?.claim, "proven-lower");
+    const comparisons = families[0]?.comparisons as Array<Record<string, unknown>>;
+    assert.equal(comparisons[0]?.signedChange, 3000);
+    for (const key of ["change", "savings", "directCodexSavings", "prompt", "averagePercentage"]) {
+      assert.equal(key in report, false);
+    }
+    const check = new StateStore(home);
+    assert.equal(check.listEvents("mcp-value").length, before.events);
+    assert.equal(check.listTasks().length, before.tasks);
+    assert.equal(check.countMainPairAssessments(), before.assessments + 1);
+    check.close();
+  } finally {
+    await client.close();
+    await server.close();
+    await daemon.close();
+  }
+});
+
+test("MCP delivery prepare and decide share the canonical checkpoint schema", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-delivery-"));
+  const sourceDir = path.join(home, "source");
+  await mkdir(path.join(sourceDir, "src"), { recursive: true });
+  await writeFile(path.join(sourceDir, "readme.md"), "# hello\n\nOriginal.\n");
+  await writeFile(path.join(sourceDir, "src/app.ts"), "export const n = 1;\n");
+  const store = new StateStore(home);
+  const taskId = "mcp-delivery-1";
+  const paths = taskPaths(home, taskId);
+  const spec: TaskSpec = {
+    version: 1,
+    name: "MCP delivery",
+    project: sourceDir,
+    goal: "Ship a small change",
+    constraints: [],
+    provider: {
+      name: "deepseek",
+      model: "deepseek-v4-flash",
+      keychainService: "forklight.deepseek.api-key",
+    },
+    runtime: { name: "claude-code", executable: "claude", effort: "low", maxBudgetUsd: 0.1 },
+    workspace: { exclude: [".git", "node_modules"] },
+    worker: { allowEdits: true, allowedCommands: [], focusPaths: ["src", "readme.md"] },
+    acceptance: { commands: ["true"] },
+    reviewRequirement: { requiredJudges: 0, reason: "Explicit skip for MCP fixture" },
+  };
+  await prepareWorkspace(spec, paths);
+  await mkdir(path.join(paths.workspace, "src"), { recursive: true });
+  await writeFile(path.join(paths.workspace, "readme.md"), "# hello\n\nChanged.\n");
+  await writeFile(path.join(paths.workspace, "src/app.ts"), "export const n = 2;\n");
+  await writeWorkspacePatchReport(paths, createPathPolicy(spec));
+  const now = new Date().toISOString();
+  store.createTask({
+    id: taskId,
+    name: spec.name,
+    status: "succeeded",
+    sourcePath: sourceDir,
+    taskFile: "forklight://test/mcp-delivery",
+    spec,
+    paths,
+    sessionId: "session-1",
+    currentAttemptId: "attempt-1",
+    createdAt: now,
+    updatedAt: now,
+  });
+  store.createAttempt({
+    id: "attempt-1",
+    taskId,
+    ordinal: 1,
+    status: "succeeded",
+    sessionId: "session-1",
+    rawLogPath: path.join(paths.logs, "attempt-1.jsonl"),
+    startedAt: now,
+    finishedAt: now,
+    exitCode: 0,
+  });
+  const verification: VerificationResult = {
+    passed: true,
+    behaviorPassed: true,
+    policyPassed: true,
+    sourceCompatible: true,
+    commands: [{ command: "true", exitCode: 0, stdout: "", stderr: "", durationMs: 1, timedOut: false }],
+    diffPath: paths.diff,
+    sourceUnchanged: true,
+  };
+  const verEvent = store.addEvent(taskId, "attempt-1", "verification.completed", "passed", verification);
+  const revision = await captureCandidateRevision(
+    store, store.getTask(taskId), store.getAttempt("attempt-1"), verEvent.sequence, true,
+    ["readme.md", "src/app.ts"], 2, 4,
+  );
+  store.close();
+
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  const server = createForkLightMcpServer(home);
+  const client = new Client({ name: "forklight-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const prepared = await client.callTool({
+      name: "forklight_delivery_prepare",
+      arguments: {
+        taskId,
+        reviewerProfileIds: [],
+        reason: "Explicit skip",
+        timeoutMs: 500,
+        confirm: true,
+      },
+    });
+    assert.equal(prepared.isError, undefined);
+    const preparedData = prepared.structuredContent as {
+      kind?: string;
+      observation?: { outcome?: string };
+      candidate?: { revisionId?: string; digest?: string };
+      nextActionCode?: string;
+      mainDecision?: unknown;
+      integration?: unknown;
+    };
+    assert.equal(preparedData.kind, "main-delivery-checkpoint");
+    assert.equal(preparedData.observation?.outcome, "ready");
+    assert.equal(preparedData.candidate?.revisionId, revision.id);
+    assert.equal(preparedData.candidate?.digest, revision.patchDigest);
+    assert.equal(preparedData.nextActionCode, "record-main-review");
+    assert.equal(preparedData.mainDecision, undefined);
+    assert.equal(preparedData.integration, undefined);
+
+    const decided = await client.callTool({
+      name: "forklight_delivery_decide",
+      arguments: {
+        taskId,
+        decision: "revise",
+        revisionId: revision.id,
+        digest: revision.patchDigest,
+        reason: "Need a narrower change",
+        timeoutMs: 500,
+        confirm: true,
+      },
+    });
+    assert.equal(decided.isError, undefined);
+    const decidedData = decided.structuredContent as {
+      kind?: string;
+      mainDecision?: { decision?: string };
+      integration?: unknown;
+    };
+    assert.equal(decidedData.kind, "main-delivery-checkpoint");
+    assert.equal(decidedData.mainDecision?.decision, "revise");
+    assert.equal(decidedData.integration, undefined);
+    const receiptStore = new StateStore(home);
+    const receipts = receiptStore.listExchangeReceipts(taskId);
+    assert.equal(receipts.filter((receipt) => receipt.operation === "forklight_delivery_prepare").length, 1);
+    assert.equal(receipts.filter((receipt) => receipt.operation === "forklight_delivery_decide").length, 1);
+    assert.equal(receipts.some((receipt) => receipt.operation === "forklight_wait"), false);
+    assert.equal(receipts.some((receipt) => receipt.operation === "forklight_review_graph_create"), false);
+    assert.equal(receipts.some((receipt) => receipt.operation === "forklight_main_review"), false);
+    receiptStore.close();
+  } finally {
+    await client.close();
+    await server.close();
+    await daemon.close();
+  }
+});
+
+test("MCP backup preview create inspect share projections and omit restore", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-backup-"));
+  const dest = path.join(path.dirname(home), `mcp-backup-${path.basename(home)}`);
+  const store = new StateStore(home);
+  store.close();
+  const server = createForkLightMcpServer(home);
+  const client = new Client({ name: "forklight-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const tools = await client.listTools();
+    const names = tools.tools.map((tool) => tool.name);
+    assert.ok(names.includes("forklight_backup_preview"));
+    assert.ok(names.includes("forklight_backup_create"));
+    assert.ok(names.includes("forklight_backup_inspect"));
+    assert.equal(names.includes("forklight_backup_restore"), false);
+
+    const preview = await client.callTool({
+      name: "forklight_backup_preview",
+      arguments: { destination: dest },
+    });
+    assert.equal(preview.isError, undefined);
+    const previewData = preview.structuredContent as {
+      included?: string[];
+      excluded?: string[];
+      integrity?: { quickCheck?: string };
+      impact?: string;
+      nextAction?: string;
+      credentials?: { keychain?: string };
+      privacy?: string;
+    };
+    assert.ok(previewData.included?.includes("forklight.sqlite"));
+    assert.ok((previewData.excluded ?? []).length > 0);
+    assert.equal(previewData.integrity?.quickCheck, "ok");
+    assert.ok((previewData.impact ?? "").length > 0);
+    assert.equal(previewData.credentials?.keychain, "not-included");
+    assert.equal(previewData.privacy, "keep-private");
+
+    const created = await client.callTool({
+      name: "forklight_backup_create",
+      arguments: { destination: dest, confirm: true },
+    });
+    assert.equal(created.isError, undefined);
+    assert.equal((created.structuredContent as { status?: string }).status, "completed");
+
+    const inspected = await client.callTool({
+      name: "forklight_backup_inspect",
+      arguments: { backupPath: dest },
+    });
+    assert.equal(inspected.isError, undefined);
+    assert.equal((inspected.structuredContent as { status?: string }).status, "ready");
+    assert.equal(existsSync(path.join(home, "forklight.sock")), false);
+
+    const mcpSource = await readFile(new URL("../src/mcp/server.ts", import.meta.url), "utf8");
+    const previewIdx = mcpSource.indexOf('"forklight_backup_preview"');
+    const createIdx = mcpSource.indexOf('"forklight_backup_create"');
+    const inspectIdx = mcpSource.indexOf('"forklight_backup_inspect"');
+    assert.ok(previewIdx > 0 && createIdx > previewIdx && inspectIdx > createIdx);
+    assert.equal(mcpSource.includes("forklight_backup_restore"), false);
+    assert.doesNotMatch(
+      mcpSource.slice(previewIdx, inspectIdx + 400),
+      /ensureDaemon/,
+    );
+  } finally {
+    await client.close();
+    await server.close();
+    await rm(home, { recursive: true, force: true }).catch(() => undefined);
+    await rm(dest, { recursive: true, force: true }).catch(() => undefined);
   }
 });

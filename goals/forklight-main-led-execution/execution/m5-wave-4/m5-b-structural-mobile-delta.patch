@@ -1,0 +1,522 @@
+--- a/src/hub/public/index.html
++++ b/src/hub/public/index.html
+@@ -92,14 +92,11 @@
+         </div>
+       </details>
+     </nav>
+-
+-    <div class="product-utils">
+-      <button type="button" id="fl-mobile-back" class="btn sm mobile-back" hidden data-fl-role="mobile-back" data-i18n="mobileBack">返回</button>
+-    </div>
+   </header>
+ 
+   <div class="workspace">
+     <header class="topbar">
++      <button type="button" id="fl-mobile-back" class="btn sm mobile-back" hidden data-fl-role="mobile-back" data-i18n="mobileBack">返回</button>
+       <div class="topbar-copy">
+         <h1 id="fl-page-title" class="page-title">工作</h1>
+         <p id="fl-page-sub" class="page-sub">先看当前 Goal 的结果、事实和需要你决定的事</p>
+--- a/src/hub/public/app.css
++++ b/src/hub/public/app.css
+@@ -215,8 +215,14 @@
+ .system-menu-list {
+   position: absolute;
+   top: calc(100% + 4px);
+-  left: 0;
++  right: 0;
++  left: auto;
+   min-width: 168px;
++  width: max-content;
++  max-width: min(280px, calc(100vw - 24px));
++  max-height: min(70vh, calc(100dvh - 72px));
++  overflow-x: visible;
++  overflow-y: auto;
+   padding: 4px;
+   background: var(--paper);
+   border: var(--border);
+@@ -7320,13 +7326,12 @@
+ }
+ 
+ @media (max-width: 760px) {
+-  .shell {
+-    overflow-x: hidden;
+-  }
+   .product-bar {
+     flex-wrap: nowrap;
+     align-items: center;
+     gap: 6px;
++    width: 100%;
++    max-width: 100%;
+     height: 48px;
+     max-height: 48px;
+     min-height: 48px;
+@@ -7350,6 +7355,7 @@
+     overflow: visible;
+   }
+   .nav-scroll {
++    flex: 0 1 auto;
+     flex-wrap: nowrap;
+     min-width: 0;
+     overflow-x: auto;
+@@ -7358,33 +7364,41 @@
+   .system-menu {
+     flex-shrink: 0;
+     overflow: visible;
++  }
++  .system-menu-list {
++    position: fixed;
++    top: 52px;
++    right: 8px;
++    left: auto;
++    width: min(280px, calc(100vw - 16px));
++    max-width: calc(100vw - 16px);
++    max-height: min(70dvh, calc(100dvh - 64px));
++    overflow-x: visible;
++    overflow-y: auto;
+   }
++  .product-bar .nav-icon { display: none; }
+   .nav-item,
+   .system-summary {
++    padding: 6px 6px;
++    gap: 4px;
++    min-height: 44px;
+     white-space: nowrap;
+     word-break: keep-all;
+     overflow-wrap: normal;
+     flex-shrink: 0;
+   }
+-  .product-utils {
+-    flex: 0 0 auto;
+-    width: auto;
+-    justify-content: flex-end;
+-    flex-wrap: nowrap;
+-    margin-left: 0;
+-    gap: 4px;
+-  }
+   .topbar {
+     flex-wrap: nowrap;
+     align-items: center;
++    justify-content: flex-start;
++    gap: 8px;
+     height: 48px;
+     max-height: 48px;
+     min-height: 48px;
+     padding: 0 10px;
+-    overflow: hidden;
+   }
+   .topbar-copy {
+-    flex-shrink: 0;
++    flex: 1 1 auto;
+     min-width: 0;
+   }
+   .page-title {
+@@ -7394,12 +7408,7 @@
+     overflow-wrap: normal;
+   }
+   .page-sub { display: none; }
+-  .top-meta {
+-    flex-wrap: nowrap;
+-    max-width: none;
+-    min-width: 0;
+-    overflow: hidden;
+-  }
++  .top-meta { display: none; }
+   .mobile-back {
+     min-height: 44px;
+     white-space: nowrap;
+@@ -7456,18 +7465,57 @@
+   }
+ }
+ 
++@media (max-width: 359px) {
++  .brand { position: relative; }
++  .brand-text {
++    position: absolute;
++    width: 1px;
++    height: 1px;
++    padding: 0;
++    margin: -1px;
++    overflow: hidden;
++    clip: rect(0 0 0 0);
++    white-space: nowrap;
++    border: 0;
++  }
++}
++
+ @media (min-width: 761px) {
+   #fl-mobile-back {
+     display: none !important;
+   }
+ }
+ 
++@media (prefers-reduced-motion: no-preference) {
++  .system-menu[open] > .system-menu-list {
++    animation: fl-system-menu-enter 140ms ease-out;
++  }
++  .nav-item,
++  .system-summary {
++    transition: background-color 140ms ease, color 140ms ease, border-color 140ms ease;
++  }
++}
++
++@keyframes fl-system-menu-enter {
++  from {
++    opacity: 0;
++    transform: translateY(-6px);
++  }
++  to {
++    opacity: 1;
++    transform: translateY(0);
++  }
++}
++
+ @media (prefers-reduced-motion: reduce) {
+   .goal-tree-resize,
+   .nav-item,
++  .system-summary,
++  .system-menu-list,
+   .goal-tree-scope,
+   .decision-item {
+     transition: none;
++    animation: none;
+   }
+ }
+ /* Goal-first composition ends here. */
+--- a/src/hub/public/app.js
++++ b/src/hub/public/app.js
+@@ -5124,6 +5124,46 @@
+     if(mq.addEventListener) mq.addEventListener("change", workUpdateMobileBack);
+     else if(mq.addListener) mq.addListener(workUpdateMobileBack);
+   } catch(_){}
++}
++function systemMenuElement(){
++  return document.getElementById("fl-system-menu");
++}
++function systemMenuSummary(system){
++  return system ? system.querySelector("summary") : null;
++}
++function closeSystemMenu(opts){
++  var system = systemMenuElement();
++  if(!system || !system.open) return false;
++  system.open = false;
++  if(opts && opts.focusSummary){
++    var summary = systemMenuSummary(system);
++    if(summary && typeof summary.focus === "function") summary.focus();
++  }
++  return true;
++}
++function closeSystemMenuOnRouteSelection(){
++  closeSystemMenu();
++}
++function systemMenuEventIsInside(event){
++  var system = systemMenuElement();
++  if(!system || !event) return false;
++  var target = event.target;
++  return !!(target && system.contains(target));
++}
++function onSystemMenuPointerDown(event){
++  if(systemMenuEventIsInside(event)) return;
++  closeSystemMenu();
++}
++function onSystemMenuTouchStart(event){
++  if(systemMenuEventIsInside(event)) return;
++  closeSystemMenu();
++}
++function onSystemMenuEscape(event){
++  if(!event || event.key !== "Escape") return false;
++  var system = systemMenuElement();
++  if(!system || !system.open) return false;
++  closeSystemMenu({ focusSummary: true });
++  return true;
+ }
+ function workMobileBack(){
+   if(S.detail){
+@@ -19843,8 +19883,7 @@
+   $$("#fl-tabs [data-tab]").forEach(function(btn){
+     btn.addEventListener("click", function(){
+       var tab = btn.getAttribute("data-tab");
+-      var system = document.getElementById("fl-system-menu");
+-      if(system && SYSTEM_TABS.indexOf(tab) >= 0) system.open = false;
++      closeSystemMenuOnRouteSelection();
+       switchTab(tab);
+     });
+   });
+@@ -19853,7 +19892,10 @@
+     mobileBack.addEventListener("click", function(){ workMobileBack(); });
+   }
+   workBindViewportPresentation();
++  document.addEventListener("pointerdown", onSystemMenuPointerDown);
++  document.addEventListener("touchstart", onSystemMenuTouchStart);
+   document.addEventListener("keydown", function(e){
++    if(onSystemMenuEscape(e)) return;
+     if(e.key==="Escape"&&S.detail) hideDetail();
+   });
+   /* Native disclosures, the contained board, the real page scroll host, and
+--- a/tests/hub-responsive-layout.test.ts
++++ b/tests/hub-responsive-layout.test.ts
+@@ -242,6 +242,20 @@
+   assert.ok(html.includes("product-bar") && html.includes('data-tab="work"') && html.includes('data-tab="decisions"'));
+   assert.ok(html.includes("fl-system-menu") && html.includes('data-tab="model"') && html.includes('data-tab="limits"'));
+   assert.ok(html.includes('data-fl-role="mobile-back"'));
++  const productRow = html.slice(html.indexOf('class="product-bar"'), html.indexOf('class="workspace"'));
++  const pageRow = html.slice(html.indexOf('class="topbar"'), html.indexOf('id="main"'));
++  assert.ok(
++    productRow.includes("brand")
++      && productRow.includes('data-tab="work"')
++      && productRow.includes('data-tab="decisions"')
++      && productRow.includes("fl-system-menu"),
++    "product row is identity plus Work, Decision Center and System",
++  );
++  assert.ok(!productRow.includes("fl-mobile-back"), "Back is not a product-row sibling of the primary routes");
++  assert.ok(pageRow.includes('id="fl-mobile-back"') && pageRow.includes('id="fl-page-title"'),
++    "page row contains the existing Back control and the current page title");
++  assert.ok(!pageRow.includes("fl-system-menu") && !pageRow.includes('data-tab="work"'),
++    "primary routes stay in the product row");
+   const systemStart = html.indexOf('id="fl-system-menu"');
+   const systemEnd = html.indexOf("</details>", systemStart);
+   assert.ok(systemStart >= 0 && systemEnd > systemStart, "System disclosure ships");
+@@ -276,6 +290,13 @@
+   assert.ok(js.includes("function workApplyGoalFileStart("), "narrow Goal-file start helper ships");
+   assert.ok(js.includes("function workBindViewportPresentation("), "viewport presentation bind ships");
+   assert.ok(js.includes("workBindViewportPresentation()"), "init binds viewport presentation");
++  assert.ok(js.includes("function closeSystemMenu(") && js.includes("function onSystemMenuEscape("),
++    "System close and Escape helpers ship");
++  assert.ok(js.includes("closeSystemMenuOnRouteSelection()"), "route selection closes System");
++  assert.ok(js.includes('addEventListener("pointerdown", onSystemMenuPointerDown)'),
++    "outside pointer closes System");
++  assert.ok(js.includes('addEventListener("touchstart", onSystemMenuTouchStart)'),
++    "outside touch closes System");
+   const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+   for (const key of [
+     "navDecisions", "navSystem", "navLimits", "mobileBack", "goalTreeNow", "goalTreeHistory",
+@@ -1703,7 +1724,9 @@
+   const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+   const match = block.match(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`));
+   assert.ok(match, `${selector} is declared in the 760px shell`);
+-  return match[1];
++  const body = match == null ? undefined : match[1];
++  assert.ok(typeof body === "string", `${selector} rule body is a string`);
++  return body;
+ }
+ 
+ function declaredPx(body: string, property: string): number | null {
+@@ -1729,12 +1752,14 @@
+   const productBar = firstRuleBody(narrow, ".product-bar");
+   const topbar = firstRuleBody(narrow, ".topbar");
+   const combined = chromeRowHeight(productBar, "product bar") + chromeRowHeight(topbar, "page topbar");
+-  assert.ok(combined <= 112,
+-    `360/390 product plus page chrome is ${combined}px, which must be at most 112px`);
++  assert.ok(combined <= 96,
++    `360/390 product plus page chrome is ${combined}px, which must be at most 96px`);
+   assert.match(productBar, /flex-wrap:\s*nowrap/, "product row does not wrap into a utility grid");
+   assert.doesNotMatch(productBar, /overflow(?:-x|-y)?:\s*hidden/,
+     "product bar does not use overflow hidden to enforce height");
+   assert.match(topbar, /flex-wrap:\s*nowrap/, "page row stays a single horizontal line");
++  assert.doesNotMatch(topbar, /overflow(?:-x|-y)?:\s*hidden/,
++    "page row does not clip Back or the title to fake a fit");
+   assert.match(firstRuleBody(narrow, ".nav"), /overflow:\s*visible/,
+     "760px nav does not clip the System disclosure");
+   assert.doesNotMatch(firstRuleBody(narrow, ".nav"), /overflow-(?:x|y):\s*(?:hidden|auto)/,
+@@ -1743,6 +1768,13 @@
+     "760px primary routes scroll inside nav-scroll");
+   assert.match(firstRuleBody(narrow, ".system-menu"), /overflow:\s*visible/,
+     "narrow System menu can paint below the 48px bar");
++  const systemList = firstRuleBody(narrow, ".system-menu-list");
++  assert.match(systemList, /(?:right:\s*8px|right:\s*0)/, "System menu anchors to the viewport-fitting edge");
++  assert.match(systemList, /max-width:/, "System menu declares a bounded width");
++  assert.match(systemList, /max-height:/, "System menu declares a bounded height");
++  assert.match(systemList, /overflow-y:\s*auto/, "System menu scrolls vertically when needed");
++  assert.doesNotMatch(systemList, /overflow(?:-x)?:\s*hidden/,
++    "System menu fit is not overflow clipping");
+   const shell900At = css.search(/@media\s*\(max-width:\s*900px\)\s*\{\s*\.shell\s*\{/);
+   assert.ok(shell900At >= 0, "900px shell breakpoint ships");
+   const shell900 = css.slice(shell900At, css.indexOf("@media", shell900At + 10));
+@@ -1756,19 +1788,37 @@
+     "narrow chrome hides the brand subtitle");
+   assert.match(narrow, /\.page-sub\s*\{\s*display:\s*none/,
+     "narrow chrome hides the page subtitle");
++  assert.match(narrow, /\.top-meta\s*\{\s*display:\s*none/,
++    "phone chrome hides redundant top-meta chips");
++  assert.match(css, /\.top-meta\s*\{[\s\S]*?display:\s*flex/,
++    "desktop top-meta remains a visible meta row");
+   assert.match(firstRuleBody(narrow, ".page-title"), /white-space:\s*nowrap/,
+     "page title 工作 cannot wrap character-by-character");
+   assert.match(firstRuleBody(narrow, ".mobile-back"), /white-space:\s*nowrap/,
+     "Back 返回 cannot wrap character-by-character");
+   assert.match(narrow, /\.nav-item,[\s\S]*?\.system-summary\s*\{[^}]*white-space:\s*nowrap/,
+     "primary chrome labels stay on one line");
+-  assert.match(narrow, /\.shell\s*\{[^}]*overflow-x:\s*hidden/,
+-    "narrow shell does not leak horizontal overflow");
++  assert.match(css, /\.nav-label\s*\{[\s\S]*?white-space:\s*nowrap/,
++    "Work, Decision Center and System labels stay horizontal");
++  assert.doesNotMatch(narrow, /\.nav-label[\s\S]{0,80}display:\s*none/,
++    "the three primary route labels stay visible");
++  const compactAt = css.indexOf("@media (max-width: 359px)");
++  assert.ok(compactAt >= 0, "below-360 compact identity breakpoint ships");
++  const compactNext = css.indexOf("@media", compactAt + 10);
++  const compact = css.slice(compactAt, compactNext > 0 ? compactNext : css.length);
++  assert.match(compact, /\.brand-text\s*\{/, "below 360px the brand mark may replace visible brand text");
++  assert.doesNotMatch(compact, /\.brand-name[\s\S]{0,80}display:\s*none/,
++    "ForkLight remains present as the accessible product name");
++  assert.doesNotMatch(compact, /\.nav-label[\s\S]{0,80}display:\s*none/,
++    "below 360px the three route labels stay unhidden");
++  assert.ok(html.includes('class="brand-name">ForkLight</div>'),
++    "ForkLight remains the accessible product name");
+   const systemStart = html.indexOf('id="fl-system-menu"');
+   const system = html.slice(systemStart, html.indexOf("</details>", systemStart));
+   assert.ok(system.includes("theme-switch") && system.includes("lang-switch") && system.includes("conn-pill"),
+     "theme, language and connection truth remain reachable inside System");
+-  assert.doesNotMatch(html.slice(html.indexOf("product-utils")), /theme-switch|lang-switch|conn-pill/,
++  const pageRow = html.slice(html.indexOf('class="topbar"'), html.indexOf('id="main"'));
++  assert.doesNotMatch(pageRow, /theme-switch|lang-switch|conn-pill/,
+     "theme/language/connection are not permanent first-viewport rows");
+   assert.match(narrow, /\.work-portfolio[\s\S]*?max-height:\s*calc\(100dvh\s*-\s*132px\)/,
+     "narrow Goal Tree keeps its own scroll host");
+@@ -1796,4 +1846,146 @@
+     "Goal file narrative uses a readable measure");
+   assert.match(css, /\.decision-item-fact,[\s\S]*?max-width:\s*68ch/,
+     "Decision Center narrative uses a readable measure");
++});
++
++test("System closes on route, outside pointer/touch, and Escape with summary focus", async () => {
++  const js = await readFile(path.join(hubPublic, "app.js"), "utf8");
++  const helpers = [
++    extractFunctionSource(js, "systemMenuElement"),
++    extractFunctionSource(js, "systemMenuSummary"),
++    extractFunctionSource(js, "closeSystemMenu"),
++    extractFunctionSource(js, "closeSystemMenuOnRouteSelection"),
++    extractFunctionSource(js, "systemMenuEventIsInside"),
++    extractFunctionSource(js, "onSystemMenuPointerDown"),
++    extractFunctionSource(js, "onSystemMenuTouchStart"),
++    extractFunctionSource(js, "onSystemMenuEscape"),
++  ].join("\n");
++  const factory = new Function(
++    `${helpers}
++     var focused = null;
++     var prevented = false;
++     var summary = { focus: function(){ focused = "summary"; } };
++     var themeBtn = { id: "theme" };
++     var langBtn = { id: "lang" };
++     var routeBtn = { id: "route" };
++     var outside = { id: "outside" };
++     var system = {
++       open: true,
++       contains: function(node){
++         return node === summary || node === themeBtn || node === langBtn || node === routeBtn;
++       },
++       querySelector: function(sel){ return sel === "summary" ? summary : null; }
++     };
++     var document = {
++       getElementById: function(id){ return id === "fl-system-menu" ? system : null; }
++     };
++     var S = { tab: "work", theme: "light", lang: "zh", data: 1 };
++     function eventFor(target){
++       return {
++         target: target,
++         preventDefault: function(){ prevented = true; }
++       };
++     }
++     return {
++       system: system,
++       S: S,
++       focused: function(){ return focused; },
++       prevented: function(){ return prevented; },
++       reset: function(){ system.open = true; focused = null; prevented = false; },
++       closeRoute: closeSystemMenuOnRouteSelection,
++       pointerOutside: function(){ onSystemMenuPointerDown(eventFor(outside)); },
++       pointerInside: function(){ onSystemMenuPointerDown(eventFor(themeBtn)); },
++       touchOutside: function(){ onSystemMenuTouchStart(eventFor(outside)); },
++       touchInside: function(){ onSystemMenuTouchStart(eventFor(langBtn)); },
++       escape: function(){ return onSystemMenuEscape({ key: "Escape" }); },
++       otherKey: function(){ return onSystemMenuEscape({ key: "Tab" }); }
++     };`,
++  );
++  const api = factory() as {
++    system: { open: boolean };
++    S: { tab: string; theme: string; lang: string; data: number };
++    focused: () => string | null;
++    prevented: () => boolean;
++    reset: () => void;
++    closeRoute: () => void;
++    pointerOutside: () => void;
++    pointerInside: () => void;
++    touchOutside: () => void;
++    touchInside: () => void;
++    escape: () => boolean;
++    otherKey: () => boolean;
++  };
++
++  api.closeRoute();
++  assert.equal(api.system.open, false, "route selection closes System once");
++  assert.equal(api.S.tab, "work", "route helper does not itself change the tab");
++
++  api.reset();
++  api.pointerOutside();
++  assert.equal(api.system.open, false, "outside pointer closes System once");
++  assert.equal(api.focused(), null, "outside pointer does not steal summary focus");
++  api.reset();
++  api.pointerOutside();
++  assert.equal(api.system.open, false, "outside pointer still closes on a second open");
++
++  api.reset();
++  api.pointerInside();
++  assert.equal(api.system.open, true, "inside pointer leaves System open");
++  assert.equal(api.prevented(), false, "inside pointer does not prevent theme or route handlers");
++
++  api.reset();
++  api.touchOutside();
++  assert.equal(api.system.open, false, "outside touch closes System once");
++  api.reset();
++  api.touchInside();
++  assert.equal(api.system.open, true, "inside touch leaves System open");
++
++  api.reset();
++  assert.equal(api.escape(), true, "Escape handles an open System menu");
++  assert.equal(api.system.open, false, "Escape closes System once");
++  assert.equal(api.focused(), "summary", "Escape restores focus to the System summary");
++  assert.equal(api.S.tab, "work", "Escape does not change the route");
++  assert.equal(api.S.theme, "light", "Escape does not change theme");
++  assert.equal(api.S.lang, "zh", "Escape does not change language");
++  assert.equal(api.S.data, 1, "Escape does not change data");
++  api.reset();
++  api.escape();
++  assert.equal(api.system.open, false, "Escape still closes on a second open");
++  assert.equal(api.focused(), "summary", "Escape still restores summary focus");
++
++  api.reset();
++  assert.equal(api.otherKey(), false, "Tab does not take over System dismissal");
++  assert.equal(api.system.open, true, "non-Escape keys leave System open");
+ });
++
++test("System entrance and nav feedback are short, reduced-motion safe, and not decorative", async () => {
++  const css = await readFile(path.join(hubPublic, "app.css"), "utf8");
++  const goalFirst = css.slice(css.indexOf("/* Goal Tree, continuous Goal file"));
++  assert.ok(goalFirst.length > 0, "Goal-first CSS block ships");
++  const motionAt = goalFirst.lastIndexOf("@media (prefers-reduced-motion: no-preference)");
++  assert.ok(motionAt >= 0, "Goal-first motion is gated on no-preference");
++  const reduceAt = goalFirst.lastIndexOf("@media (prefers-reduced-motion: reduce)");
++  assert.ok(reduceAt > motionAt, "reduced-motion rules follow the allowed motion");
++  const motion = goalFirst.slice(motionAt, reduceAt);
++  assert.match(motion, /\.system-menu\[open\]\s*>\s*\.system-menu-list/,
++    "System entrance applies only while the disclosure is open");
++  assert.match(motion, /animation:\s*[\w-]+\s+14[0-6]ms/,
++    "System entrance uses a 120-160ms duration");
++  assert.match(motion, /\.nav-item,[\s\S]*?\.system-summary\s*\{[\s\S]*?transition:\s*background-color\s+14[0-6]ms/,
++    "navigation state feedback uses the same short color duration");
++  const keyframesAt = goalFirst.indexOf("@keyframes fl-system-menu-enter");
++  assert.ok(keyframesAt >= 0, "System entrance keyframes ship");
++  const keyframes = goalFirst.slice(keyframesAt, keyframesAt + 280);
++  assert.match(keyframes, /opacity:\s*0/, "entrance starts from opacity");
++  assert.match(keyframes, /translateY\(-6px\)/, "entrance uses a small vertical translation");
++  assert.doesNotMatch(keyframes, /scale\(|translateX\(|rotate\(/, "entrance does not scale, bounce, or slide content");
++  assert.doesNotMatch(motion, /infinite|cubic-bezier\([^)]*bounce|animation-iteration-count:\s*[2-9]/,
++    "new shell motion does not loop or bounce");
++  const reduce = goalFirst.slice(reduceAt);
++  assert.match(reduce, /\.system-menu-list[\s\S]*?animation:\s*none/,
++    "reduced-motion removes the System entrance");
++  assert.match(reduce, /\.nav-item[\s\S]*?transition:\s*none/,
++    "reduced-motion removes navigation transitions");
++  const baseMenu = css.slice(css.indexOf(".system-menu-list {"), css.indexOf(".system-menu-list .nav-item"));
++  assert.doesNotMatch(baseMenu, /animation:/, "System animation is not unconditional");
++});
+

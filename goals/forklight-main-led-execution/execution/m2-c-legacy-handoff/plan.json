@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "name": "M2-C authentic legacy handoff compatibility",
+  "objective": "Normalize the authentic old Competition handoff read shape at one durable boundary, preserve current origin semantics, fail closed on unreconstructable rows, and safely integrate the exact Candidate.",
+  "items": [
+    { "id": "legacy-handoff-compat", "task": "./01-compat.yaml", "dependsOn": [] },
+    { "id": "durable-read-audit", "task": "./02-durable-read-audit.yaml", "dependsOn": ["legacy-handoff-compat"] },
+    { "id": "lifecycle-chain-audit", "task": "./03-lifecycle-chain-audit.yaml", "dependsOn": ["durable-read-audit"] },
+    { "id": "mutation-boundary-audit", "task": "./04-mutation-boundary-audit.yaml", "dependsOn": ["lifecycle-chain-audit"] }
+  ]
+}

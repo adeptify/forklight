@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "family": "forklight-storage-lifecycle",
+  "taskClass": "m4-calibration-storage-lifecycle",
+  "directCodexProfileId": "codex-main-gpt-5.6-sol-xhigh-v1",
+  "outputPath": "goals/forklight-main-led-execution/evidence/m4-calibration/forklight-storage-lifecycle.json",
+  "acceptanceCommand": "node validate-artifact.mjs calibration-input.json goals/forklight-main-led-execution/evidence/m4-calibration/forklight-storage-lifecycle.json",
+  "task": "Classify the three M3-C2 Task workspaces from the supplied current storage previews. Preserve protected reusable evidence, identify only terminal regenerable space as reclaimable, and report that this calibration performed no reclaim.",
+  "evidence": {
+    "source": "current-forklight-storage-preview",
+    "items": [
+      {
+        "taskId": "bbec21f9-ae21-4bfd-9cc4-9476aea3f73a",
+        "taskStatus": "failed",
+        "classification": "protected",
+        "reason": "awaiting-required-review",
+        "nextAction": "protect-and-wait",
+        "reusablePartial": true,
+        "regenerableBytes": 142642665,
+        "durableBytes": 8996212,
+        "unknownBytes": 0,
+        "processCount": 0
+      },
+      {
+        "taskId": "588fc40f-afad-448e-8306-e05859166842",
+        "taskStatus": "failed",
+        "classification": "protected",
+        "reason": "awaiting-required-review",
+        "nextAction": "protect-and-wait",
+        "reusablePartial": false,
+        "regenerableBytes": 91769998,
+        "durableBytes": 146285,
+        "unknownBytes": 0,
+        "processCount": 0
+      },
+      {
+        "taskId": "68f16585-1fec-447c-8799-4867a4731b0f",
+        "taskStatus": "succeeded",
+        "classification": "reclaimable",
+        "reason": "integration-delivered",
+        "nextAction": "confirm-reclaim",
+        "reusablePartial": false,
+        "regenerableBytes": 145654052,
+        "durableBytes": 9841659,
+        "unknownBytes": 0,
+        "processCount": 0
+      }
+    ],
+    "storeIntegrity": {
+      "quickCheck": "ok",
+      "foreignKeyViolationCount": 0
+    }
+  },
+  "requiredProjection": {
+    "evidenceMode": "current-read-only",
+    "protectedTaskIds": [
+      "bbec21f9-ae21-4bfd-9cc4-9476aea3f73a",
+      "588fc40f-afad-448e-8306-e05859166842"
+    ],
+    "reclaimableTaskIds": [
+      "68f16585-1fec-447c-8799-4867a4731b0f"
+    ],
+    "reclaimExecuted": false
+  },
+  "sourceRefs": [
+    "goals/forklight-main-led-execution/evidence/m3-c2-infra-pause-decision-packet.md",
+    "goals/forklight-main-led-execution/evidence/m3-routing-graduation.md"
+  ]
+}

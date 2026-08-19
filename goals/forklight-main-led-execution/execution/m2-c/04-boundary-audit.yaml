@@ -1,0 +1,95 @@
+version: 2
+name: M2-C final privacy scope and real-preview readiness audit
+project: /Users/yijunwang/code/forklight
+taskClass: m2-storage-boundary-audit
+taskFamily: forklight-storage-lifecycle
+workerProfileId: grok-4-6-xhigh
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 0
+  reason: Read-only deterministic privacy and scope audit changes no product files.
+contract:
+  outcome: >-
+    Verify that integrated M2-C is safe for Main to run a real local storage preview: tests mutate
+    temporary homes only, durable and unknown content stays preserved, no forbidden mechanism or
+    Hub work appears, and no source change is produced.
+  presentation: { summary: 最终只读确认隐私、临时 Home、未知内容保留和真实预览就绪。, language: zh-CN }
+  context:
+    - This is the final read-only operational milestone after protection and public-surface audits pass.
+    - The accepted boundary is specs/m2-c-task-storage-lifecycle/spec.md; Main performs the real-home preview only after this gate.
+  inScope:
+    - Inspect path/process containment, temporary-home tests, durable/unknown preservation, bounded output, allowed paths, and absence of real-home or Hub mutation.
+  outOfScope:
+    - No edits, real-home preview or reclaim by this Worker, historical cleanup, Integration, settings mutation, Hub, commit, or push.
+  executionSteps:
+    - Inspect the exact integrated business paths and focused safety tests.
+    - Confirm all automated mutation targets are temporary homes and build output stays generated.
+    - Return the final bounded handoff for Main's real preview.
+  deliverables: [A read-only privacy, scope, and real-preview readiness result.]
+  modules:
+    - name: M2-C boundary audit
+      responsibility: Confirm local single-user safety, privacy, temporary test isolation, durable preservation, and allowed-path truth after Integration.
+      consumes: [Integrated source, accepted spec, Candidate and Integration evidence, and focused tests.]
+      produces: [A final bounded pass or named blocker for Main real preview.]
+      boundaries: [No product edit, reclaim, backup deletion, unknown deletion, distributed mechanism, or Hub.]
+  callChain:
+    - Public-surface audit passes.
+    - This isolated Task inspects integrated safety and scope.
+    - ForkLight runs the focused acceptance suite and diff check.
+    - Machine success completes the operational Goal and permits Main to run read-only real-home audit and preview.
+  scenarios:
+    - name: Boundary clean
+      given: M2-C is integrated and prior audits pass.
+      when: Privacy, path/process, temporary-home, durable, unknown, and forbidden-path boundaries are checked.
+      then: Goal completes with no source change and Main may run the real preview.
+    - name: Forbidden expansion
+      given: Real-home test mutation, unknown deletion, backup cleanup, Hub, distributed coordination, or private output appears.
+      when: Inspection or tests run.
+      then: The Task fails and Main receives the exact blocker without cleanup or scope expansion.
+  risks: [Generated build output and temporary test roots must not be confused with real reclaim evidence.]
+  changeBudget: { maxFiles: 1, maxDiffLines: 20 }
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: false
+  allowedCommands: []
+  focusPaths:
+    - src/core/storage-lifecycle.ts
+    - src/state/store.ts
+    - src/daemon
+    - src/cli.ts
+    - src/mcp/server.ts
+    - tests/storage-lifecycle.test.ts
+    - tests/store.test.ts
+    - tests/daemon.test.ts
+    - tests/daemon-cli.test.ts
+    - tests/mcp.test.ts
+    - docs/operations.md
+acceptance:
+  criteria:
+    - Tests mutate temporary ForkLight homes only and no read path mutates real or temporary lifecycle state.
+    - Durable and unknown content, Store rows, logs, Candidate, review, handoff, Integration, Token/routing, and backups remain preserved.
+    - Integrated business scope contains no Hub, backup cleanup, Store deletion, routing, Worker adapter, distributed coordination, generated dist, or unrelated change.
+    - No source file changes.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/storage-lifecycle.test.ts tests/store.test.ts tests/daemon.test.ts tests/daemon-cli.test.ts tests/mcp.test.ts
+    - git diff --check

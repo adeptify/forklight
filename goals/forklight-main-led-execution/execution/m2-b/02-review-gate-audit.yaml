@@ -1,0 +1,87 @@
+version: 2
+name: M2-B inspect post-Integration review requirement and gate
+project: /Users/yijunwang/code/forklight
+taskClass: m2-review-requirement-gate-audit
+taskFamily: forklight-quality-decision-chain
+workerProfileId: grok-4-6-xhigh
+executionPreference: auto
+contract:
+  outcome: Verify from integrated source that new Tasks can freeze explicit 0, 1, or 2-Judge requirements and that Integration enforces the current exact-revision Review Graph plus fresh Main decision, without editing files.
+  presentation:
+    summary: 合入后只读核对 0/1/2 Judge 合同和 exact-revision Integration gate。
+    language: zh-CN
+  context:
+    - Starts only after the M2-B implementation Candidate is safely integrated.
+    - The accepted Work Item remains specs/m2-b-quality-decision-chain/spec.md.
+  inScope:
+    - Inspect review-requirement parsing, legacy behavior, Review Graph authority, and Integration gate tests.
+  outOfScope:
+    - No edits, automatic Judge, Main decision, Integration, Hub, storage, routing, commit, or push.
+  executionSteps:
+    - Read the integrated focused modules and tests.
+    - Compare explicit 0/1/2 and legacy behavior against the accepted criteria.
+    - Report a bounded pass or exact mismatch.
+  deliverables:
+    - A read-only review-requirement and Integration-gate audit.
+  modules:
+    - name: Integrated review gate
+      responsibility: Expose frozen review policy and exact-revision gate truth without mutating it.
+      consumes: [Integrated Task parser, Review Graph projection, Integration preflight, and focused tests.]
+      produces: [A bounded pass or named mismatch.]
+      boundaries: [No duplicate exactness check, policy inference, or state mutation.]
+  callChain:
+    - Goal waits for M2-B safe Integration.
+    - This isolated read-only Task inspects the updated source.
+    - ForkLight runs the focused acceptance commands.
+    - Machine success releases the decision-packet audit once.
+  scenarios:
+    - name: Gate agrees
+      given: M2-B source is integrated.
+      when: 0, 1, 2, legacy, stale, pending, and fresh-decision cases are inspected.
+      then: The declared requirement is enforced exactly and no automatic review occurs.
+    - name: Gate mismatch
+      given: Any required review or legacy rule disagrees.
+      when: Inspection or tests run.
+      then: The Task fails with the exact mismatch and the Goal stops advancing.
+  risks:
+    - Read-only evidence must not be mistaken for a Main acceptance or Integration authorization.
+  changeBudget: { maxFiles: 1, maxDiffLines: 20 }
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: false
+  allowedCommands: []
+  focusPaths:
+    - src/core/types.ts
+    - src/core/task.ts
+    - src/core/review-graph.ts
+    - src/core/integration.ts
+    - tests/task.test.ts
+    - tests/review-graph.test.ts
+    - tests/integration.test.ts
+acceptance:
+  criteria:
+    - Integrated source and tests agree on explicit 0, 1, or 2 Judges, legacy absence, exact current revision, terminal assignment count, and fresh Main accept.
+    - No source file changes.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/task.test.ts tests/review-graph.test.ts tests/integration.test.ts
+    - git diff --check

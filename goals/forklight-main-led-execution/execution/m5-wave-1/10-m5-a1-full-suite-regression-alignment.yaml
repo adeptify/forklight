@@ -1,0 +1,137 @@
+version: 2
+name: M5-A1 full-suite privacy-guard alignment
+project: /Users/yijunwang/code/forklight
+taskClass: m5-a1-full-suite-regression-alignment
+taskFamily: forklight-product-graduation
+workerProfileId: grok-4-6-xhigh
+deliveryProfileId: forklight-self-upgrade
+executionPreference: auto
+routingDecision:
+  taskFamily: forklight-product-graduation
+  shortlist:
+    - provider: xai
+      model: grok-4.6
+      runtime: grok-build
+      effort: xhigh
+      workerProfileId: grok-4-6-xhigh
+  selectedWorker:
+    provider: xai
+    model: grok-4.6
+    runtime: grok-build
+    effort: xhigh
+    workerProfileId: grok-4-6-xhigh
+  selectedBecause:
+    code: user-specified
+    note: 一骏 has standing authorization to prefer Grok CLI 4.6 Xhigh native Goal for bounded ForkLight work; current matched health proves the runtime launchable.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+reviewRequirement:
+  requiredJudges: 1
+  reason: The Candidate is an exact two-test deterministic alignment, but one independent Judge must prove the credential/privacy guards became precise rather than weaker before Main Integration.
+contract:
+  outcome: Make the post-A1 full repository check green by precisely aligning two stale privacy-test expectations with the accepted public setup surface, without changing product behavior or weakening secret-value protection.
+  presentation:
+    summary: 修正两条误伤新设置入口的旧测试，同时保留真正的凭据防泄漏检查。
+    language: zh-CN
+  context:
+    - Read AGENTS.md and specs/m5-product-graduation/work-items/a1-full-suite-regression-alignment/spec.md completely before editing. The Spec is the sole accepted boundary.
+    - M5-A1 and A1Q are already safely integrated and activated. The milestone full check found exactly two legacy assertion failures after all accepted focused tests passed.
+    - The routing test currently scans all top-level help and mistakes the public setup `--endpoint` label for a routing leak. Preserve its routing flag and privacy purpose by narrowing the inspected subject.
+    - The Hub cache test bounds top-level status keys but omits the accepted privacy-safe `setup` projection. Add that public projection without removing credential-value or internal-diagnostic checks.
+    - Modify only the exact two allowed test files. Do not touch product code, docs, Hub assets, setup implementation, Goal/Spec/evidence or operational files.
+    - ForkLight serves one local developer. Add no hash, lock, lease, version handshake, duplicate validation system, multi-user or distributed behavior.
+    - Return handoff only in the final Worker response. Never commit, push, reset, integrate or reclaim.
+  inScope:
+    - Preserve routing flag documentation assertions while making the privacy check routing-specific.
+    - Admit the bounded A1 `setup` status key while preserving exact status-shape and content non-disclosure assertions.
+    - Run both affected test files, the A1 focused setup suite, diff validation and the full repository check.
+  outOfScope:
+    - Product changes, test deletion, weakened secret-value protection, broad cleanup, snapshots, docs, UI, A2/A3 or source Integration.
+    - Extra Attempt, correction, reverify, retry, adaptation, fallback, Competition, second Judge or replacement.
+  executionSteps:
+    - Reproduce and inspect the exact two failing assertions against current source.
+    - Make the smallest precise test-only edits that preserve each guard's stated security meaning.
+    - Run every accepted command and inspect the exact two-path diff.
+    - Return concise final-response-only evidence and stop.
+  deliverables:
+    - One exact two-test Candidate with no product behavior change.
+    - Passing focused A1 tests, affected-file tests, diff validation and full repository check.
+    - Final-response-only handoff explaining why each assertion remains meaningful.
+  modules:
+    - name: Routing help guard
+      responsibility: Check routing documentation and reject routing-only internal configuration without scanning unrelated setup help.
+      consumes: [Top-level help text, routing command block, existing routing flag assertions.]
+      produces: [Precise routing help assertions.]
+      boundaries: [No CLI implementation edit or global credential-label ban.]
+    - name: Cached setup projection guard
+      responsibility: Admit the new public setup member while continuing to bound cached status and reject credential values or diagnostics.
+      consumes: [Current `/api/status` shape and existing non-disclosure assertions.]
+      produces: [Updated exact public key assertion and optional bounded setup-shape assertion.]
+      boundaries: [No Hub/server/setup behavior edit.]
+  callChain:
+    - Current integrated A1 emits public setup option labels and a bounded setup status projection.
+    - The two legacy tests inspect those outputs using pre-A1 assumptions and fail.
+    - The Candidate narrows only the assumptions; ForkLight reruns focused and full validation.
+    - One independent Judge checks assertion meaning; Main alone may accept and integrate serially.
+  scenarios:
+    - name: Public setup labels coexist with routing safety
+      given: Top-level help contains routing flags and a separate setup `--endpoint` option.
+      when: The routing help test runs.
+      then: It validates routing flags and routing-only privacy without rejecting the unrelated safe label.
+    - name: Cached setup truth remains bounded
+      given: The `/api/status` response includes the A1 `setup` projection and no secret values.
+      when: The cache privacy test runs.
+      then: It accepts the named public field while still rejecting injected API-key values and internal diagnostics.
+  risks:
+    - A broad regex removal could weaken privacy evidence; the replacement must narrow scope, not remove the assertion.
+    - Updating an allow-list alone could miss unbounded nested data; retain the existing serialized content checks and add only focused shape evidence if required.
+  changeBudget:
+    maxFiles: 2
+    maxDiffLines: 80
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 60000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxWorkerValidationRepairs: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test, .forklight-boundary-capture, .forklight-receipt-retry, plans]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - tests/daemon-cli.test.ts
+    - tests/hub-health-cache.test.ts
+acceptance:
+  criteria:
+    - Routing flag assertions remain and routing-only help stays free of Provider endpoint, API-key and Keychain configuration details.
+    - The accepted public setup labels elsewhere in top-level help no longer cause the routing test to fail.
+    - Cached `/api/status` explicitly admits bounded `setup` truth while preserving exact top-level key bounding, fake-key non-disclosure and internal-diagnostic bans.
+    - Candidate changes exactly the two allowed test paths and no product behavior.
+    - All affected, A1-focused and full repository commands pass.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/daemon-cli.test.ts tests/hub-health-cache.test.ts
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/cli-setup.test.ts tests/setup-service.test.ts tests/hub-main-install.test.ts tests/main-install-skill.test.ts tests/hub-settings.test.ts
+    - git diff --check
+    - npm run check

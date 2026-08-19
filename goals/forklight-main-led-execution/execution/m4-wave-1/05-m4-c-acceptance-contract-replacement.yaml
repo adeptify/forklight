@@ -1,0 +1,157 @@
+version: 2
+name: M4-C acceptance-contract-only replacement
+project: /Users/yijunwang/code/forklight
+taskClass: m4-family-main-token-value-report-acceptance-replacement
+taskFamily: forklight-main-token-leverage
+workerProfileId: grok-4-6-xhigh
+executionPreference: auto
+routingDecision:
+  taskFamily: forklight-main-token-leverage
+  shortlist:
+    - provider: xai
+      model: grok-4.6
+      runtime: grok-build
+      effort: xhigh
+      workerProfileId: grok-4-6-xhigh
+  selectedWorker:
+    provider: xai
+    model: grok-4.6
+    runtime: grok-build
+    effort: xhigh
+    workerProfileId: grok-4-6-xhigh
+  selectedBecause:
+    code: user-specified
+    note: 一骏 explicitly revoked the prior no-replacement boundary and authorized exactly one acceptance-contract-only replacement using Grok 4.6 Xhigh native Goal.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+reviewRequirement:
+  requiredJudges: 2
+  reason: The exact family value report authorizes a Main Token claim surface; two fresh different-view Judges must inspect Candidate identity, claim gating and economics separation before Integration.
+runtime:
+  name: grok-build
+  executable: /Users/yijunwang/code/forklight/goals/forklight-main-led-execution/execution/m4-wave-1/m4-c-acceptance-replacement-bootstrap.mjs
+  effort: xhigh
+  maxBudgetUsd: null
+contract:
+  outcome: Materialize the exact already-verified M4-C final Candidate from two Workspace-local patches, make zero Worker edits, replace the contradictory post-Candidate bootstrap check with an applied-state proof, and deliver through ForkLight verification, two fresh Judges and Main serial Integration.
+  presentation:
+    summary: 复用已通过全部产品测试的最终M4-C，只修验收阶段，不重写任何产品或测试代码。
+    language: zh-CN
+  context:
+    - Read AGENTS.md, specs/m4-c-family-value-report/spec.md, specs/m4-c-family-value-report/work-items/acceptance-contract-only-replacement/spec.md and goals/forklight-main-led-execution/evidence/m4-c-final-recovery-stop-decision-packet.md completely. They are the unique accepted boundary.
+    - Tasks 89e60adc-d9ca-4560-9940-b423698c51f0 and 812df915-788c-463c-8ee0-208d71ff9d58 are immutable and protected. Never read sibling Task paths, resume, correct, reverify or modify them.
+    - The Main-owned wrapper has already materialized the exact final Candidate from two Workspace-local patches before Grok starts. Inspect it and make no Workspace edits.
+    - This is one fresh Grok 4.6 Xhigh current-model-only native Goal; never claim continuity with an earlier Goal.
+    - ForkLight serves one local developer. Digest/path/source checks only prevent wrong Candidate/source-base reuse; add no checksum system, lock, lease, version handshake or distributed coordination.
+    - One base Attempt, zero extra Attempt, validation repair, Main correction, reverify, adaptation, fallback or further replacement. Any failure is final.
+  inScope:
+    - Read the accepted boundary and inspect the already materialized exact ten-path Candidate.
+    - Confirm the Candidate implements the parent M4-C report and the behavior-based CLI test without editing any file.
+    - Complete native Goal truth and hand off zero-Worker-edit evidence for independent verification.
+  outOfScope:
+    - Any product, test, Goal, Spec, evidence, seed, wrapper or configuration edit.
+    - Store/schema/report behavior change, new field/reason, hidden pair selection, calibration, model ranking, Competition, Hub/UI, commit, push or reset.
+    - Worker command execution, retry, correction, repair, adaptation, model switch, fallback or replacement.
+  executionSteps:
+    - Read the exact accepted Work Item and relevant ten-path Candidate.
+    - Verify by inspection that the materialized Candidate matches the accepted M4-C behavior and test correction.
+    - Make zero edits and complete the native Goal with a concise handoff.
+  deliverables:
+    - Exact ten-path M4-C Candidate with zero Worker edits.
+    - Native Goal terminal achieved truth and concise inspection handoff.
+    - Passing independent post-application proof, build, 343-test suite and diff validation.
+  modules:
+    - name: Exact Candidate materialization
+      responsibility: Main-owned wrapper applies the retained seed and final single-test delta before model work.
+      consumes: [Workspace-local base seed, Workspace-local final test delta, matching source base.]
+      produces: [Exact final ten-path Candidate.]
+      boundaries: [No sibling Task read, no product logic generation.]
+    - name: Read-only native Goal inspection
+      responsibility: Grok inspects the accepted Candidate and completes honest Goal truth without Workspace edits.
+      consumes: [Accepted spec, exact final Candidate.]
+      produces: [Zero-edit handoff and terminal achieved Goal.]
+      boundaries: [No Workspace Write/Edit, Bash, fallback or model switch.]
+    - name: Applied-state acceptance
+      responsibility: ForkLight verifies the Candidate after materialization without reapplying it.
+      consumes: [Marker, two seeds, Candidate diff.]
+      produces: [Path/reverse-check, build, behavior-test and diff evidence.]
+      boundaries: [No source mutation or manual Integration.]
+  callChain:
+    - ForkLight snapshots current source, both local seeds and the wrapper.
+    - Wrapper validates and materializes the exact Candidate, then launches Grok native Goal.
+    - Grok performs read-only inspection and completes with zero edits.
+    - ForkLight independently verifies applied-state identity and all M4-C behavior.
+    - Two fresh Judges inspect the exact Revision; Main alone accepts and integrates.
+  scenarios:
+    - name: Exact acceptance replacement passes
+      given: Both seeds match the current source base and accepted final Revision.
+      when: Grok completes read-only inspection and ForkLight verifies post-application state.
+      then: The exact ten-path Candidate proceeds to dual review and Main Integration.
+    - name: Candidate or source mismatch stops
+      given: A seed digest, path, source base or post-application byte differs.
+      when: Bootstrap or independent acceptance runs.
+      then: The Task fails before Integration and no replacement follows.
+    - name: Worker attempts an edit
+      given: The Worker Workspace is explicitly read-only.
+      when: Grok attempts Write/Edit or terminal mutation.
+      then: ForkLight denies it and the final Candidate cannot be accepted as exact.
+  risks:
+    - Reapplying a clean-source test after materialization would repeat the prior false failure; acceptance uses reverse/post-state proof only.
+    - Reimplementation could regress already passing behavior; the Worker is read-only and the wrapper materializes the exact accepted bytes.
+  changeBudget:
+    maxFiles: 10
+    maxDiffLines: 1930
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 60000
+  fileLimit: null
+  fileLimitMode: warn
+  changedLineLimit: null
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxWorkerValidationRepairs: 0
+  maxConcurrency: 1
+  completionMode: warn
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: warn
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test, .forklight-boundary-capture, .forklight-receipt-retry, plans]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: false
+  allowedCommands: []
+  focusPaths:
+    - src/cli.ts
+    - src/core/main-token-value-report.ts
+    - src/daemon/coordinator.ts
+    - src/daemon/protocol.ts
+    - src/daemon/server.ts
+    - src/mcp/server.ts
+    - tests/daemon-cli.test.ts
+    - tests/daemon.test.ts
+    - tests/main-token-value-report.test.ts
+    - tests/mcp.test.ts
+acceptance:
+  criteria:
+    - Both exact Workspace-local seeds materialize the already verified final ten-path Candidate on the matching source base.
+    - Grok 4.6 Xhigh uses one current-model-only native Goal and makes zero Workspace edits.
+    - Post-application proof validates exactly ten paths, the final test delta and the other nine retained paths without applying the Candidate twice.
+    - All parent M4-C claim, missing-evidence, economics-separation, privacy, read-only and public-surface behavior remains unchanged.
+    - Build, 343 focused tests and diff validation pass; two fresh Judges and Main serial safe Integration complete the chain.
+  commands:
+    - node goals/forklight-main-led-execution/execution/m4-wave-1/m4-c-acceptance-replacement-postapply.test.mjs
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/main-token-usage.test.ts tests/main-token-pair.test.ts tests/main-token-value-report.test.ts tests/task-economics-report.test.ts tests/daemon.test.ts tests/daemon-cli.test.ts tests/mcp.test.ts
+    - git diff --check

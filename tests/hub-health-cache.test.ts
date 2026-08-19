@@ -837,16 +837,26 @@ test("cache: cached responses do not include credentials, raw commands, or new i
     // /api/status body keys are bounded: settings, modelCatalog, modelRouting, workerProfiles,
     // workerReadiness,
     // prerequisites, providers, bounded readiness provenance, runtimes, mains,
-    // daemon, versionJourney, checkedAt.
+    // setup, daemon, versionJourney, checkedAt.
     const keys = Object.keys(first.body as Record<string, unknown>).sort();
     assert.deepEqual(keys, [
       "checkedAt", "daemon", "mains", "modelCatalog", "modelRouting", "prerequisites",
       "providerReadinessSource", "providerReadinessSourceDetail", "providers",
       "runtimeReadinessSource", "runtimeReadinessSourceDetail", "runtimes",
-      "settings", "versionJourney", "workerProfiles",
+      "settings", "setup", "versionJourney", "workerProfiles",
       "workerReadiness",
     ]);
     const body = first.body as Record<string, unknown>;
+    const setup = body.setup as Record<string, unknown> | null | undefined;
+    assert.equal(typeof setup, "object");
+    assert.ok(setup !== null && setup !== undefined);
+    assert.deepEqual(Object.keys(setup).sort(), [
+      "fact", "main", "nextAction", "provider", "ready", "reason", "worker",
+    ]);
+    assert.equal(typeof setup.fact, "string");
+    assert.equal(typeof setup.reason, "string");
+    assert.equal(typeof setup.nextAction, "object");
+    assert.ok(setup.nextAction !== null);
     assert.ok(body.providerReadinessSource === "daemon" || body.providerReadinessSource === "local-fallback");
     assert.equal(typeof body.providerReadinessSourceDetail, "string");
     assert.ok(body.runtimeReadinessSource === "daemon" || body.runtimeReadinessSource === "local-fallback");

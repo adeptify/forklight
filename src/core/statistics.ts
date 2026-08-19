@@ -15,6 +15,7 @@ import type {
   FrozenWorkerIdentity,
   MainReviewDecisionKind,
   RemediationDisposition,
+  ResolvedExecutionMode,
   RoutingDecisionSnapshot,
   TaskRecord,
   TaskStatus,
@@ -867,10 +868,49 @@ export interface RoutingBudgetEvidence {
   envelope: RoutingBudgetEnvelope | null;
 }
 
+/** Closed token for a missing frozen Task execution mode. Never inferred. */
+export const LEGACY_UNKNOWN_EXECUTION_MODE = "legacy-unknown" as const;
+
+/** Frozen execution mode, or the closed unknown token when the Task omitted one. */
+export type StrategyExecutionMode = ResolvedExecutionMode | typeof LEGACY_UNKNOWN_EXECUTION_MODE;
+
+/** How routing evidence is grouped. `full-worker` is the existing Worker ranking
+ *  identity and must stay mode-free. `full-worker-mode` is the parallel
+ *  strategy identity and never borrows samples across modes. */
+export type RoutingIdentityMode = "provider-model" | "full-worker" | "full-worker-mode";
+
+/** Report a stored execution mode only when it is one of the three frozen
+ *  values. Missing or unrecognized values stay `legacy-unknown`. */
+export function frozenStrategyExecutionMode(
+  spec: { executionMode?: unknown } | undefined,
+): StrategyExecutionMode {
+  const mode = spec?.executionMode;
+  return mode === "single-run" || mode === "persistent-session" || mode === "native-goal"
+    ? mode
+    : LEGACY_UNKNOWN_EXECUTION_MODE;
+}
+
+/** Shared derivation/lookup key for one comparable execution strategy. */
+export function strategyIdentityKey(
+  provider: string,
+  model: string,
+  runtime: string,
+  effort: string,
+  executionMode: StrategyExecutionMode,
+): string {
+  return `${provider}\0${model}\0${runtime}\0${effort}\0${executionMode}`;
+}
+
 /** Privacy-safe, exact-task-class evidence for one provider/model. */
 export interface RoutingEvidence {
   provider: string;
   model: string;
+  /** Present for full-worker and full-worker-mode rows. */
+  runtime?: string;
+  /** Present for full-worker and full-worker-mode rows. */
+  effort?: string;
+  /** Present only on mode-aware rows. Missing frozen mode is `legacy-unknown`. */
+  executionMode?: StrategyExecutionMode;
   /** All terminal Tasks observed for this exact class, including evidence that
    * is intentionally ignored for model-quality routing. */
   terminalTaskCount: number;
@@ -1107,8 +1147,9 @@ export interface DeriveRoutingEvidenceInput {
   /** Durable applied Integration presence — legacy delivery evidence. */
   hasAppliedIntegration?: (taskId: string) => boolean;
   /** New decisions compare the complete frozen Worker identity. Legacy callers
-   * may explicitly aggregate by provider/model. */
-  identityMode?: "provider-model" | "full-worker";
+   * may explicitly aggregate by provider/model. `full-worker-mode` is the
+   * parallel strategy identity and is never used for existing Worker ranking. */
+  identityMode?: RoutingIdentityMode;
 }
 
 function officialCostUnavailableReason(attempt: AttemptRecord): string {
@@ -1127,6 +1168,10 @@ export function deriveRoutingEvidence(input: DeriveRoutingEvidenceInput): Map<st
   const groups = new Map<string, TaskEvidence[]>();
   for (const item of input.history) {
     if (!isTerminalTaskStatus(item.task.status)) continue;
+    if (input.identityMode === "full-worker-mode"
+      && isReviewGraphReviewerTaskFile(item.task.taskFile)) {
+      continue;
+    }
     if (useFamily) {
       if (item.task.spec.taskFamily !== input.taskFamily) continue;
     } else {
@@ -1134,19 +1179,52 @@ export function deriveRoutingEvidence(input: DeriveRoutingEvidenceInput): Map<st
     }
     const providerModel = item.task.spec.provider.name + "\0" + item.task.spec.provider.model;
     const runtime = item.task.spec.runtime;
-    if (input.identityMode === "full-worker" && runtime === undefined) continue;
-    const key = input.identityMode === "full-worker"
-      ? providerModel + "\0" + runtime!.name + "\0" + runtime!.effort
-      : providerModel;
+    if (
+      (input.identityMode === "full-worker" || input.identityMode === "full-worker-mode")
+      && runtime === undefined
+    ) {
+      continue;
+    }
+    const key = input.identityMode === "full-worker-mode"
+      ? strategyIdentityKey(
+          item.task.spec.provider.name,
+          item.task.spec.provider.model,
+          runtime!.name,
+          runtime!.effort,
+          frozenStrategyExecutionMode(item.task.spec),
+        )
+      : input.identityMode === "full-worker"
+        ? providerModel + "\0" + runtime!.name + "\0" + runtime!.effort
+        : providerModel;
     groups.set(key, [...(groups.get(key) ?? []), item]);
   }
 
   const result = new Map<string, RoutingEvidence>();
   for (const [key, items] of groups) {
-    const [provider = "", model = ""] = key.split("\0");
+    const parts = key.split("\0");
+    const provider = parts[0] ?? "";
+    const model = parts[1] ?? "";
+    const runtimeName = parts[2];
+    const effortName = parts[3];
+    const modeToken = parts[4];
     const evidence: RoutingEvidence = {
       provider,
       model,
+      ...(input.identityMode === "full-worker" || input.identityMode === "full-worker-mode"
+        ? {
+            runtime: runtimeName ?? "",
+            effort: effortName ?? "",
+          }
+        : {}),
+      ...(input.identityMode === "full-worker-mode"
+        ? {
+            executionMode: modeToken === "single-run"
+              || modeToken === "persistent-session"
+              || modeToken === "native-goal"
+              ? modeToken
+              : LEGACY_UNKNOWN_EXECUTION_MODE,
+          }
+        : {}),
       terminalTaskCount: items.length,
       relevantSampleCount: 0,
       modelQualityFailureCount: 0,
@@ -1675,7 +1753,7 @@ export class StatisticsService {
    *  Tasks.  Read-only — never mutates state. */
   routingEvidence(
     taskClass: string,
-    identityMode: "provider-model" | "full-worker" = "provider-model",
+    identityMode: RoutingIdentityMode = "provider-model",
   ): Map<string, RoutingEvidence> {
     const history = this.store.listTasks()
       .filter((task) => isTerminalTaskStatus(task.status))
@@ -1708,7 +1786,7 @@ export class StatisticsService {
    *  Direct Codex Token calibration. */
   routingEvidenceByFamily(
     taskFamily: string,
-    identityMode: "provider-model" | "full-worker" = "provider-model",
+    identityMode: RoutingIdentityMode = "provider-model",
   ): Map<string, RoutingEvidence> {
     // Collect all terminal tasks (deriveRoutingEvidence filters by family inside).
     const history = this.store.listTasks()
@@ -1734,6 +1812,17 @@ export class StatisticsService {
       hasAppliedIntegration: (taskId) =>
         this.store.listIntegrationResults(taskId).some((result) => result.status === "applied"),
     });
+  }
+
+  /** Mode-aware exact-class evidence. Parallel to Worker ranking; never
+   *  merges execution modes or infers a missing frozen mode. */
+  modeAwareRoutingEvidence(taskClass: string): Map<string, RoutingEvidence> {
+    return this.routingEvidence(taskClass, "full-worker-mode");
+  }
+
+  /** Mode-aware family evidence. Complete-set fallback only. */
+  modeAwareRoutingEvidenceByFamily(taskFamily: string): Map<string, RoutingEvidence> {
+    return this.routingEvidenceByFamily(taskFamily, "full-worker-mode");
   }
 
   /**

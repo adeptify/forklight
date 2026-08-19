@@ -27,9 +27,9 @@ import {
 import { assessIntegrationFeasibility, type IntegrationFeasibility } from "./integration-feasibility.js";
 import type { ForkLightSettings, TaskPolicy } from "./settings.js";
 import {
+  executionCapabilitiesForRuntime,
   executionModeFromTaskSpec,
   executionPreferenceFromTaskSpec,
-  nativeGoalSupportForRuntime,
 } from "./execution-mode.js";
 import { loadTaskSpec } from "./task.js";
 import {
@@ -67,6 +67,7 @@ import type {
   ResolvedExecutionMode,
   TaskBackground,
   TaskRecord,
+  TaskReviewRequirement,
   TaskSpec,
 } from "./types.js";
 import type { RuntimeName } from "./runtime-names.js";
@@ -114,7 +115,14 @@ export interface SafeTaskAdmissionPreview {
     mode: ResolvedExecutionMode;
     /** Whether the selected Runtime proves a native Goal contract. */
     nativeGoalSupported: boolean;
+    /** Whether the selected Runtime proves a Task-bound persistent Session. */
+    persistentSessionSupported: boolean;
   };
+  /**
+   * Frozen Main-declared review depth when the Task file names one.
+   * Absent for legacy files; never invented as skip or a default count.
+   */
+  reviewRequirement?: TaskReviewRequirement;
   budget: {
     maxBudgetUsd: number | null;
     unlimited: boolean;
@@ -146,9 +154,10 @@ export interface SafeTaskAdmissionPreview {
   classificationAdvice: ClassificationAdvice;
   /**
    * Privacy-safe pre-submit routing explanation: why this Worker was selected,
-   * how many candidates were compared, aggregate historical evidence, and the
-   * recorded Competition intent. Detached from mutable Task data, derived only
-   * from the frozen Task-file routingDecision and resolved selection, and never
+   * how many candidates were compared, aggregate historical evidence, the
+   * recorded Competition intent, and the frozen advisory/Main relationship
+   * when recorded. Detached from mutable Task data, derived only from the
+   * frozen Task-file routingDecision and resolved selection, and never
    * enters previewRevisionDigest.
    */
   routingExplanation: SafeRoutingExplanation;
@@ -373,11 +382,18 @@ export function projectSafeTaskAdmissionPreview(
     model: spec.provider.model,
     runtime: spec.runtime.name,
     effort: spec.runtime.effort,
-    execution: {
-      preference: executionPreferenceFromTaskSpec(spec),
-      mode: executionModeFromTaskSpec(spec),
-      nativeGoalSupported: nativeGoalSupportForRuntime(spec.runtime.name),
-    },
+    execution: (() => {
+      const capabilities = executionCapabilitiesForRuntime(spec.runtime.name);
+      return {
+        preference: executionPreferenceFromTaskSpec(spec),
+        mode: executionModeFromTaskSpec(spec),
+        nativeGoalSupported: capabilities.nativeGoalSupported,
+        persistentSessionSupported: capabilities.persistentSessionSupported,
+      };
+    })(),
+    ...(spec.reviewRequirement === undefined
+      ? {}
+      : { reviewRequirement: { ...spec.reviewRequirement } }),
     budget: {
       maxBudgetUsd,
       unlimited: maxBudgetUsd === null,
@@ -441,6 +457,12 @@ function projectAdmissionRevisionFacts(input: {
       maxBudgetUsd: spec.runtime.maxBudgetUsd,
       executionPreference: spec.executionPreference ?? "single-run",
       executionMode: spec.executionMode ?? "single-run",
+      reviewRequirement: spec.reviewRequirement === undefined
+        ? null
+        : {
+          requiredJudges: spec.reviewRequirement.requiredJudges,
+          reason: spec.reviewRequirement.reason,
+        },
     },
     policy: {
       values,
@@ -575,8 +597,20 @@ export function formatTaskAdmissionPreviewHuman(preview: SafeTaskAdmissionPrevie
   lines.push(`Effort: ${preview.effort}`);
   lines.push(
     `Execution: requested=${preview.execution.preference} resolved=${preview.execution.mode}`
-    + ` (native Goal ${preview.execution.nativeGoalSupported ? "supported" : "unsupported"})`,
+    + ` (native Goal ${preview.execution.nativeGoalSupported ? "supported" : "unsupported"}`
+    + `, persistent session ${preview.execution.persistentSessionSupported ? "supported" : "unsupported"})`,
   );
+  if (preview.reviewRequirement === undefined) {
+    lines.push("Review requirement: (legacy — none declared)");
+  } else if (preview.reviewRequirement.requiredJudges === 0) {
+    lines.push(
+      `Review requirement: explicit skip (0) — ${preview.reviewRequirement.reason}`,
+    );
+  } else {
+    lines.push(
+      `Review requirement: ${preview.reviewRequirement.requiredJudges} judge(s) — ${preview.reviewRequirement.reason}`,
+    );
+  }
   lines.push(
     preview.budget.unlimited
       ? "Budget: unlimited"

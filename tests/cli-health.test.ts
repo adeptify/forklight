@@ -135,9 +135,35 @@ test("canonical resolver and CLI adapter agree for every Worker Profile", () => 
   assert.deepEqual(adapter, canonical);
 });
 
+test("Grok 4.6 Xhigh health projects native-goal and legacy Grok stays single-run", () => {
+  const results = readiness({ xai: "verified" });
+  const grok46 = results.find((r) => r.workerId === "grok-4-6-xhigh");
+  assert.ok(grok46, "expected saved Grok 4.6 Xhigh Worker");
+  assert.equal(grok46!.runtime, "grok-build");
+  assert.equal(grok46!.provider, "xai");
+  assert.equal(grok46!.model, "grok-4.6");
+  assert.equal(grok46!.executionPreference, "auto");
+  assert.equal(grok46!.resolvedExecutionMode, "native-goal");
+  const legacyGrok = results.find((r) => r.workerId === "grok-builder");
+  assert.ok(legacyGrok);
+  assert.equal(legacyGrok!.executionPreference, "single-run");
+  assert.equal(legacyGrok!.resolvedExecutionMode, "single-run");
+  const projected = projectWorkerReadinessJson(results);
+  const json46 = projected.find((entry) => entry.workerId === "grok-4-6-xhigh");
+  assert.equal(json46?.resolvedExecutionMode, "native-goal");
+  const jsonLegacy = projected.find((entry) => entry.workerId === "grok-builder");
+  assert.equal(jsonLegacy?.resolvedExecutionMode, "single-run");
+  const human = humanWorkerReadinessLines(results);
+  assert.match(human, /grok-4-6-xhigh \(Grok 4\.6 Xhigh\)/);
+  assert.match(human, /execution: auto -> native-goal/);
+  assert.match(human, /execution: single-run -> single-run/);
+  assert.equal(describeReason("persistent-session-unsupported"),
+    "the Runtime cannot prove a persistent Session for the forced mode");
+});
+
 test("saved MiniMax Worker with verified evidence is ready and can launch", () => {
   const results = readiness({ minimax: "verified", xai: "verified" });
-  assert.equal(results.length, 4);
+  assert.equal(results.length, 5);
   const minimaxWorker = results.find((r) => r.workerId === "minimax-builder");
   assert.ok(minimaxWorker, "expected MiniMax Worker to exist");
   assert.equal(minimaxWorker!.state, "ready");
@@ -246,6 +272,7 @@ test("results preserve saved Worker Profile order from the settings snapshot", (
   const ids = results.map((r) => r.workerId);
   assert.deepEqual(ids, [
     "default",
+    "grok-4-6-xhigh",
     "volcengine-glm52-1m",
     "minimax-builder",
     "grok-builder",
@@ -400,6 +427,7 @@ test("human workers section preserves saved order", () => {
   const lines = humanWorkerReadinessLines(results);
   const orderedIds = [
     "default",
+    "grok-4-6-xhigh",
     "volcengine-glm52-1m",
     "minimax-builder",
     "grok-builder",

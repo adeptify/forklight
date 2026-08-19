@@ -1,0 +1,62 @@
+version: 2
+name: M2-C audit reclaim disconnect and no-replay boundary
+project: /Users/yijunwang/code/forklight
+taskClass: m2-storage-reclaim-no-replay-boundary-audit
+taskFamily: forklight-storage-lifecycle
+workerProfileId: default
+executionPreference: auto
+reviewRequirement:
+  requiredJudges: 0
+  reason: Read-only deterministic final safety audit changes no files and executes no storage mutation.
+contract:
+  outcome: Verify the integrated observation-window fix cannot cancel, retry, replay, recreate, or decide storage reclaim and added no asynchronous state, Store migration, or coordination mechanism.
+  presentation: { summary: 最终只读核对断连不取消、不重放、不扩张状态系统。, language: zh-CN }
+  context:
+    - Starts only after integrated timeout and CLI/MCP parity audits pass.
+    - The real timed-out invocation completed durably; elapsed observation is never operation truth.
+  inScope:
+    - Inspect socket failure behavior, daemon dispatch count, timeout resolver diff, and accepted source boundary.
+  outOfScope:
+    - No edits, real-home access, deletion, Store mutation, retry experiment, Integration, Judge, Hub, commit, or push.
+  executionSteps:
+    - Confirm daemonExchange still writes one request and timeout only destroys the observer socket.
+    - Confirm no reconnect, retry, cancellation command, new durable operation state, migration, or coordination primitive was added.
+    - Run approved commands and return pass or one exact blocker for M2-C graduation.
+  deliverables: [One final no-replay and scope verdict.]
+  modules:
+    - name: Observer failure boundary
+      responsibility: Audit that observation lifecycle remains separate from daemon operation truth.
+      consumes: [Integrated socket client, method timeout mapping, and tests.]
+      produces: [Pass or one exact unsafe replay/cancel path.]
+      boundaries: [No mutation, retry execution, storage logic, or new state.]
+  callChain:
+    - Client dispatches once and waits.
+    - Response, error or timeout settles only that socket observer.
+    - Durable daemon work remains authoritative; final audit returns Main to M2-C evidence.
+  scenarios:
+    - name: Observer ends without operation mutation
+      given: A client disconnects or its observation expires after dispatch.
+      when: Integrated failure handling is inspected.
+      then: The socket closes and no cancel, retry, replay, recreation, or result claim occurs.
+    - name: Scope expansion stops
+      given: The Candidate adds asynchronous storage state, Store migration, lock, lease, checksum, handshake, or unrelated path.
+      when: Exact diff and tests are inspected.
+      then: The audit fails and M2-C remains open.
+  risks: [A hidden retry around a destructive method is a blocker even if tests pass.]
+  changeBudget: { maxFiles: 1, maxDiffLines: 20 }
+advancedPolicy: { maxDurationMs: null, observedTokenCeiling: null, noProgressTimeoutMs: null, fileLimit: null, fileLimitMode: warn, changedLineLimit: null, changedLineLimitMode: warn, baseMaxAttempts: 1, maxExtraAttempts: 0, maxMainCorrections: 0, maxMainReverifications: 0, maxConcurrency: 1, completionMode: warn, changeBudgetMode: warn, maxAdaptationRounds: 0 }
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: false
+  allowedCommands: []
+  focusPaths: [src/daemon/client.ts, src/daemon/protocol.ts, tests/daemon.test.ts]
+acceptance:
+  criteria:
+    - Integrated observer timeout settles only the client socket; no replay/cancel/new state/scope expansion or source change exists.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/daemon.test.ts
+    - git diff --check

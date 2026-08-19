@@ -1,0 +1,118 @@
+version: 2
+name: M3-C1 freeze each Competition candidate execution truth
+project: /Users/yijunwang/code/forklight
+taskClass: m3-competition-candidate-execution-truth
+taskFamily: forklight-execution-strategy
+workerProfileId: grok-4-6-xhigh
+executionPreference: auto
+routingDecision:
+  taskFamily: forklight-execution-strategy
+  shortlist:
+    - provider: xai
+      model: grok-4.6
+      runtime: grok-build
+      effort: xhigh
+      workerProfileId: grok-4-6-xhigh
+    - provider: deepseek
+      model: deepseek-v4-pro[1M]
+      runtime: claude-code
+      effort: high
+      workerProfileId: default
+  selectedWorker:
+    provider: xai
+    model: grok-4.6
+    runtime: grok-build
+    effort: xhigh
+    workerProfileId: grok-4-6-xhigh
+  selectedBecause:
+    code: user-specified
+    note: This new execution-strategy family has no comparable routing history. Main follows the user's Grok-first preference after a current Grok 4.6 Xhigh smoke without claiming a historical recommendation.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+reviewRequirement:
+  requiredJudges: 2
+  reason: Candidate execution-mode leakage would corrupt future routing evidence and unsupported modes must fail before any durable Competition mutation, so two independent views are required.
+contract:
+  outcome: Make every saved-Profile Competition candidate freeze its own execution preference and resolved execution mode instead of inheriting the source Task mode, with unsupported forced modes rejected all-or-nothing before any durable mutation.
+  presentation: { summary: Competition 中每个候选都按自己的 Runtime 和 Profile 决定执行模式，不再继承源 Task 的旧模式。, language: zh-CN }
+  context:
+    - Read specs/m3-c-strategy-policy-learning/work-items/competition-execution-truth/spec.md completely before editing; it is the unique accepted child Work Item.
+    - Inspect only src/core/competition.ts, tests/competition.test.ts and existing execution-mode definitions needed as read-only input. Do not scan unrelated files or history.
+    - cloneSpecFromIdentity already replaces provider/model/Runtime/effort/Profile but may retain source executionPreference and executionMode.
+    - Reuse authoritative execution-mode resolution and existing all-or-nothing admission. Add no new setting, schema, Store field or strategy scorer.
+    - This Task is path-orthogonal to M3-A. Do not touch its routing, Daemon, CLI, MCP or test paths.
+    - ForkLight serves one local developer. Add no lock, lease, checksum, hash, handshake, migration or distributed coordination.
+  inScope:
+    - Resolve each saved Profile candidate's own execution preference against its Runtime capability during Competition admission.
+    - Freeze the resolved preference and mode on the candidate Task.
+    - Reject a forced unsupported candidate mode before any Task, event, Competition, snapshot, Workspace or Provider launch.
+    - Strengthen mixed-Runtime and atomic-admission tests with exact execution truth.
+  outOfScope:
+    - Routing response, statistics, strategy recommendation, Task routingDecision schema, Review Graph, Judge policy, Daemon/CLI/MCP/Hub, Provider Runtime, Store schema, real Competition, commit, push or reset.
+  executionSteps:
+    - Trace saved-Profile Competition admission, cloneSpecFromIdentity and existing execution-mode resolution.
+    - Implement the smallest candidate-local resolution before persistence.
+    - Extend focused tests for auto, explicit preference and unsupported all-or-nothing failure.
+    - Run all accepted commands and inspect the exact two-path diff.
+  deliverables:
+    - Exact two-path Candidate.
+    - Focused proof that source mode cannot leak and unsupported forced modes persist nothing.
+    - Concise handoff naming the reused resolver and preserved Competition behavior.
+  modules:
+    - name: Candidate execution materialization
+      responsibility: Resolve and freeze one candidate Profile's execution preference and Runtime-supported mode.
+      consumes: [Source Task Contract, admitted candidate Profile, candidate Runtime capability.]
+      produces: [Candidate Task Spec with candidate-owned executionPreference and executionMode.]
+      boundaries: [No public schema, new setting, source Task mutation or strategy scoring.]
+    - name: Competition atomicity regression
+      responsibility: Prove unsupported execution preference fails before any durable or filesystem side effect.
+      consumes: [Competition coordinator test Store, candidate Profiles and Runtime registry.]
+      produces: [Focused deterministic assertions for zero Task/event/Competition/snapshot/Workspace/launch.]
+      boundaries: [No real Provider or project Competition.]
+  callChain:
+    - Main submits a reasoned Competition with saved Worker Profiles.
+    - Admission resolves every Profile and candidate Runtime capability before persistence.
+    - Each candidate Task freezes its own preference/mode, or the whole request fails with no mutation.
+    - Existing isolated Candidate execution, ranking, Main decision and Integration behavior continues unchanged.
+  scenarios:
+    - name: Mixed Runtime auto modes
+      given: Source Task and two candidate Profiles resolve auto through different Runtime capabilities.
+      when: Competition candidates are materialized.
+      then: Each candidate freezes its own Runtime-supported mode rather than the source mode.
+    - name: Candidate explicit preference wins
+      given: A saved candidate Profile explicitly requests a supported mode different from the source Task.
+      when: Admission resolves the candidate.
+      then: The Profile preference and resolved mode are frozen on that candidate.
+    - name: Unsupported forced mode is atomic
+      given: One candidate Profile forces a mode its Runtime does not support.
+      when: Main submits the Competition.
+      then: Admission fails before every Task, event, Competition, snapshot, Workspace and Provider launch.
+  risks:
+    - Resolving after persistence would leave partial Candidates; resolution must remain within pre-mutation admission.
+    - Reimplementing capability rules could drift Task/handoff truth; reuse the existing resolver.
+  changeBudget: { maxFiles: 2, maxDiffLines: 220 }
+advancedPolicy: { maxDurationMs: null, observedTokenCeiling: null, noProgressTimeoutMs: null, workerStopGraceMs: 60000, fileLimit: null, fileLimitMode: warn, changedLineLimit: null, changedLineLimitMode: warn, baseMaxAttempts: 1, maxExtraAttempts: 0, maxMainCorrections: 1, maxMainReverifications: 1, maxWorkerValidationRepairs: 1, maxConcurrency: 1, completionMode: warn, changeBudgetMode: warn, maxAdaptationRounds: 0 }
+completionPolicy: { noChangeMode: hard, changeBudgetMode: warn }
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, .forklight-dev, .forklight-daemon-test, .forklight-boundary-capture, .forklight-receipt-retry, plans]
+  generatedPaths: [dist/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/competition.ts
+    - tests/competition.test.ts
+acceptance:
+  criteria:
+    - Each saved-Profile candidate freezes its own provider/model/Runtime/effort/Profile/execution preference and resolved mode.
+    - Unsupported forced mode rejects the full request before any durable, filesystem or Provider side effect.
+    - Existing Competition source snapshot, network/billing/advanced policy, ranking, Main decision and legacy candidate behavior remain unchanged.
+    - Candidate changes only src/core/competition.ts and tests/competition.test.ts.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/competition.test.ts
+    - git diff --check
