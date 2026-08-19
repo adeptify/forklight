@@ -3931,12 +3931,7 @@ function renderOutcomeComposer(options){
     cancelBtn.type = "button";
     cancelBtn.setAttribute("data-fl-role", "work-create-cancel");
     if(S.outcomeSubmitting) cancelBtn.disabled = true;
-    cancelBtn.addEventListener("click", function(){
-      if(S.outcomeSubmitting) return;
-      S.workCreateTarget = null;
-      S.outcomeCreateError = null;
-      render();
-    });
+    cancelBtn.addEventListener("click", function(){ workCloseCreateTarget(target); });
     actions.appendChild(cancelBtn);
   }
   var submitBtn = h("button", "btn primary outcome-submit", S.outcomeSubmitting
@@ -7191,6 +7186,23 @@ function workCreateTargetEqual(left, right){
     && String(left.goalId || "") === String(right.goalId || "")
     && String(left.planId || "") === String(right.planId || "");
 }
+function workFocusCreateTrigger(target){
+  if(!viewEl || !target) return;
+  var buttons = viewEl.querySelectorAll('[data-fl-role="work-tree-add-' + target.shape + '"]');
+  for(var i = 0; i < buttons.length; i += 1){
+    if(String(buttons[i].getAttribute("data-goal-id") || "") !== String(target.goalId || "")) continue;
+    if(String(buttons[i].getAttribute("data-plan-id") || "") !== String(target.planId || "")) continue;
+    if(typeof buttons[i].focus === "function") buttons[i].focus();
+    return;
+  }
+}
+function workCloseCreateTarget(target){
+  if(S.outcomeSubmitting) return;
+  S.workCreateTarget = null;
+  S.outcomeCreateError = null;
+  render();
+  setTimeout(function(){ workFocusCreateTrigger(target); }, 0);
+}
 function workOpenCreateTarget(target){
   if(!target || ["goal", "plan", "task"].indexOf(target.shape) < 0) return;
   S.workCreateTarget = {
@@ -7213,6 +7225,7 @@ function renderWorkCreateButton(label, target, className){
   button.type = "button";
   button.setAttribute("data-fl-role", "work-tree-add-" + target.shape);
   button.setAttribute("data-create-shape", target.shape);
+  button.setAttribute("aria-expanded", workCreateTargetEqual(S.workCreateTarget, target) ? "true" : "false");
   if(target.goalId) button.setAttribute("data-goal-id", String(target.goalId));
   if(target.planId) button.setAttribute("data-plan-id", String(target.planId));
   button.addEventListener("click", function(e){
