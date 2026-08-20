@@ -35,10 +35,13 @@ For ordinary new Tasks (not throwaway demos), supply both on `forklight_validate
 
 ### Select a Worker and record the decision
 
-1. Shortlist only **genuinely considered ready** Worker Profiles (user preference, capability, risk). Do not list every configured model.
-2. When **at least two** Workers are plausible, you may call read-only `forklight_model_routing` with the exact `taskClass`, candidates, and optional `taskFamily`. Skip routing when only one Worker is honestly under consideration.
-3. Choose one Worker (`workerProfileId` and/or `provider` / `model` / `runtime` / `effort`). Honor standing user Provider preferences when they apply.
-4. On validate/submit, include an explicit **`routingDecision`** snapshot:
+1. Call read-only `forklight_worker_catalog` before choosing, unless the user has already fixed one exact Worker and no selection judgment remains. Read each saved identity and optional `assignmentGuidance`.
+2. Treat `assignmentGuidance` as the user's advice to **Main** about task fit. Consider it together with the Task, explicit user preferences, capability, risk and current readiness. It does not force an unavailable Worker or override Main's judgment.
+3. Never copy, quote or paraphrase `assignmentGuidance` into the Task Contract, `context`, `executionSteps`, Worker prompt or correction message. The selected Worker never receives it as execution input.
+4. Shortlist only **genuinely considered ready** Worker Profiles. Do not list every configured model.
+5. When **at least two** Workers are plausible, you may call read-only `forklight_model_routing` with the exact `taskClass`, candidates, and optional `taskFamily`. Skip routing when only one Worker is honestly under consideration.
+6. Choose one Worker (`workerProfileId` and/or `provider` / `model` / `runtime` / `effort`). Honor standing user Provider preferences when they apply.
+7. On validate/submit, include an explicit **`routingDecision`** snapshot:
    - `shortlist`: frozen identities actually considered
    - `selectedWorker`: must match the resolved Task Worker identity
    - `selectedBecause`: bounded `code` + plain-language `note`

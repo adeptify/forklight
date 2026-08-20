@@ -19,6 +19,7 @@ import {
   upsertWorkerProfile,
   validateWorkerProfile,
   validateWorkerProfilesSettings,
+  WORKER_ASSIGNMENT_GUIDANCE_MAX_CHARS,
   type WorkerProfile,
 } from "../src/core/worker-profiles.js";
 import {
@@ -118,6 +119,58 @@ test("legacy provider+model worker profiles still resolve", () => {
   assert.equal(resolved.provider, "qwen");
   assert.equal(resolved.model, "qwen3.7-plus");
   assert.equal(resolved.maxBudgetUsd, 0.2);
+});
+
+test("Worker assignment guidance is normalized, bounded, and never enters Worker execution", () => {
+  const settings = cloneDefaults();
+  const marker = "MAIN_ONLY_ASSIGNMENT_MARKER";
+  const profile = validateWorkerProfile({
+    id: "guided-worker",
+    label: "Guided Worker",
+    assignmentGuidance: `  ${marker}\nPrefer for focused Core repairs.  `,
+    runtime: "claude-code",
+    modelConfigId: "deepseek-flash",
+  }, "workerProfile", settings.modelCatalog);
+  assert.equal(profile.assignmentGuidance, `${marker}\nPrefer for focused Core repairs.`);
+
+  const blank = validateWorkerProfile({
+    ...profile,
+    assignmentGuidance: "   \n  ",
+  }, "workerProfile", settings.modelCatalog);
+  assert.equal(blank.assignmentGuidance, undefined, "blank guidance removes the optional field");
+
+  assert.throws(
+    () => validateWorkerProfile({
+      ...profile,
+      assignmentGuidance: "x".repeat(WORKER_ASSIGNMENT_GUIDANCE_MAX_CHARS + 1),
+    }, "workerProfile", settings.modelCatalog),
+    /assignmentGuidance must be ≤ 1200 chars/,
+  );
+
+  const workerProfiles = upsertWorkerProfile(
+    settings.workerProfiles,
+    profile,
+    settings.modelCatalog,
+  );
+  const resolved = resolveWorkerSelection({ workerProfileId: profile.id }, {
+    execution: settings.execution,
+    providerDefaults: settings.providerDefaults,
+    workerProfiles,
+    modelCatalog: settings.modelCatalog,
+  });
+  assert.equal("assignmentGuidance" in resolved, false);
+
+  const doc = inlineTask({
+    name: "guided task",
+    project: "/tmp/proj",
+    contract: baseContract as never,
+    focusPaths: ["src"],
+    acceptance: { criteria: ["ok"], commands: ["true"] },
+    workerProfileId: profile.id,
+    allowEdits: true,
+  }, { ...settings, workerProfiles });
+  assert.equal(JSON.stringify(doc).includes(marker), false);
+  assert.equal(doc.workerProfileId, profile.id);
 });
 
 test("Codex Worker profile enforces the model-specific supported effort", () => {

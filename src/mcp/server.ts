@@ -74,7 +74,7 @@ import {
 } from "../core/backup.js";
 
 const SERVER_INSTRUCTIONS =
-  "ForkLight runs bounded external coding Workers (runtimes: claude-code default, optional grok-build with provider xai). The Main agent may be Claude Code, Grok Build, OpenCode, Codex, or a human using CLI/Console — not Codex-only. Before submit, the Main agent must align the solution and provide a complete Task Contract covering outcome, scope, execution, modules, call chain, scenarios, risks, and independent acceptance. Validate first. Submit returns immediately. Prefer forklight_wait over tight-loop status. Use forklight_list for progress-aware boards. Status may include failureCategory authentication|budget|runtime|contract-infeasible. Worker runtime is chosen by task.runtime (or defaultRuntime), independent of which Main client is connected. Record taskId for continuity across Main sessions. The Main agent remains accountable for review and user approvals. Never call ForkLight a native subagent of the Main product, and never use it to commit or push.";
+  "ForkLight runs bounded external coding Workers (runtimes: claude-code default, optional grok-build with provider xai). The Main agent may be Claude Code, Grok Build, OpenCode, Codex, or a human using CLI/Console — not Codex-only. Before submit, the Main agent must align the solution and provide a complete Task Contract covering outcome, scope, execution, modules, call chain, scenarios, risks, and independent acceptance. Before choosing a Worker, read forklight_worker_catalog and consider its user-authored assignmentGuidance as Main-only advice; never forward that text into Worker input. Validate first. Submit returns immediately. Prefer forklight_wait over tight-loop status. Use forklight_list for progress-aware boards. Status may include failureCategory authentication|budget|runtime|contract-infeasible. Worker runtime is chosen by task.runtime (or defaultRuntime), independent of which Main client is connected. Record taskId for continuity across Main sessions. The Main agent remains accountable for review and user approvals. Never call ForkLight a native subagent of the Main product, and never use it to commit or push.";
 
 const moduleContractSchema = z.object({
   name: z.string().min(1),
@@ -388,6 +388,51 @@ export function createForkLightMcpServer(home = forklightHome()): McpServer {
             ? {}
             : { identityAction: "Rebuild and restart ForkLight daemon and MCP before changes" }
         ),
+      });
+    },
+  );
+
+  server.registerTool(
+    "forklight_worker_catalog",
+    {
+      title: "List saved Workers for Main assignment",
+      description:
+        "Read the saved Worker catalog before Main chooses a Worker. Returns exact safe execution identity, default status, and optional user-authored assignmentGuidance. Guidance is advisory to Main only: never copy it into the Task Contract or Worker prompt. This tool never calls a Provider, launches work, ranks Workers, or mutates settings.",
+      inputSchema: z.object({}),
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async () => {
+      await ensureDaemon(home);
+      const settings = await daemonRequest<ForkLightSettings>("settings_get", {}, home);
+      const workers = settings.workerProfiles.profiles.map((profile) => {
+        const resolved = resolveWorkerSelection(
+          { workerProfileId: profile.id },
+          {
+            execution: settings.execution,
+            providerDefaults: settings.providerDefaults,
+            workerProfiles: settings.workerProfiles,
+            modelCatalog: settings.modelCatalog,
+          },
+        );
+        return {
+          workerProfileId: profile.id,
+          label: profile.label,
+          runtime: resolved.runtime,
+          provider: resolved.provider,
+          model: resolved.model,
+          effort: resolved.effort,
+          isDefault: profile.id === settings.workerProfiles.defaultProfileId,
+          ...(profile.executionPreference === undefined
+            ? {}
+            : { executionPreference: profile.executionPreference }),
+          ...(profile.assignmentGuidance === undefined
+            ? {}
+            : { assignmentGuidance: profile.assignmentGuidance }),
+        };
+      });
+      return textAndData({
+        defaultWorkerProfileId: settings.workerProfiles.defaultProfileId,
+        workers,
       });
     },
   );

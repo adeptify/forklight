@@ -472,6 +472,9 @@ export class ForkLightDaemon {
     switch (request.method) {
       case "health":
         return this.coordinator.health();
+      case "identity":
+        // Envelope already carries serverIdentity; never load environment health.
+        return {};
       case "validate_file":
         return this.coordinator.validateFile(requiredString(params.taskFile, "taskFile"));
       case "reuse_task_class":

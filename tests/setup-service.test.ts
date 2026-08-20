@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { selectLocalAccountName } from "../src/core/config.js";
 import { SettingsService } from "../src/core/settings.js";
+import { upsertWorkerProfile } from "../src/core/worker-profiles.js";
 import { SetupService } from "../src/setup/service.js";
 import type { SetupKeychainStore, SetupSystemInspector } from "../src/setup/types.js";
 import { StateStore } from "../src/state/store.js";
@@ -238,6 +239,22 @@ test("built-in Workers are listable and selectable without file editing", async 
   assert.equal(settings.get().workerProfiles.defaultProfileId, "grok-4-6-xhigh");
   assert.equal(settings.get().execution.defaultProvider, "xai");
   assert.notEqual(settings.get().workerProfiles.defaultProfileId, before.workerProfiles.defaultProfileId);
+});
+
+test("Worker list projects optional Main assignment guidance", async () => {
+  const { service, settings } = await fixture();
+  const current = settings.get();
+  settings.update({
+    workerProfiles: upsertWorkerProfile(current.workerProfiles, {
+      id: "guided-setup",
+      label: "Guided Setup Worker",
+      assignmentGuidance: "Prefer for focused configuration work.",
+      runtime: "claude-code",
+      modelConfigId: "deepseek-flash",
+    }, current.modelCatalog),
+  });
+  const worker = service.listWorkers().find((item) => item.id === "guided-setup");
+  assert.equal(worker?.assignmentGuidance, "Prefer for focused configuration work.");
 });
 
 test("invalid Worker ids explain the choice and write no settings", async () => {

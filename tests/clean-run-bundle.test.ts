@@ -1123,6 +1123,34 @@ test("package script declares bundle:clean operator command", async () => {
   assert.ok(pkg.scripts?.["bundle:clean"]?.includes("build-clean-run-bundle"));
 });
 
+test("first-Task runbook section uses Work hierarchy, not retired Overview", () => {
+  const runbook = readFileSync(path.join(root, "docs", "m1-clean-user-runbook.md"), "utf8");
+  const start = runbook.indexOf("### 5.");
+  const end = runbook.indexOf("\n### ", start + 1);
+  assert.ok(start >= 0 && end > start, "section 5 is a bounded heading slice");
+  const section = runbook.slice(start, end);
+
+  assert.match(section, /Work/);
+  assert.match(section, /New Goal/);
+  assert.match(section, /Add Plan/);
+  assert.match(section, /Add Task/);
+  assert.doesNotMatch(section, /Overview/);
+  assert.doesNotMatch(section, /Run your first real Task/);
+  assert.doesNotMatch(section, /运行你的第一个真实任务/);
+  assert.match(section, /提案|proposal/i);
+  assert.match(section, /明确确认/);
+  assert.match(section, /工作才开始/);
+  assert.match(section, /普通 Task Detail/);
+  const withoutYamlProhibition = section.replace(
+    /(?:不要|不得|无需|不必|不能|不可|不)[^。\n]{0,24}(?:编写|撰写|手写|创建|编辑)[^。\n]{0,16}(?:YAML|JSON)/g,
+    "",
+  );
+  assert.doesNotMatch(
+    withoutYamlProhibition,
+    /(?:编写|撰写|手写|创建|编辑)\s*(?:YAML|JSON)/,
+  );
+});
+
 function capturedForklightHomes(commands: CommandSpec[]): string[] {
   return commands
     .map((spec) => spec.env?.FORKLIGHT_HOME)

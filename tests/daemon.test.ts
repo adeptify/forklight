@@ -101,11 +101,14 @@ process.on("SIGTERM", () => {});
 
 const REVISE_PROBE = "forklight-revise-PROBE-MARKER-2026";
 
-test("identity matching protects state changes but lets a new build stop an old daemon", () => {
+test("identity matching protects state changes but lets a new build stop an old daemon", async () => {
   assert.equal(requiresMatchingBuildIdentity("settings_update"), true);
   assert.equal(requiresMatchingBuildIdentity("integration_apply"), true);
   assert.equal(requiresMatchingBuildIdentity("shutdown"), false);
+  assert.equal(requiresMatchingBuildIdentity("activation_handoff_shutdown"), false);
   assert.equal(requiresMatchingBuildIdentity("health"), false);
+  assert.equal(requiresMatchingBuildIdentity("identity"), false);
+  assert.equal(requiresMatchingBuildIdentity("checkpoint_start"), true);
   // Task-file admission preview is read-only; submit and draft-class reuse are mutating.
   assert.equal(requiresMatchingBuildIdentity("validate_file"), false);
   assert.equal(requiresMatchingBuildIdentity("submit_file"), true);
@@ -129,6 +132,76 @@ test("identity matching protects state changes but lets a new build stop an old 
   assert.equal(requiresMatchingBuildIdentity("main_token_assess"), true);
   assert.equal(requiresMatchingBuildIdentity("main_token_pair_report"), false);
   assert.equal(requiresMatchingBuildIdentity("main_token_value_report"), false);
+
+  const current = currentBuildIdentity();
+  const withRecordingStub = async (
+    serverIdentity: ReturnType<typeof currentBuildIdentity>,
+    run: (methods: string[], home: string) => Promise<void>,
+    failIdentity?: string,
+  ): Promise<void> => {
+    const home = await mkdtemp(path.join(tmpdir(), "fl-id-stub-"));
+    const methods: string[] = [];
+    const server = net.createServer((socket) => {
+      let buffer = "";
+      socket.on("data", (chunk: Buffer) => {
+        buffer += chunk.toString();
+        const newline = buffer.indexOf("\n");
+        if (newline === -1) return;
+        const request = JSON.parse(buffer.slice(0, newline)) as { id: string; method: string };
+        methods.push(request.method);
+        const identityUnknown = failIdentity !== undefined && request.method === "identity";
+        socket.end(`${JSON.stringify({
+          id: request.id,
+          ok: !identityUnknown,
+          ...(identityUnknown ? { error: failIdentity } : { result: {} }),
+          serverIdentity,
+        })}\n`);
+      });
+    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(daemonSocketPath(home), resolve);
+      });
+      await run(methods, home);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(home, { recursive: true, force: true });
+    }
+  };
+
+  await withRecordingStub(current, async (methods, home) => {
+    await daemonRequest("settings_reset", {}, home);
+    assert.deepEqual(methods, ["identity", "settings_reset"]);
+    assert.ok(!methods.includes("health"));
+  });
+
+  await withRecordingStub({ ...current, buildId: "stale-daemon-build" }, async (methods, home) => {
+    await assert.rejects(
+      () => daemonRequest("settings_reset", {}, home),
+      { message: "ForkLight build mismatch; rebuild and restart before changes" },
+    );
+    assert.deepEqual(methods, ["identity"]);
+  });
+
+  await withRecordingStub(
+    { ...current, protocolVersion: PROTOCOL_VERSION - 1 },
+    async (methods, home) => {
+      await assert.rejects(
+        () => daemonRequest("settings_reset", {}, home),
+        { message: "ForkLight protocol mismatch; rebuild and restart before changes" },
+      );
+      assert.deepEqual(methods, ["identity"]);
+    },
+  );
+
+  await withRecordingStub(current, async (methods, home) => {
+    await assert.rejects(
+      () => daemonRequest("settings_reset", {}, home),
+      { message: "Unknown daemon method: identity" },
+    );
+    assert.deepEqual(methods, ["identity"]);
+  }, "Unknown daemon method: identity");
 });
 
 test("coordinator storage audit is read-only and reclaim requires current eligibility", async () => {
@@ -1028,7 +1101,45 @@ test("daemon exposes identity, warns on read mismatch, and blocks stale mutation
   const daemon = new ForkLightDaemon(home, 0);
   await daemon.start();
   const current = currentBuildIdentity();
+  const coordinator = (daemon as unknown as {
+    coordinator: { health: () => Record<string, unknown> };
+  }).coordinator;
+  let healthCalls = 0;
+  const originalHealth = coordinator.health.bind(coordinator);
+  coordinator.health = () => {
+    healthCalls += 1;
+    return originalHealth();
+  };
   try {
+    const identity = await daemonExchange("identity", {}, home);
+    assert.equal(identity.ok, true);
+    assert.deepEqual(identity.serverIdentity, current);
+    const identityResult = identity.result as Record<string, unknown>;
+    assert.deepEqual(identityResult, {});
+    assert.equal("providers" in identityResult, false);
+    assert.equal("providerVerification" in identityResult, false);
+    assert.equal("runtimes" in identityResult, false);
+    assert.doesNotMatch(JSON.stringify(identityResult), /keychain|credential/i);
+    assert.equal(healthCalls, 0);
+
+    const staleIdentity = await daemonExchange(
+      "identity",
+      {},
+      home,
+      { ...current, buildId: "stale-client-build" },
+    );
+    assert.equal(staleIdentity.ok, true);
+    assert.match(staleIdentity.warning ?? "", /rebuild|restart/i);
+    assert.deepEqual(staleIdentity.serverIdentity, current);
+    assert.equal(healthCalls, 0);
+
+    const identityViaRequest = await daemonRequest<Record<string, unknown>>("identity", {}, home);
+    assert.deepEqual(identityViaRequest, {});
+    assert.equal("providers" in identityViaRequest, false);
+    assert.equal("providerVerification" in identityViaRequest, false);
+    assert.equal("runtimes" in identityViaRequest, false);
+    assert.equal(healthCalls, 0);
+
     const staleRead = await daemonExchange(
       "health",
       {},
@@ -1038,6 +1149,12 @@ test("daemon exposes identity, warns on read mismatch, and blocks stale mutation
     assert.equal(staleRead.ok, true);
     assert.match(staleRead.warning ?? "", /rebuild|restart/i);
     assert.deepEqual(staleRead.serverIdentity, current);
+    const health = staleRead.result as Record<string, unknown>;
+    assert.ok("providers" in health);
+    assert.ok("providerVerification" in health);
+    assert.ok("runtimes" in health);
+    assert.ok("buildIdentity" in health);
+    assert.equal(healthCalls, 1);
 
     const staleMutation = await daemonExchange(
       "settings_reset",
@@ -1056,6 +1173,9 @@ test("daemon exposes identity, warns on read mismatch, and blocks stale mutation
     );
     assert.equal(protocolMutation.ok, false);
     assert.match(protocolMutation.error ?? "", /protocol mismatch/i);
+
+    await daemonRequest("settings_reset", {}, home);
+    assert.equal(healthCalls, 1);
   } finally {
     await daemon.close();
   }

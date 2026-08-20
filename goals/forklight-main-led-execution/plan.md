@@ -862,12 +862,28 @@ Focused entry audit and accepted Work Items are now frozen at
    The incumbent dark configuration console is an anti-reference. The accepted composition is a
    GoalBoard-family light product shell with searchable Goal Tree, continuous Goal execution file,
    Now/History separation, one Decision Center, contextual technical detail and plain-language
-   fact/reason/next copy. Status: stopped before Judges/Integration because the final Candidate still
-   exceeds the 390/360px viewport; the frozen contract permits no further replacement.
+   fact/reason/next copy. Status: graduated after the reopened Main-direct human-acceptance
+   revision. Work now reads as one Goal document with a structural outline: desired result,
+   current truth and next action lead; current Plan and Task form its active chapter; only real
+   decisions or blockers receive first-screen weight. Contextual creation and Task-detail
+   continuity are retained without backend or truth-contract changes. The later bounded live-audit
+   refinement is also accepted: only the selected Goal and current Plan path open by default;
+   parallel siblings stay visible but folded instead of expanding the entire current Store into the
+   first screen. The later complete-Hub pass also accepts route-start continuity, a human-first
+   model catalog, a plain-language Limits form and an overview-first Delivery catalog without
+   changing any saved execution policy or delivery profile. The accepted Main-only Worker
+   assignment-guidance supplement adds one optional saved description, a read-only Main catalog
+   and explicit non-injection into Worker execution; it does not add automatic ranking or
+   assignment. Main delivered the supplement directly with 202/202 focused cross-layer checks and
+   436/436 six-file Hub acceptance.
 5. **M5-C — human/visual graduation**:
    [`spec.md`](../../specs/m5-product-graduation/work-items/human-acceptance/spec.md), depends on B.
    It owns desktop/mobile, 10-second comprehension and unfamiliar-developer 30-minute evidence.
-   Status: dependency-held.
+   Status: technical preparation complete, external human gate pending. The two-path current-Work
+   runbook repair passed its Worker, independent verification, ordinary Judge, Main review and
+   serial Integration chain; a fresh verified clean bundle is frozen. The timed journey and
+   comprehension gate still require a genuinely unfamiliar operator in a disposable clean
+   environment.
 
 The chain is serial. A1 and A2 overlap `src/cli.ts` and public-surface tests; A3 consumes both final
 contracts; B waits for the functional freeze; C observes the integrated final product. Main owns
@@ -876,9 +892,11 @@ bootstrap, same-Judge repair, serial Integrations and 3123-test full check are r
 `evidence/m5-a1-graduation.md`. M5-A2 is also graduated: its native-Goal delivery, independent
 verification, corrected read-only/late-owner safety, two usable Judges, safe Integration, 3140-test
 full check and temp-Home round trip are recorded in `evidence/m5-a2-graduation.md`. M5-A3 later
-graduated through `evidence/clean-clone-run.md`. M5-B is now stopped at its final accepted
-mobile-shell gate; M5-C remains held, and no new wave is ready without an explicit Main contract
-decision.
+graduated through `evidence/clean-clone-run.md`. M5-B's first Main-direct result and the later
+user-friendly Goal-document revision remain one durable delivery record in
+`evidence/m5-b-main-direct-user-view-delivery.md`; the reopened human-acceptance gap is now closed.
+M5-C may finish its already-running orthogonal documentation repair and then freeze the final
+observation package. Crossing beyond M5 still waits for 一骏.
 
 M5-A3 has since stopped after its sole post-fix clean-bundle run repeated the same non-publishing
 `cleanup-failed` terminal. The integrated two-path stale-PID guard, independent verification, two
@@ -927,23 +945,60 @@ wave automatically. A Work Item stops on acceptance or on the evidence-based sto
 the Goal; non-blocking findings go to Later. At the Milestone boundary, update evidence and wait
 for 一骏 before crossing.
 
-Current M5-B serial unit: the structural-mobile Writer Task stopped only at the native Goal
-terminal join. Its exact Workspace passes Main build and 424 focused tests, but Grok's host-owned
-completion classifier canceled both productive reviewers at 599,996ms and returned unknown Goal
-status, so ForkLight correctly produced no Revision or verification. The next unit is not another
-UI implementation: it materializes the exact seven-path output and uses Grok's documented legacy
-model-facing `/goal` driver, read-only, with the existing 24-hour foreground process breaker. It
-has one Attempt and no repair/correction/replacement path. Success resumes independent acceptance,
-the full browser interaction/motion gate, two Judges and serial Integration; the same terminal
-failure stops M5-B. M5-C remains held.
+Current serial unit: 一骏 has deferred, not waived or passed, M5-C's unfamiliar-operator evidence
+and asked Main to keep developing the real UI gaps. The complete-Hub operating audit is therefore
+the only active product unit. Work and Decision Center remain accepted. Cross-route reading start,
+the eight-row human-first Model catalog and the Limits safety form now also pass machine plus live
+desktop/narrow acceptance. Delivery also passes as a saved-profile overview with technical detail
+on request and one explicit Create/Edit draft, including draft retention, Cancel focus return and
+actual 433px containment. Worker now accepts optional plain-language assignment guidance that only
+Main reads while choosing a profile; the selection remains explicit and the text never enters the
+Worker prompt. Main continues only into a reproduced user requirement in the remaining System
+pages; it does not create work for theory, test count or self-proof. Packet `65178a8a` is historical
+after these source corrections and will be regenerated once when the human journey is scheduled,
+not after each audit finding.
 
-Superseding current unit: Task `78c6fec4-b030-4b30-988b-41d01973cbdd` also failed before Candidate
-capture because its alternate driver created no Task-local native Goal state. 一骏 has now directed
-Main to complete the UI itself. No further M5-B UI Worker or Grok replacement is admitted. Main
-will use the existing `main-direct` decision record, prove no seven-path source drift, apply the
-protected structural output, run the five machine checks, complete real responsive/interaction/
-motion browser acceptance and resolve any reproduced defect inside the same path boundary. Final
-review is read-only; Main owns all edits and final disposition. M5-C remains held until M5-B passes.
+Current pre-commit edge: 一骏 has requested one bounded review and simplification of the complete
+uncommitted M5 result before publication. Work Item
+[`precommit-code-simplification/spec.md`](../../specs/m5-product-graduation/work-items/precommit-code-simplification/spec.md)
+reviews only the changed Worker-guidance and Hub production/test paths, removes demonstrated
+duplicate projections, state owners, helpers or unreachable branches, and preserves every accepted
+behavior. Grok 4.6 Xhigh runs one isolated implementation/review Candidate with one ordinary Judge;
+Main owns final diff review, full `npm run check`, SSOT evidence, commit and push. This is release
+hardening, not a new feature or a substitute for the deferred unfamiliar-human M5-C evidence.
+
+That simplification is now accepted and safely integrated as exact three-path Revision
+`f427a0f2...`: duplicated Delivery editor state/cleanup and Worker-row selection handling were
+collapsed, one unreachable Decision branch and orphan Hub CSS were removed, and the attempted
+cross-layer Worker-profile abstraction was rejected because it added more code while merging two
+different meanings. Focused acceptance passed, but publication is stopped before commit/push:
+the full suite passed 3,180/3,181 and the unchanged checkpoint-operation start-exchange timing gate
+failed again in an isolated rerun (1,306 ms then 1,693 ms against a 1,000 ms threshold). No scoped
+diff touches that path. The next unit requires an explicit decision to admit a narrow checkpoint
+timing investigation or to publish with this known red gate; automatic retries and threshold
+loosening are not authorized.
+
+一骏 has now authorized the recommended narrow checkpoint timing investigation. The reproduced
+call-chain evidence separates the failure cleanly: a cold full `health` preflight took about 562 ms
+while the actual `checkpoint_start` exchange took about 1.7 ms and correctly left `sleep 1` in the
+background. The sole active serial unit is therefore the identity-handshake Work Item: preserve a
+fail-closed identity comparison before every mutation, move that comparison onto one explicit
+lightweight read-only protocol path, keep the Daemon's actual-request guard, and leave full health
+and checkpoint execution semantics unchanged. Core-runtime policy requires Grok 4.6 Xhigh, two
+independent Judges, safe Integration and a completely green `npm run check` before publication.
+
+That unit is now complete. Exact Revision `045796d9...` passed independent verification, two usable
+independent accepts, Main review and safe Integration `632c0b08...`; post-Integration
+`npm run check` passes 3,181/3,181. The lightweight `identity` preflight and the Daemon's existing
+actual-request guard form the surviving mutation-safety chain, while explicit full health remains
+complete. The only remaining action in this publication unit is the already-authorized serial Git
+commit and push; M5-C's unfamiliar-human evidence remains deferred and missing.
+
+Completed UI unit: Main directly revised M5-B within the existing Hub spec. The selected Goal is
+one readable current-work story, the tree is its outline, repeated teaching/status chrome is
+demoted, and contextual creation remains on the exact existing proposal/confirmation path. No UI
+Worker, backend expansion or parallel product writer was admitted. The running M5-C runbook Task
+was not canceled because its two allowed documentation paths remain compatible with this hierarchy.
 
 Global Grok execution rule from this point forward: do not set Task duration, Token, no-progress or
 model-work waiting ceilings. Any forced client/tool timeout is only a bounded observation request

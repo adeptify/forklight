@@ -48,6 +48,7 @@ export interface SetupProviderCommit extends ResolvedSetupProvider {
 export interface SetupWorkerOption {
   id: string;
   label: string;
+  assignmentGuidance?: string;
   runtime: string;
   provider: ProviderName;
   model: string;

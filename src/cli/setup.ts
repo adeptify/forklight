@@ -165,9 +165,14 @@ function handleWorker(
     if (args.length > 1) throw new Error(`Unexpected worker list argument.\n\n${SETUP_USAGE}`);
     const workers = service.listWorkers();
     if (json) return { stdout: `${JSON.stringify({ workers }, null, 2)}\n`, json: { workers } };
-    const lines = workers.map((item) => {
+    const lines = workers.flatMap((item) => {
       const mark = item.selected ? "*" : " ";
-      return `${mark} ${item.id}  ${item.label}  ${item.provider}/${item.model}  ${item.runtime}`;
+      const identity = `${mark} ${item.id}  ${item.label}  ${item.provider}/${item.model}  ${item.runtime}`;
+      if (item.assignmentGuidance === undefined) return [identity];
+      return [
+        identity,
+        `    Main assignment guidance: ${item.assignmentGuidance.replace(/\s+/g, " ")}`,
+      ];
     });
     return { stdout: `${lines.join("\n")}\n`, json: { workers } };
   }

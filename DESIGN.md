@@ -34,15 +34,18 @@ mutations are unchanged.
   disclosure, not by a paragraph that asks users to choose an internal shape. Sibling Plans and
   Tasks read as parallel work. Search keeps a matching child's ancestors. Independent Plans and
   one-off Tasks remain in a quieter independent-work group. Width is a bounded CSS variable
-  (`200-420px`) written without `.style` property access. Finished Goals stay in History.
+  (`200-420px`, default `330px`) written without `.style` property access. Finished Goals stay in
+  History.
 - **Contextual creation.** The root adds a Goal, a Goal adds a Plan and a Plan adds a Task. The
   outcome composer is hidden until one of those actions is chosen, fixes the requested shape from
   that location, and uses the existing intake/confirmation contract. It never claims creation
   before confirmation or replaces hierarchy with a teaching block.
-- **Goal file.** Fixed reading order: desired result; one current-truth sentence; decision needed
-  (link only); phase and checkpoint; current Task with fact, reason and retained work; blockers
-  with next action; delivery/History; folded technical evidence (ids, Runtime, Attempt, Token, cost,
-  the seven-column board).
+- **Goal document.** The Goal name and desired result lead. Current truth and the next meaningful
+  action form one opening story. A decision prompt appears only when a real decision exists. The
+  current Plan and Task continue the document as its active chapter; empty decision, blocker,
+  delivery and Task sections do not render. Real blockers and completed delivery remain in reading
+  order. Technical evidence (ids, Runtime, Attempt, Token, cost and the seven-column board) stays
+  folded after the human-readable document.
 - **Decision Center.** Browser grouping of `waiting-user-decision` cards by Goal, plus one
   parentless group. Each item shows fact, reason, retained work, impact and the existing confirmed
   Task actions. No stored decision list and no second mutation path.
@@ -71,12 +74,17 @@ unsubmitted drafts without stealing focus.
 Status labels stay on one line. Goal file and Decision Center narrative uses a readable measure
 (about 68 characters). Accents are hairline, not thick left bars.
 
+Selection and contextual-composer insertion may use a 120-180ms opacity or short vertical
+translation to explain state change. Motion disappears under reduced motion. There is no looping,
+decorative or page-load animation.
+
 ## Responsive behavior
 
 Desktop: product bar, Goal Tree and Goal file side by side, detail as a right-hand panel.
 
 At `760px` and below: exactly one primary pane (tree, Goal file, or detail). Opening a Goal starts
-the file at its header and desired-result section. Back restores the tree and its reading position.
-Chrome stays compact (no full-width nav/utils wrap) and the connection status stays visible. Status
-groups stack. The real tree appears before any creation form; a form opens only after an explicit
-contextual add action. Touch targets on Back and contextual add controls are at least 44px.
+the file at its title and opening story. Back restores the tree and its reading position. Chrome
+stays compact, while connection and setup truth remain reachable through System. Status groups
+stack. The real tree appears before any creation form; a form opens only after an explicit
+contextual add action and remains inside that branch. Touch targets on Back and contextual add
+controls are at least 44px.

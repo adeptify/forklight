@@ -2043,6 +2043,59 @@ test("Hub worker profile edit preserves all supplied fields", async () => {
   }
 });
 
+test("Hub worker profile round-trips and clears Main assignment guidance", async () => {
+  const ctx = await makeHub();
+  try {
+    const base = `http://127.0.0.1:${ctx.port}`;
+    const create = await doHttp(`${base}/api/worker-profiles`, "POST", ctx.token, {
+      action: "upsert",
+      profile: {
+        id: "guided-hub",
+        label: "Guided Hub Worker",
+        assignmentGuidance: "  Prefer for API and settings work.  ",
+        runtime: "claude-code",
+        modelConfigId: "deepseek-flash",
+      },
+    });
+    assert.equal(create.status, 200);
+    const created = (create.body as {
+      workerProfiles: { profiles: Array<{ id: string; assignmentGuidance?: string }> };
+    }).workerProfiles.profiles.find((profile) => profile.id === "guided-hub");
+    assert.equal(created?.assignmentGuidance, "Prefer for API and settings work.");
+
+    const clear = await doHttp(`${base}/api/worker-profiles`, "POST", ctx.token, {
+      action: "upsert",
+      profile: {
+        id: "guided-hub",
+        label: "Guided Hub Worker",
+        assignmentGuidance: "   ",
+        runtime: "claude-code",
+        modelConfigId: "deepseek-flash",
+      },
+    });
+    assert.equal(clear.status, 200);
+    const cleared = (clear.body as {
+      workerProfiles: { profiles: Array<{ id: string; assignmentGuidance?: string }> };
+    }).workerProfiles.profiles.find((profile) => profile.id === "guided-hub");
+    assert.equal(cleared?.assignmentGuidance, undefined);
+
+    const reject = await doHttp(`${base}/api/worker-profiles`, "POST", ctx.token, {
+      action: "upsert",
+      profile: {
+        id: "guided-hub",
+        label: "Guided Hub Worker",
+        assignmentGuidance: "x".repeat(1201),
+        runtime: "claude-code",
+        modelConfigId: "deepseek-flash",
+      },
+    });
+    assert.equal(reject.status, 422);
+    assert.match(JSON.stringify(reject.body), /assignmentGuidance must be ≤ 1200 chars/);
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
 test("Hub worker profile round-trips networkPolicy through save and reload", async () => {
   const ctx = await makeHub();
   try {

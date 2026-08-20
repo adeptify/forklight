@@ -4,21 +4,31 @@ This directory indexes compact evidence required to graduate the current Goal. R
 in ForkLight Store. Evidence files summarize machine truth; they do not form a parallel progress
 log.
 
-Current boundary: M1–M4 and M5-A1/A2/A3 are graduated. M5-B complete Hub redesign is the sole ready
-serial Work Item; detailed Hub implementation has not started. The
-confirmed redesign treats the incumbent Hub as functional evidence and visual anti-reference,
-records the human-first ForkLight/GoalBoard product-family boundary in `PRODUCT.md`, and keeps the
-two products' truth sources separate. The canonical seven-comparison report is `proven`, and
-current worker-runtime, storage-lifecycle and Hub comprehension representatives are all
-`proven-lower`. Boundary build and
-3,096/3,096 tests pass, client/Daemon identity is matched, live/canonical report bytes agree and the
-unrelated Hub remains unchanged. The evidence sequence leading to this boundary is retained below.
+Current boundary: M1–M4 and M5-A1/A2/A3/B are graduated. M5-B's human-first ForkLight/GoalBoard
+family redesign now presents a Goal document with a structural Goal → Plan → Task outline,
+contextual creation, real-decision emphasis and responsive mobile/desktop navigation. Its focused
+live audit additionally opens only the selected Work branch, contains the 127 parentless Decision
+Center items behind one truthful count, resets new System routes to their own reading start, keeps
+model technical identities behind requested detail and renders global Limits as consequences with
+human duration units. Delivery now also leads with saved human profile summaries, keeping exact
+commands, internal identity and destructive action behind requested detail and mounting an editor
+only after explicit Create/Edit. Worker profiles additionally accept optional Main-only assignment
+guidance through the existing settings truth and a read-only catalog; Main can use it when choosing
+the explicit Worker, but it is absent from resolved Worker execution and is never forwarded as a
+prompt. No live profile, Task or Store record changed during acceptance. The original Main-direct
+record and the later user-friendly/operating refinements, focused/full checks and exact-width
+browser evidence are summarized in
+[`m5-b-main-direct-user-view-delivery.md`](m5-b-main-direct-user-view-delivery.md). M5-C
+unfamiliar-developer and final visual graduation remains the only missing gate, but 一骏 has deferred
+its schedule. Packet `65178a8a` predates the final Decision Center, route, Model, Limits and Delivery source
+corrections and is historical rather than valid future human-run input.
 
 M5's focused entry result is [`m5-entry-audit.md`](m5-entry-audit.md). It proves matched health,
 one current Grok 4.6 Xhigh smoke, the existing clean-package/delivery/read-model foundation and the
 functional gaps that A1/A2 closed. Five serial accepted Work Items close setup, backup, installed
 real delivery, complete Hub redesign and final human/visual acceptance in that order. The first
-three are graduated; Hub UI paths become writable only under M5-B's accepted Spec.
+four are graduated; M5-C now observes the accepted product without hiding code changes inside the
+human run.
 
 M5-A1 Attempt 1 stop and reusable partial evidence are in
 [`m5-a1-attempt-1-connectivity-stop.md`](m5-a1-attempt-1-connectivity-stop.md). A real Grok 4.6
@@ -213,8 +223,9 @@ Required evidence:
   pair, two accepted negative pairs, quality gating, separate Worker cost and no saving claim.
 - `clean-clone-run.md` — installed-package current-user delivery and restart truth; it does not
   claim unfamiliar-developer evidence.
-- final desktop/mobile Hub captures, Impeccable verdict and unfamiliar-developer journey remain
-  pending for M5-C after Hub redesign.
+- M5-B desktop/mobile implementation QA and the two final read-only opinions are complete;
+  M5-C still owns final graduation captures, accessibility/restart evidence and the genuinely
+  unfamiliar-developer timed journey.
 
 Each claim points to durable Task/Attempt/Candidate/verification/review/Integration evidence or a
 reproducible command. Missing or incomparable evidence is reported as unavailable.
@@ -498,3 +509,21 @@ Current graduated M2 checkpoints:
   superseded further UI Workers and directed Main to apply, verify and visually accept the exact
   structural output through ForkLight's `main-direct` record. The same evidence file records both
   terminal causes and the non-fabricated direct continuation.
+
+- `m5-b-main-direct-user-view-delivery.md` — final Main-direct M5-B result plus its reopened
+  user-friendly revision: Goal-document reading order, structural Goal → Plan → Task outline,
+  contextual creation, folded-branch/error/focus continuity, original 424-focused/3162-full proof,
+  revised 269-focused proof, exact-width browser QA, independent accepts and the handoff that opens
+  M5-C without fabricating Worker or Integration truth. Final captures are
+  `m5-b-user-friendly-desktop-final.png`, `m5-b-user-friendly-mobile-file-final-v2.png` and
+  `m5-b-user-friendly-mobile-add-plan-final.png`.
+
+- `m5-c-preflight.md` — first package preflight, exact stale Overview blocker, completed Grok 4.6
+  Xhigh runbook quality chain, historical first packet, and the current selected-branch packet at
+  `/Users/Shared/ForkLight-Clean-Run.65178a8a`. Technical verification is current; the genuinely
+  unfamiliar-operator boundary remains and is not replaced by the package refresh.
+
+- `m5-checkpoint-identity-handshake.md` — pre-publication timing root cause, exact Grok Candidate,
+  two-Judge acceptance, safe Integration and the final 3,181/3,181 full-suite proof. Mutation
+  compatibility now has a lightweight identity-only preflight while full health and the Daemon's
+  own mutation guard remain intact.

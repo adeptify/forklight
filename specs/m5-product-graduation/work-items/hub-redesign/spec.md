@@ -439,6 +439,64 @@ placement context in focused tests, then repeats the complete 320, 360, 390, 667
 browser pass including disclosure, selection, add/cancel/submit boundaries, keyboard focus,
 reduced motion and copy audit.
 
+## User-friendly Work revision after M5-C entry review
+
+一骏 rejects the graduated Work surface as still too mechanical. The nested hierarchy is correct,
+but the screen still asks the user to assemble meaning from repeated object labels, section names,
+status chips and a long stack of equally weighted Goal-file blocks. This reopens M5-B's human
+acceptance without discarding its functional result. The already-running M5-C two-path runbook
+repair remains useful and may finish, but unfamiliar-human observation cannot start until this
+revision passes.
+
+The accepted direction is a **Goal document with an outline**, not a dashboard and not an admin
+console. The Goal is the page title and desired result. Its current truth and next meaningful action
+form one opening story. Decision-needed appears only when real and receives the primary action;
+the no-decision case is quiet inline context rather than a dedicated panel. Current Plan and Task
+read as the active chapter of the Goal. Empty blocker, delivery and technical sections do not take
+equal first-screen weight; real blockers, retained work and completed delivery remain truthful and
+visible when present, while technical evidence stays folded.
+
+The tree remains the structural explanation of Goal, Plan and Task, but becomes an outline:
+
+- level is conveyed by indentation, connectors, type scale and disclosure before repeated labels;
+- Goal, Plan and Task labels remain available to assistive technology and in quiet secondary text,
+  not as a badge on every row;
+- contextual add actions stay beside the parent they affect and open the same proposal/confirmation
+  flow in place;
+- opening a composer visually holds the selected branch and shows the proposed outcome at that
+  location, without claiming durable creation before confirmation;
+- sibling Plans and Tasks continue to communicate parallel work, and independent work stays in its
+  own quieter group.
+
+Permanent chrome becomes quieter. On Work, the redundant page heading, instructional subtitle and
+daemon/count pills may not compete with the selected Goal. Work, Decision Center and System remain
+reachable, connection/setup truth remains available, and no real route or action is removed. The
+first desktop viewport must answer from the Goal content itself: what is being achieved, what is
+true now, whether 一骏 must decide and what happens next. The first mobile viewport starts with the
+tree; entering a Goal starts with the same opening story, not a compressed desktop dashboard.
+
+Visual language stays in the GoalBoard family but is warmer in behavior: light field, graphite
+type, action blue, flat paper, hairlines and compact radii. Hierarchy comes from spacing and type,
+not from a box around every fact. Motion is limited to branch disclosure, composer insertion,
+selection and pane transitions that explain state change; it uses opacity/translation only,
+finishes within 120-180ms and disappears under reduced motion. No decorative animation, glow,
+gradient, oversized hero, new icon dependency or fabricated metric is admitted.
+
+Main implements this UI directly. Allowed product paths remain `index.html`, `app.css`, `app.js`
+and `i18n.js`, with the two existing focused UI tests and `DESIGN.md` at finish. Backend, Store,
+Core, daemon, API projections and the running M5-C runbook Candidate are read-only. Before edits,
+Main records this amendment; after edits it runs the accepted build/focused commands, one
+Impeccable detector pass for this new revision, one batched desktop/mobile inspection, one material
+fix batch and one confirmation pass. Acceptance additionally requires:
+
+- no visible “Goal / Plan / Task 怎么选” or equivalent instruction;
+- no separate no-decision or no-blocker card consuming the first viewport;
+- the selected Goal's desired result, current truth and next action are visually dominant;
+- contextual creation and Task detail keep their already-accepted confirmation, stale-response,
+  Back/focus and live-refresh continuity contracts;
+- 320, 360, 390, 667x375 and 1440x900 remain fitted with no horizontal clipping;
+- visible Chinese and English copy passes the plain-language and zero em/en-dash audit.
+
 ## Handoff and workspace disposition
 
 Handoff includes the final IA, `DESIGN.md`, proof that no read model/action contract changed, copy
@@ -448,3 +506,180 @@ source-drift-proven exact seven-path output, then retains screenshots and review
 failed Worker Workspaces remain protected until the direct result is accepted and their reusable
 evidence is durably linked; ordinary storage lifecycle, not manual deletion, owns later
 reclamation.
+
+## Selected-branch disclosure refinement after live operating audit
+
+一骏 has asked Main to continue product development while deferring the unfamiliar-operator gate.
+That gate remains missing evidence and is not treated as passed. A fresh live audit of the accepted
+Work surface found one narrower M5-B presentation failure: `Now` correctly retains every
+non-terminal Goal, but every one of those Goals and every short child Plan opens at once. The first
+screen therefore expands parallel Goal, Plan and Task branches into one long operational list. The
+hierarchy is structurally true but its default presentation again makes the user parse the whole
+Store before choosing the work they want to read.
+
+The accepted correction makes disclosure follow the current reading path:
+
+- the selected Goal opens by default; other parallel Goals remain visible as sibling rows but start
+  folded;
+- inside that Goal, the selected/current Plan opens by default; sibling Plans start folded;
+- selecting a folded Goal or Plan opens that exact path, while explicit user disclosure remains a
+  tab-local reading preference across a real Work rebuild;
+- a search or an open contextual composer may temporarily open the necessary ancestor path so a
+  matching result or draft is never hidden;
+- `History`, canonical Goal/Plan/Task placement, selection, independent work, creation,
+  confirmation, Task detail and Decision Center truth remain unchanged.
+
+This is a Main-direct UI correction. The writable product boundary is
+`src/hub/public/app.js` plus focused assertions in `tests/hub-ui-assets.test.ts` and
+`tests/hub-responsive-layout.test.ts`; CSS, copy, backend, API, Core, Store and daemon paths are
+read-only unless live verification proves a concrete additional failure and this Spec is updated
+first. The existing Impeccable detector is not rerun: it already completed the accepted revision,
+and this change adds no new visual primitive or copy. Verification is the accepted build and Hub
+commands, JavaScript parsing, diff check, then one batched live check that proves the first tree
+contains sibling Goals with only the selected path expanded, disclosure persists through a forced
+Work rebuild, search reveals matching ancestry, and phone Back/file behavior is unchanged.
+
+## Decision Center independent-backlog containment
+
+The same live pass found a second first-screen failure after the selected tree was accepted. The
+current Decision Center has 131 canonical pending items: four belong to visible Goals, while 127
+parentless review/recovery Tasks are rendered as full peer cards. ForkLight is truthfully exposing
+the Store, but the repeated parentless backlog turns the decision route into hundreds of screens and
+pushes the Goal decisions out of a usable decision hierarchy. System itself fits, remains compact
+and needs no correction.
+
+The accepted presentation keeps all canonical decisions and every existing action:
+
+- Goal-bound decision groups remain open and lead the route;
+- parentless decisions move into one native disclosure labeled with their real count; it starts
+  open only when it contains at most three items and otherwise starts folded;
+- an explicit open/fold choice is remembered as existing tab-local reading state across a route or
+  Work rebuild; no Task is archived, grouped as one record, reprioritized or removed;
+- the three generic Runtime count chips disappear from Decision Center chrome because they do not
+  explain a decision and remain available in System connection truth;
+- opening the disclosure renders the same complete decision cards and confirmed action paths.
+
+Main implements this directly in `app.js`, `app.css`, `i18n.js` and the two focused UI tests. No
+backend/API/schema/Core/Store/daemon or mutation change is admitted. Acceptance proves the 4 + 127
+live shape, default fold, count, keyboard-native disclosure, persisted open state, unchanged open
+action, mobile fit and zero horizontal overflow. The already-run Impeccable detector is not rerun;
+the new CSS reuses the accepted Decision Center tokens and the new bilingual label receives direct
+copy/width review. The current clean packet becomes historical as soon as this source change lands;
+do not regenerate another packet until this focused Decision Center audit is accepted.
+
+## Cross-route reading start after the complete-Hub audit
+
+After the primary Work/Decision/System audit passed, Main continued the contract-required review of
+the auxiliary pages that remain reachable through System. The first reproduced failure is shared by
+all of them: changing routes preserves the previous `.content` scroll offset. A Decision Center
+reading position therefore opens Model partway through its catalog, and Model can open Worker after
+its first profile. The destination truth is present, but the page begins without its title story or
+first choice, which breaks the required “what this is, current truth, next action” reading order.
+
+The accepted correction separates two kinds of continuity:
+
+- a deliberate change to any non-Work route starts that destination at its top-left reading origin;
+- a same-route poll or retained-evidence render keeps the current scroll position;
+- leaving Work captures its existing Goal/tree/file/detail reading context before the route is
+  replaced, and returning to Work restores that exact surviving context instead of capturing the
+  unrelated System page scroll;
+- no route, form, action, Store truth or refresh policy changes, and no forced smooth scrolling or
+  decorative transition is introduced.
+
+This is a Main-direct browser-presentation correction. Writable paths are `src/hub/public/app.js`
+and the two focused UI tests only. Acceptance first reproduces a non-zero System-page scroll, proves
+Model and Worker each start at zero after route selection, then proves Work → System → Work restores
+the prior Work scroll/selection context. Build, focused and six-file Hub tests, script parsing and
+diff checks must pass. The change adds no visual primitive or copy, so the already-consumed
+Impeccable detector is not rerun.
+
+## Model catalog human-first hierarchy
+
+With route entry corrected, the Model page now starts at its intended story and exposes the next
+complete-Hub gap. Eight saved models render as large primary cards whose titles append ForkLight
+configuration IDs; every card then shows raw Provider model IDs, Endpoint URLs and a destructive
+Remove button. The page is an auxiliary configuration surface, but this still contradicts the M5
+contract: a person needs the recognizable model name and provider first, while identifiers,
+connection coordinates and destructive management belong in requested technical detail.
+
+The accepted presentation keeps the complete catalog and every current action:
+
+- the catalog states its real saved-model count and keeps the Codex import action adjacent;
+- each primary row shows the human label and recognizable provider only;
+- one native per-model disclosure contains the existing configuration ID, Provider model ID,
+  optional Endpoint, supported effort values and Remove action;
+- disclosures start closed, use keyboard-native semantics and remain contained on desktop and
+  narrow screens; no model is selected, edited, removed or inferred by the renderer;
+- the existing add/update form, Keychain behavior, routing-advice section, confirmation and API
+  calls remain unchanged.
+
+Main writes only `app.js`, `app.css`, `i18n.js` and the two focused UI tests. Acceptance against the
+current catalog proves eight recognizable rows, zero initially visible raw IDs/URLs or Remove
+buttons, eight technical disclosures, and the unchanged exact Remove confirmation/action after one
+disclosure opens. Build, focused and six-file Hub tests, parse/diff checks, bilingual copy and
+narrow no-overflow checks must pass. This reuses native disclosure and accepted tokens; the one M5
+Impeccable detector remains consumed and is not rerun.
+
+## System limits human-first settings
+
+The complete-Hub audit then reaches the `Limits` utility and finds a legacy configuration panel,
+not the accepted product language. Its route title says `System`, the form mixes English field
+names into the Chinese interface, and the no-effective-progress safety control exposes raw
+milliseconds. A local developer therefore has to understand internal setting names before knowing
+what will happen. The current values and API are valid; this is a presentation and input-adapter
+gap, not permission to change execution policy or silently loosen a saved safety value.
+
+The accepted correction makes the page one plain-language global safety form:
+
+- the route is named `Limits` / `限额` and explains that these are the last shared safety lines for
+  every Worker, while ordinary per-Worker choices remain on the Worker page;
+- the optional default task budget, absolute budget ceiling and parallel Worker ceiling each say
+  the consequence first, with USD shown as a unit rather than embedded in an internal field name;
+- no-effective-progress is edited as a value plus hours/minutes/seconds unit and round-trips to the
+  existing millisecond API exactly; its help explicitly says it is not a total runtime deadline and
+  that continuing effective progress may run longer;
+- a blank default budget remains `null`; existing hard-ceiling, concurrency and progress-stop
+  values render without substitution, and saving sends the same four canonical settings;
+- the existing Back-to-Workers and save actions remain, with no automatic save, Store mutation,
+  Runtime change, timeout-policy change or additional integrity mechanism.
+
+Main writes only `app.js`, `app.css`, `i18n.js` and the two focused UI tests. Acceptance proves
+bilingual plain-language labels, exact duration conversion, preserved null/default semantics,
+44px narrow controls, no horizontal overflow and unchanged POST keys. Build, focused and six-file
+Hub tests, standalone parsing, diff checks and live desktop/narrow rendering must pass. This reuses
+the existing duration adapter and accepted form tokens, so it does not rerun the already-consumed
+Impeccable detector or introduce a UI Worker/Judge.
+
+## Delivery overview before configuration
+
+The next auxiliary-page audit reproduces the same hierarchy failure on `Delivery`. Opening the page
+to understand the current delivery path immediately shows an internal setup ID, three command
+blocks, Edit and Remove, a full empty five-field creation form, default/binding editors and an
+inactive save panel in one 1,649px stack. All behavior is valid, but the page treats reading the
+current answer and changing technical configuration as the same task.
+
+The accepted correction establishes an overview-first interaction:
+
+- saved delivery setups lead with the human display name, a short build/update/check stage summary
+  and a compact Default marker when applicable;
+- internal setup ID, exact commands, explanations, Edit and Remove move into one native requested
+  detail per setup; every draft/remove/save behavior remains unchanged;
+- the catalog header states the true setup count and offers one explicit Create action; no empty
+  editor is mounted until Create or Edit is chosen;
+- the editor has an explicit Cancel action in both create and edit modes, and its unsaved fields
+  survive a same-tab render such as language change or data refresh without becoming saved truth;
+- selectors lead with display labels and add an ID only when duplicate labels would otherwise be
+  ambiguous; project paths remain visible because they are the user's binding input;
+- the global Save/Restore panel appears only after the draft actually differs from saved settings.
+  Opening, closing or typing in the profile editor alone does not call the API or mark durable save
+  success.
+
+Main writes only `app.js`, `app.css`, `i18n.js` and the two focused UI tests. No delivery schema,
+settings API, Task delivery plan, command execution, confirmation or safe-apply path changes.
+Acceptance against the current one-profile Store proves the first view has one human row, zero raw
+setup IDs, zero destructive actions, zero textareas and no inactive save panel; requested detail
+reveals the unchanged technical facts/actions; Create and Edit restore their draft across a real
+render and Cancel returns focus to the originating action. Desktop and actual narrow layout must
+fit without horizontal overflow and retain 44px disclosure/actions. Build, focused and six-file Hub
+tests, parsing, diff and bilingual copy checks must pass. Existing primitives are reused, so no new
+Impeccable detector, UI Worker or Judge is introduced.

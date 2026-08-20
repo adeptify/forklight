@@ -2412,3 +2412,331 @@ add actions select the requested shape and parent context but do not fabricate i
 Independent Plans and one-off Tasks remain accessible outside Goal branches. This decision changes
 presentation and copy inside the existing M5-B boundary; it does not add a stored Work Item model,
 backend hierarchy, alternate action path, dependency or Worker.
+
+## 2026-08-19 — Accept the Main-direct user-view redesign and open M5-C
+
+Main accepts M5-B through ForkLight Main-direct decision
+`ceba063f-8ce3-4773-b8cd-fa039bd9ea17`, not through a fabricated Worker Candidate or Integration.
+The product communicates Goal → Plan → Task through structure, indentation, disclosure and
+contextual add actions. It does not teach users the storage nouns in prose before showing their
+work. The existing intake proposal/confirmation contract remains the only creation authority.
+
+The final scoped corrections address only reproduced acceptance failures: folded-ancestor
+visibility, visible creation-state retention, stale same-Task response identity and the mobile
+Task-sheet Back/focus lifecycle. Build, 424 focused tests, 3162 full tests, five responsive widths
+and the two original independent review perspectives pass. Main therefore graduates M5-B and
+opens M5-C automatically inside the already confirmed Milestone.
+
+M5-C may not replace its unfamiliar-human evidence with an Agent simulation or a coached favorable
+run. Main proceeds with the technical package, visual, accessibility and restart preflight; the
+timed journey waits only on a genuinely unfamiliar willing operator and a clean disposable
+environment. Crossing beyond M5 still requires 一骏's confirmation.
+
+## 2026-08-19 — Repair the packaged first-Task path before unfamiliar observation
+
+M5-C does not begin the human clock with a known-wrong instruction. The packaged runbook still
+points to Overview / Run your first real Task, but M5-B deliberately replaced that primary route
+with the Work Goal → Plan → Task tree. This would make an unfamiliar operator fail for a stale
+handoff rather than reveal the quality of the accepted product.
+
+Before observation, admit one two-path repair under the existing M5-C spec: update only the current
+first-Task section and add one focused package/runbook regression test. The new instruction names
+New Goal, Add Plan and Add Task, keeps proposal and explicit confirmation before work starts, then
+continues through ordinary Task Detail, Main review and safe Integration. It may not alter Hub or
+other product behavior. Task `83c3142a-8868-4ae6-94ca-22b2fcc51a5f` owns this exact boundary via
+Grok 4.6 Xhigh native Goal; Main independently verifies, uses one ordinary Judge and integrates
+serially. A fresh frozen bundle is generated only after activation.
+
+## 2026-08-19 — Reopen M5-B and let the Goal read like the user's work
+
+一骏 explicitly rejects the current Hub as too mechanical and asks for a user-friendly redesign.
+This supersedes only the M5-B human/visual acceptance conclusion. It does not erase the passed
+tests, browser evidence, Main-direct record or reusable tree behavior, and it does not authorize a
+new UI Worker.
+
+Main owns the revision directly under the existing M5-B spec. The tree remains the truthful Goal,
+Plan and Task structure, but becomes an outline rather than an object inventory. The selected Goal
+opens with its desired result, current truth and next action as one story. A real pending decision
+is prominent; “no decision” and “no blocker” do not each consume a first-screen panel. Current Plan
+and Task form the active chapter, retained work stays visible where relevant, and technical truth
+remains folded. Permanent Work instructions and daemon/count pills are demoted so they cannot
+compete with the user's work.
+
+The only admitted motion explains a visible state change: branch disclosure, inline composer,
+selection and desktop/mobile pane transition. It is short, opacity/translation based and removed
+under reduced motion. The existing intake confirmation, Task detail, stale-response protection,
+live-refresh continuity, Decision Center, System access and safe mutations remain unchanged.
+
+The already-running M5-C runbook repair is not canceled because its two-path documentation boundary
+does not overlap the Hub writer and its hierarchy instruction remains true. It may finish and be
+reviewed, but no unfamiliar-human observation starts until this reopened M5-B revision passes. No
+backend expansion, fabricated Candidate/Integration truth, second state system, commit or push is
+authorized.
+
+## 2026-08-19 — Accept the Goal document revision and resume M5-C
+
+Main accepts the reopened M5-B human-acceptance revision. Work no longer explains Goal, Plan and
+Task through a tutorial or repeated badges. The tree's outline, indentation, connectors,
+disclosure and contextual add placement communicate the relationship. The selected Goal reads as
+the user's work: desired result, current truth and next action lead; current Plan and Task are the
+active chapter; only real decisions and blockers receive primary weight; technical evidence is
+folded after the document.
+
+The revision passes build, 269 focused tests, diff/parsing checks, the single required Impeccable
+detector run, exact 320/360/390 fit measurements, landscape/desktop inspection and one fresh
+independent read-only review with no Blocker/P1. It preserves the existing intake confirmation,
+Task-detail, live-refresh and safe-mutation contracts and changes no backend/API/Store/Core truth.
+Because Main implemented the UI directly, this decision does not fabricate a Worker Candidate,
+ForkLight Integration receipt or Token-saving claim.
+
+M5-B is graduated on the revised human result. M5-C resumes as the sole active Work Item. Its
+already-running runbook/test Task remains valid and orthogonal; Main observes its durable state
+without adding a Runtime deadline. Final timed setup and comprehension evidence still requires a
+genuinely unfamiliar operator in a disposable clean environment.
+
+## 2026-08-19 — Accept the M5-C runbook Candidate and freeze the clean-user packet
+
+Main accepts exact Revision `f3c764c1-f8bf-4364-9122-4628057ec445` from Grok 4.6 Xhigh Task
+`83c3142a-8868-4ae6-94ca-22b2fcc51a5f`. The two-path diff replaces the retired Overview first-Task
+instruction with the current Work hierarchy and adds one semantic real-file regression test. It
+preserves proposal review, explicit confirmation, ordinary Task Detail, Main review and safe
+Integration, and changes no Hub, backend or durable product truth.
+
+Independent verification, one ordinary Judge and Main review all accept the exact Revision.
+Integration `c78b0c3a-fbc5-442f-9df3-a161694004df` applies, verifies, builds and activates it
+successfully. The Judge's advisory one-file/one-line warning belongs to the reviewer packet's soft
+budget; the accepted implementation contract allows exactly two paths and 140 changed lines, and
+the actual two paths/46 lines are within it. Main does not manufacture a correction for that
+non-blocking warning.
+
+The new frozen packet is `/Users/Shared/ForkLight-Clean-Run.43560ab8`, with 3163/3163 prepack,
+verified isolated install and current packaged runbook. This closes technical preflight but does
+not graduate M5-C. Final timing, comprehension and clean-user setup truth must still come from one
+genuinely unfamiliar operator in a disposable environment. No Agent simulation, coaching or
+favorable rerun is admitted.
+
+## 2026-08-19 — Restore the contract-required M2 delivery evidence file without replay
+
+The final completion audit finds one missing required artifact:
+`evidence/m2-delivery-graduation.md`. Its README entry and all underlying durable evidence already
+exist, including the completed Coding final-audit Goal, completed handoff destination-truth Goal,
+completed exact non-Coding recovery Goal, exact Candidate/Integration records and original stop
+packets. The missing file is therefore an evidence consolidation defect, not permission to reopen
+M2 or generate another dogfood run.
+
+Main restores that exact artifact inside the sole Goal evidence directory and points it only to
+existing accepted truth. No Worker, Candidate, Judge, Integration, Token-saving claim or product
+change is created for this documentation repair. M2 remains graduated; the overall Goal remains
+open solely on M5-C human evidence.
+
+## 2026-08-19 — Freeze one no-coaching M5-C observation protocol
+
+The technical packet is ready, but human acceptance can still be accidentally biased by an
+observer who explains the tree, names the next control, fixes setup or repeats an unfavorable run.
+Main therefore freezes one concise protocol inside the existing M5-C preflight evidence before any
+subject begins. It names eligibility, the sole opening sentence, timestamps, intervention/privacy
+fields, comprehension questions, visual/restart checks and a fail-closed verdict.
+
+This protocol does not count as human evidence and does not authorize creation of a macOS account
+or VM. An Agent, 一骏, a contributor familiar with this Goal or a coached/replayed subject cannot
+satisfy it. With no eligible operator currently available, the remaining dependency is external
+and cannot be replaced by another technical Work Item.
+
+## 2026-08-19 — Defer the unfamiliar gate and fold parallel branches by default
+
+一骏 explicitly asks Main to continue development without treating the unfamiliar operator as the
+current gate. This defers only the observation schedule: the missing human evidence remains missing
+and M5 does not graduate on an Agent simulation or an earlier screenshot packet.
+
+The live accepted Hub reveals one concrete M5-B problem. `Now` truthfully contains several
+non-terminal Goals, but the renderer opens every such Goal and every short Plan, so parallel work
+becomes one long Task inventory. Main will keep every sibling Goal visible while opening only the
+selected Goal and selected/current Plan path by default. User disclosure persists as tab-local
+reading state; search and an open contextual composer may reveal the necessary ancestors. This is
+presentation only and does not archive, reprioritize or mutate any Goal, Plan or Task.
+
+Per 一骏's earlier UI instruction, Main implements this correction directly with no UI Worker.
+Only `app.js` and the two focused UI tests are writable. The earlier Impeccable detector is not
+rerun because no copy or visual primitive changes. After live and machine acceptance, future M5-C
+observation must use a newly built packet rather than the now-stale frozen UI bundle.
+
+## 2026-08-19 — Accept selected-path disclosure and refresh the future packet
+
+Main accepts the bounded M5-B correction. Against the live Store, `Now` now shows six parallel Goal
+rows with only the selected Goal and current Plan path open. Manual disclosure survives a real route
+rebuild; descendant search reveals ancestry and then restores the fold; selecting a sibling opens
+its exact Goal document; narrow Goal-file Back returns to the same open branch without overflow.
+
+Build and the six accepted Hub files pass 425/425, with parsing and diff checks also passing. The
+change is fully determined by pure disclosure-state tests and the canonical live flow, adds no copy,
+style, mutation or truth adapter, and therefore uses the accepted small-mechanical exception: no
+new Judge and no repeat of the already-consumed Impeccable detector. It creates no Worker Attempt,
+Candidate, Integration receipt or Token claim. M5-B is graduated again.
+
+The prior clean bundle remains valid historical evidence but no longer contains the latest accepted
+Hub assets. Before any future unfamiliar-human run, M5-C must regenerate and verify a current packet.
+That technical refresh does not count as the still-missing human timing or comprehension evidence.
+
+## 2026-08-19 — Accept the current clean packet without claiming a human run
+
+The one admitted current-packet command succeeds at
+`/Users/Shared/ForkLight-Clean-Run.65178a8a`. Prepack passes 3164/3164; isolated install, installed
+CLI/MCP/Hub, build identity, sensitive-filename scan and clean shutdown all pass. The packaged Hub
+contains the selected-branch helpers and omits both rejected auto-expansion conditions; the
+packaged runbook remains on the current Work hierarchy.
+
+Main accepts this as M5-C technical packet truth only. The old packet is preserved, no retry or
+second destination ran, and no Worker, Judge, Candidate or Integration record is invented. The
+human protocol now points to the new packet. Timing, intervention and uncoached comprehension are
+still absent and remain deferred rather than passed.
+
+## 2026-08-19 — Keep Goal decisions visible and fold the independent backlog
+
+The post-packet live audit finds 131 canonical Decision Center items: four Goal-bound decisions and
+127 parentless review/recovery Tasks. Rendering all 127 as full peer cards is truthful but unusable;
+it destroys the route's hierarchy and makes the current Goal decisions indistinguishable from old
+independent work. System's menu and utilities fit and remain unchanged.
+
+Main will keep the Goal groups open and move every parentless decision, unchanged, into one native
+disclosure with a real count. Small groups of up to three open by default; larger groups start
+folded; deliberate state persists in the existing tab-local reading record. The Decision Center's
+generic Runtime count chips are also hidden because System already owns that execution truth. This
+does not archive, merge, resolve or reprioritize any Task and changes no confirmed action path.
+
+The correction stays in the existing M5-B UI Spec and Main writes it directly. The current
+`65178a8a` packet remains historical evidence but must not be used for a future human run after the
+source changes. A later packet refresh waits until this focused UI audit closes rather than
+repackaging after every intermediate finding.
+
+## 2026-08-19 — Accept Decision Center hierarchy and close the focused UI audit
+
+Main accepts the bounded Decision Center correction. The four Goal-bound decisions remain visible;
+the 127 parentless decisions are unchanged behind one native summary showing their exact count.
+The large group starts folded, deliberate disclosure persists through a real route rebuild, every
+original open/Move-Act path remains present when expanded, and generic Runtime count chips no longer
+compete with the decision content. No Task, decision or Store state was mutated.
+
+Build passes, the two focused UI files pass 271/271 and the six accepted Hub files pass 426/426.
+Live current-Store checks prove the exact 4 + 127 shape, persistent disclosure and contained
+expanded cards at the actual 433px narrow viewport with no horizontal overflow. System remains the
+connection-truth surface. The deterministic bounded presentation uses Main-direct implementation;
+it creates no Worker Attempt, Candidate, Integration receipt or Token claim and does not repeat the
+already-consumed Impeccable detector or invent a Judge record.
+
+The focused Work, Decision Center and System audit is closed, so there is no further ready M5
+product Writer justified by current evidence. M5 remains active only because the unfamiliar-human
+observation is deferred and still missing. Packet `65178a8a` is historical after this source change;
+regenerate once when that observation is scheduled, not as an intermediate self-proof loop.
+
+## 2026-08-19 — Continue the complete-Hub audit through route, Model and Limits
+
+一骏 asks Main to ignore the deferred unfamiliar-operator schedule for now and continue developing
+the human-facing product. Main therefore supersedes only the prior claim that the focused UI audit
+was closed; the unfamiliar evidence remains missing and no Agent simulation replaces it.
+
+The live auxiliary-route pass accepts three reproduced corrections. A new System route starts at
+its own top reading origin, while same-route refresh and Work's exact Goal/tree/file context retain
+their existing continuity. The eight saved models now lead with human labels and providers; raw
+configuration identity, Endpoint, effort values and Remove stay in native requested detail. Limits
+is renamed and rewritten as one global safety form with consequence-first labels and a readable
+duration unit. The saved 30-minute no-progress value round-trips through the existing millisecond
+API; it is explicitly not presented as a total task deadline, and blank default budget stays null.
+
+Main accepts this six-path Main-direct UI refinement after build, 277/277 focused tests,
+432/432 six-file Hub tests, parsing/diff/copy checks, desktop inspection, and Chinese plus English
+actual-433px no-overflow acceptance with 44px controls. No save or destructive action was invoked;
+no backend, API, schema, Store, Core, daemon or execution-policy behavior changed. It uses no UI
+Worker, new Judge or repeated Impeccable detector. The existing clean packet remains historical.
+
+## 2026-08-19 — Make Delivery an overview before an editor
+
+The next live System pass finds Delivery always mounting a three-textarea configuration form and
+showing internal identity plus destructive controls as primary content. That is operationally true
+but makes a saved delivery method read like unfinished setup. Main keeps the canonical profile and
+mutation paths unchanged, and changes only the accepted Hub asset/test boundary.
+
+Main accepts the revised Delivery route. A saved profile now leads with its human label and the
+count of build, update and verification bindings. Internal ID, exact commands, Edit and Remove are
+inside one native requested-detail disclosure. Create and Edit open one explicit local draft;
+Cancel closes it without Store mutation and returns focus to the originating control. A language
+render preserves unsaved draft values, and the global Save bar appears only for canonical settings
+changes, not editor-local typing.
+
+Build passes, the two focused UI files pass 279/279 and all six accepted Hub files pass 434/434.
+Live current-Store checks prove the closed/open detail boundary, Create/Edit draft lifecycle,
+Chinese/English copy, exact focus return and 433px one-column containment with 44px controls. No
+Save, Delete or other mutation ran; no backend, API, schema, Store, Core, daemon, saved profile or
+execution behavior changed. This deterministic Main-direct UI unit adds no Worker, Candidate,
+Integration receipt, Token claim, Judge or repeated Impeccable detector. The existing clean packet
+remains historical.
+
+## 2026-08-19 — Accept Main-only Worker assignment guidance
+
+一骏 requires a user-authored description on each Worker that can influence Main's assignment
+judgment. Main keeps the existing authority boundary: a Task still freezes one exact
+`workerProfileId` and `routingDecision`; the profile still owns Runtime, model and execution policy.
+The new optional `assignmentGuidance` is trimmed, bounded to 1,200 characters and stored in the
+existing Worker profile. It is advisory rather than an automatic ranking rule.
+
+Main accepts the serial cross-layer supplement. The read-only `forklight_worker_catalog` gives Main
+the saved Worker identities, readiness-relevant execution facts, default truth and optional
+guidance before selection. Installed Main instructions require considering that input alongside
+task fit, explicit user preference and current evidence, then recording the actual selection
+reason. The text is deliberately absent from resolved Worker selection and must never be copied,
+quoted or paraphrased into the Task contract, Worker context, execution prompt or correction.
+
+The Hub calls the field “什么时候把任务交给它”, shows a short purpose summary on saved rows and
+explains the Main-only boundary in Chinese and English. Build, 202/202 focused cross-layer tests and
+436/436 accepted Hub tests pass; JavaScript syntax, diff and temporary-debug checks pass. Live
+desktop/narrow acceptance proves actual 433px containment, approximately 44px primary controls and
+unsaved draft retention across Worker → Main → Worker. No Save ran, so current Store profiles and
+execution truth remain unchanged. The route-draft acceptance also exposed and fixed a real local
+form-restoration ordering bug without adding a second state system. This Main-direct Work Item
+creates no Worker Task, Candidate, Judge, Integration receipt or Token claim.
+
+## 2026-08-20 — Stop pre-commit publication on the repeated checkpoint timing gate
+
+一骏 authorized a bounded review/simplification followed by commit and push. The final corrected
+three-path Candidate passed ForkLight verification, one independent Judge, fresh Main accept and
+safe Integration. Main did not accept the Worker's initial larger abstraction: setup display and
+Main resolved catalog remain separate semantic consumers, while the final Candidate removes only
+demonstrated duplicate state, handlers, branches and orphan styles.
+
+The final full suite is not green: 3,180/3,181 pass, with only
+`checkpoint operation protocol completes end-to-end through bounded daemon waits` failing its
+`< 1,000ms` start-exchange assertion at 1,306ms. A focused second run repeats the same failure at
+1,693ms. No accepted Work Item path touches that call chain. Main therefore stops before commit or
+push after two purposeful identical failures. Repeating, loosening the threshold or changing
+checkpoint behavior would either loop or cross the Spec. Continuing requires 一骏 to authorize the
+recommended narrow checkpoint timing investigation or explicitly accept publication with the known
+failed gate. Exact packet: `evidence/m5-precommit-simplification-stop-decision-packet.md`.
+
+## 2026-08-20 — Admit one lightweight identity-handshake repair before publication
+
+一骏 authorizes the recommended narrow investigation and repair. Main's segmented cold-Daemon
+measurement shows the complete `health` preflight at about 562 ms and the actual
+`checkpoint_start` exchange at about 1.7 ms, so the failed one-second gate is not evidence that the
+checkpoint command runs synchronously. It is evidence that mutation compatibility currently
+depends on an unrelated full Runtime/Provider health projection.
+
+The admitted repair must preserve the pre-mutation client compatibility decision and the Daemon's
+own before-dispatch guard. It may add one explicit read-only identity-only protocol path and make
+mutating `daemonRequest` use it, but it may not delete compatibility protection, weaken full
+health, warm or relax the timing test, alter checkpoint execution, or expand into Provider/runtime
+discovery. Because this touches core Daemon safety and concurrency, exact Candidate acceptance
+requires independent verification, two read-only Judges, Main review, safe Integration and a fully
+green `npm run check`. Only then may Main use the already-granted commit and push authority.
+
+## 2026-08-21 — Accept the identity-only preflight and reopen publication
+
+Main accepts exact Revision `045796d9-8486-4e16-a2d4-126ad3a142c4`, digest
+`75defc38f686e3ff10ab44ba1dc71e94cb5cf4a039315076fd5eb74591fa4b26`. It adds one read-only
+envelope-only `identity` method, routes mutating client calls through it before the actual write,
+and leaves the Daemon's own before-dispatch comparison intact. Full `health` remains the complete
+Runtime/Provider and operational view; checkpoint execution and its timing assertion are unchanged.
+
+ForkLight independent verification passes, two different read-only Judges return usable `accept`,
+and Integration `632c0b08-c07d-4440-8263-2eb499ffd91b` applies, rebuilds and activates the exact
+Candidate. The final full suite passes 3,181/3,181. The earlier red-gate publication stop is closed,
+so Main may now use 一骏's existing commit/push authority after one final whole-diff and Git-status
+review. This decision does not graduate or waive the deferred unfamiliar-human M5-C gate.

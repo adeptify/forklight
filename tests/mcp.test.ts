@@ -159,6 +159,7 @@ test("MCP exposes ForkLight tools and reaches the daemon", async () => {
         "forklight_task_resolve",
         "forklight_validate",
         "forklight_wait",
+        "forklight_worker_catalog",
       ],
     );
     const health = await client.callTool({ name: "forklight_health", arguments: {} });
@@ -853,6 +854,77 @@ test("MCP model_routing tool is registered as read-only", async () => {
       "model_routing must be marked read-only");
     assert.equal(routingTool.annotations?.openWorldHint, false,
       "model_routing must be closed-world (never calls Provider)");
+  } finally {
+    await client.close();
+    await server.close();
+    await daemon.close();
+  }
+});
+
+test("MCP Worker catalog returns Main-only guidance without mutating settings", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "forklight-mcp-worker-catalog-"));
+  const daemon = new ForkLightDaemon(home, 0);
+  await daemon.start();
+  await daemonRequest("settings_update", {
+    patch: {
+      workerProfiles: {
+        defaultProfileId: "guided-main",
+        profiles: [
+          {
+            id: "guided-main",
+            label: "Guided Main Worker",
+            assignmentGuidance: "Prefer for focused Core work; avoid visual design.",
+            runtime: "claude-code",
+            modelConfigId: "deepseek-flash",
+            effort: "high",
+          },
+          {
+            id: "unguided-main",
+            label: "Unguided Main Worker",
+            runtime: "claude-code",
+            modelConfigId: "qwen-plus",
+            effort: "medium",
+          },
+        ],
+      },
+    },
+  }, home);
+  const before = await daemonRequest<Record<string, unknown>>("settings_get", {}, home);
+  const server = createForkLightMcpServer(home);
+  const client = new Client({ name: "forklight-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const tools = await client.listTools();
+    const tool = tools.tools.find((item) => item.name === "forklight_worker_catalog");
+    assert.equal(tool?.annotations?.readOnlyHint, true);
+    assert.equal(tool?.annotations?.openWorldHint, false);
+    assert.match(tool?.description ?? "", /Main only/i);
+    assert.match(tool?.description ?? "", /never copy/i);
+
+    const result = await client.callTool({ name: "forklight_worker_catalog", arguments: {} });
+    assert.equal(result.isError, undefined);
+    const data = result.structuredContent as {
+      defaultWorkerProfileId: string;
+      workers: Array<Record<string, unknown>>;
+    };
+    assert.equal(data.defaultWorkerProfileId, "guided-main");
+    assert.equal(data.workers.length, 2);
+    const guided = data.workers.find((item) => item.workerProfileId === "guided-main")!;
+    assert.deepEqual(guided, {
+      workerProfileId: "guided-main",
+      label: "Guided Main Worker",
+      runtime: "claude-code",
+      provider: "deepseek",
+      model: "deepseek-v4-flash",
+      effort: "high",
+      isDefault: true,
+      assignmentGuidance: "Prefer for focused Core work; avoid visual design.",
+    });
+    const unguided = data.workers.find((item) => item.workerProfileId === "unguided-main")!;
+    assert.equal("assignmentGuidance" in unguided, false);
+    const after = await daemonRequest<Record<string, unknown>>("settings_get", {}, home);
+    assert.deepEqual(after, before);
   } finally {
     await client.close();
     await server.close();

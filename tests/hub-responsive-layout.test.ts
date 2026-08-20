@@ -199,7 +199,7 @@ function loadPresentationApi(src: string) {
     { "lane-blocker-none": true, "goal-wait-all-gates-satisfied": true, "goal-wait-nothing": true },
     200,
     420,
-    280,
+    330,
     ["waiting-user-decision", "running", "waiting-verification", "ready", "not-started"],
     ["stopped-failed"],
     ["completed"],
@@ -669,13 +669,16 @@ test("FL-112E5 restores captured closed disclosures without lazy materialization
   assert.equal(nodes.board.scrollLeft, 64, "board reading position is restored");
 });
 
-test("Goal file reading order and Decision Center reuse existing Task actions", async () => {
-  const js = await readFile(path.join(hubPublic, "app.js"), "utf8");
+test("Goal document leads with meaning and only renders actionable status sections", async () => {
+  const [js, css] = await Promise.all([
+    readFile(path.join(hubPublic, "app.js"), "utf8"),
+    readFile(path.join(hubPublic, "app.css"), "utf8"),
+  ]);
   const goal = extractFunctionSource(js, "renderWorkFocusedGoal");
-  const roles = [
-    "goal-file-result",
-    "goal-file-truth",
-    "goal-file-decision",
+  const readingOrder = [
+    "goal-file-desired-result",
+    "goal-file-opening",
+    "goal-file-decision-note",
     "goal-file-phase",
     "goal-file-task",
     "goal-file-blockers",
@@ -683,19 +686,129 @@ test("Goal file reading order and Decision Center reuse existing Task actions", 
     "goal-file-evidence",
   ];
   let last = -1;
-  for (const role of roles) {
-    const at = goal.indexOf(role);
-    assert.ok(at > last, `${role} appears in the Goal file reading order`);
+  for (const item of readingOrder) {
+    const at = goal.indexOf(item);
+    assert.ok(at > last, `${item} appears in the Goal document reading order`);
     last = at;
   }
+  assert.ok(!goal.includes("goalFileDecisionNo"), "no-decision truth does not become an empty status row");
+  assert.ok(!goal.includes("goalFileNoBlockers"), "no-blocker truth does not become an empty section");
+  assert.match(css, /\.work-focused-column\s*>\s*\.work-focus\s*\{\s*order:\s*0/,
+    "legacy narrow ordering cannot lift technical details above the Goal document");
+  assert.match(css, /\.work-focused-column\s*>\s*\.work-expert-details\s*\{[\s\S]*?order:\s*1/,
+    "technical details stay after the human-readable Goal document");
+  assert.ok(js.includes("var GOAL_TREE_WIDTH_DEFAULT = 330"),
+    "the default outline is wide enough to read ordinary Goal and Plan names");
   assert.ok(goal.includes("switchTab(\"decisions\")"), "decision-needed states link to Decision Center");
   assert.ok(goal.includes("renderWorkCard"), "current Task reuses the canonical card");
   const decisions = extractFunctionSource(js, "renderDecisionCenter");
   const item = extractFunctionSource(js, "renderDecisionItem");
   assert.ok(decisions.includes("collectDecisionGroups") && decisions.includes("decision-parentless"));
+  assert.ok(decisions.includes('document.createElement("details")'),
+    "the independent decision backlog uses a keyboard-native disclosure");
+  assert.ok(decisions.includes("model.parentless.length <= 3"),
+    "only a genuinely small independent backlog opens by default");
+  assert.ok(decisions.includes("decisionParentlessCount") && decisions.includes("workCollapseSave"),
+    "the disclosure shows its exact count and remembers explicit reading state");
+  assert.match(css, /\.decision-parentless-summary\s*\{[\s\S]*?min-height:\s*44px/,
+    "the independent decision summary remains a full touch target");
+  assert.match(css, /\.decision-parentless-summary:focus-visible\s*\{/,
+    "the native disclosure has a visible keyboard focus state");
+  assert.match(css, /\.decision-parentless-items\s*\{[\s\S]*?padding:\s*0 14px 14px/,
+    "expanded decision cards stay inside the disclosure surface");
   assert.ok(item.includes("showTask") && item.includes("renderWorkMoveActControl"),
     "Decision Center reuses the existing confirmed action path");
   assert.doesNotMatch(item, /postJSON\s*\(/, "Decision Center has no second mutation path");
+});
+
+test("cross-route navigation starts auxiliary pages at the top and preserves Work separately", async () => {
+  const js = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const reset = extractFunctionSource(js, "resetRouteReadingStart");
+  const content = { scrollTop: 128, scrollLeft: 16 };
+  const resetRoute = new Function(
+    "workContentScrollEl",
+    `${reset}\nreturn resetRouteReadingStart;`,
+  )(() => content) as (tab: string) => boolean;
+
+  assert.equal(resetRoute("model"), true, "a new System route gets its own reading start");
+  assert.deepEqual(content, { scrollTop: 0, scrollLeft: 0 });
+  content.scrollTop = 84;
+  content.scrollLeft = 9;
+  assert.equal(resetRoute("work"), false, "Work owns its captured reading context");
+  assert.deepEqual(content, { scrollTop: 84, scrollLeft: 9 },
+    "generic route reset never overwrites Work continuity");
+
+  const work = extractFunctionSource(js, "rWork");
+  const switching = extractFunctionSource(js, "switchTab");
+  assert.ok(work.includes("workRouteContinuity || workCaptureWorkbenchContext()"),
+    "returning Work consumes the context captured before leaving it");
+  assert.ok(switching.includes("workRouteContinuity = workCaptureWorkbenchContext()"),
+    "leaving Work captures its mounted Goal/tree/file/detail context");
+  assert.ok(switching.includes("if(routeChanged) resetRouteReadingStart(effective)"),
+    "only a deliberate route change resets the destination reading origin");
+  assert.ok(switching.indexOf("render();") < switching.indexOf("resetRouteReadingStart(effective)"),
+    "the destination is mounted before its scroll host is reset");
+});
+
+test("model catalog contains technical identity and destructive actions at every width", async () => {
+  const [js, css] = await Promise.all([
+    readFile(path.join(hubPublic, "app.js"), "utf8"),
+    readFile(path.join(hubPublic, "app.css"), "utf8"),
+  ]);
+  const model = extractFunctionSource(js, "rModel");
+  assert.ok(model.includes('technicalSummary.textContent = t("modelsTechnicalDetails")'));
+  assert.ok(model.includes('if(actions.childNodes.length) technicalBody.appendChild(actions)'),
+    "Remove remains available but only inside the model's technical disclosure");
+  assert.match(css, /\.configure-list\.model-catalog\s*\{[\s\S]*?grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/,
+    "ordinary System widths scan the catalog in two contained columns");
+  assert.match(css, /@media\s*\(max-width:\s*680px\)[\s\S]*?\.configure-list\.model-catalog\s*\{\s*grid-template-columns:\s*1fr/,
+    "phone widths return to one readable column");
+  assert.match(css, /\.model-row-details\s*>\s*summary:focus-visible\s*\{/,
+    "keyboard focus is visible on every technical disclosure");
+  assert.match(css, /@media\s*\(max-width:\s*680px\)[\s\S]*?\.model-row-details\s*>\s*summary\s*\{\s*min-height:\s*44px/,
+    "the phone disclosure remains a practical touch target");
+  assert.match(css, /\.model-row-technical-value\s*\{[\s\S]*?overflow-wrap:\s*anywhere/,
+    "long endpoint and model identifiers cannot create page overflow");
+});
+
+test("System limits use a readable duration control and collapse to one touch-safe column", async () => {
+  const [js, css] = await Promise.all([
+    readFile(path.join(hubPublic, "app.js"), "utf8"),
+    readFile(path.join(hubPublic, "app.css"), "utf8"),
+  ]);
+  const limits = extractFunctionSource(js, "rLimits");
+  assert.ok(limits.includes('"system-setting-control system-duration-control"')
+    && limits.includes("ADV_DURATION_UNITS.forEach"),
+    "no-progress time is a value plus a human duration unit");
+  assert.match(css, /\.system-limits-grid\s*\{[\s\S]*?grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/,
+    "ordinary widths keep the four settings in two readable columns");
+  assert.match(css, /@media\s*\(max-width:\s*680px\)[\s\S]*?\.system-limits-grid\s*\{\s*grid-template-columns:\s*1fr/,
+    "phone widths use one contained column");
+  assert.match(css, /@media\s*\(max-width:\s*680px\)[\s\S]*?\.system-limits-form \.system-setting-control input,[\s\S]*?min-height:\s*44px/,
+    "phone inputs and units keep a 44px target");
+  assert.match(css, /@media\s*\(max-width:\s*680px\)[\s\S]*?\.system-limits-form > \.actions \.btn\s*\{\s*min-height:\s*44px/,
+    "phone save and back actions remain practical touch targets");
+  assert.match(css, /\.system-setting-hint\s*\{[\s\S]*?overflow-wrap:\s*anywhere/,
+    "long translated consequences cannot force horizontal overflow");
+});
+
+test("Delivery overview keeps technical disclosure and explicit editor actions touch-safe", async () => {
+  const [js, css] = await Promise.all([
+    readFile(path.join(hubPublic, "app.js"), "utf8"),
+    readFile(path.join(hubPublic, "app.css"), "utf8"),
+  ]);
+  const list = extractFunctionSource(js, "deliveryRenderProfileList");
+  assert.ok(list.includes('details.className = "delivery-profile-details"')
+    && list.includes("details.open = !!S.deliveryOpenProfiles[p.id]"),
+    "the native technical disclosure keeps deliberate same-tab state");
+  assert.match(css, /\.delivery-catalog-head\s*\{[\s\S]*?justify-content:\s*space-between/,
+    "saved count and Create remain one bounded header");
+  assert.match(css, /\.delivery-profile-id-value\s*\{[\s\S]*?overflow-wrap:\s*anywhere/,
+    "long internal IDs stay contained when requested");
+  assert.match(css, /@media\s*\(max-width:\s*768px\)[\s\S]*?\.delivery-profile-details > summary,[\s\S]*?min-height:\s*44px/,
+    "disclosure, Create and editor actions remain touch-safe on narrow screens");
+  assert.match(css, /\.delivery-profile-details > summary:focus-visible\s*\{/,
+    "keyboard focus stays visible on technical disclosure");
 });
 
 test("live refresh restores Goal Tree width, query, pane and does not steal focus", async () => {
@@ -1240,7 +1353,7 @@ test("FL-112E10 narrow contextual tree actions stay reachable and touch-safe", a
     "narrow screens show one primary pane at a time");
 
   // The same tree actions remain visible and touch-safe on phone.
-  assert.match(css, /@media\s*\(max-width:\s*760px\)[\s\S]*?\.work-tree-add\s*\{[\s\S]*?min-height:\s*44px/,
+  assert.match(css, /@media\s*\(max-width:\s*760px\)[\s\S]*?\.work-tree-add,\s*\.work-tree-add\.is-root\s*\{[\s\S]*?min-height:\s*44px/,
     "narrow tree add actions meet a practical touch target");
   assert.match(css, /\.work-tree-add:focus-visible[\s\S]*?outline:/,
     "keyboard focus visibility ships for contextual add actions");
@@ -1253,6 +1366,12 @@ test("FL-112E10 narrow contextual tree actions stay reachable and touch-safe", a
   assert.ok(tree.includes("workTreeNewGoal"), "tree root exposes New Goal");
   assert.ok(goal.includes("workTreeAddPlan"), "Goal exposes Add Plan");
   assert.ok(plan.includes("workTreeAddTask"), "Plan exposes Add Task");
+  assert.ok(goal.includes('workTreeBranchExpanded("goal", item.id, selected)')
+    && !goal.includes("!item.terminal"),
+  "phone tree shows parallel Goal rows without opening every branch");
+  assert.ok(plan.includes('workTreeBranchExpanded("plan", item.id, selected)')
+    && !plan.includes("item.tasks.length <= 6"),
+  "phone tree opens the selected Plan path instead of every short sibling");
   for (const key of ["workTreeNewGoal", "workTreeAddPlan", "workTreeAddTask"]){
     assert.equal((i18n.match(new RegExp(`${key}:`, "g")) ?? []).length, 2, `${key} remains bilingual`);
   }
@@ -1564,6 +1683,14 @@ test("FL-116A compact Worker rows and flat previews stay usable near 390px", asy
     "row actions wrap on narrow screens");
   assert.match(css, /\.configure-list \.worker-row \.worker-row-badges\s*\{[\s\S]*?flex-wrap:\s*wrap/,
     "row badges wrap instead of overflowing");
+  assert.match(css, /\.worker-assignment-summary\s*\{[\s\S]*?overflow-wrap:\s*anywhere/,
+    "saved assignment guidance wraps inside the row");
+  assert.match(css, /\.settings-group-body input[^}]*[\s\S]*?\.settings-group-body textarea\s*\{[\s\S]*?width:\s*100%/,
+    "the Main assignment textarea shares the contained full-width field contract");
+  assert.match(css, /\.settings-group-body textarea:focus-visible\s*\{[\s\S]*?box-shadow:/,
+    "the Main assignment textarea keeps visible keyboard focus");
+  assert.match(css, /@media\s*\(max-width:\s*480px\)[\s\S]*?body\[data-current-tab="worker"\] \.configure-form > \.actions \.btn\s*\{[\s\S]*?min-height:\s*44px/,
+    "Worker save and next actions keep practical phone targets");
 
   // Preview panels are flat sections, not nested cards, and still stack.
   assert.match(css, /\.worker-preview-region \.preview-panel\s*\{[\s\S]*?background:\s*transparent/,
@@ -1716,7 +1843,7 @@ test("narrow-to-wide resize hides Back without a data refresh", async () => {
   api.showTree();
   assert.equal(api.btn.hidden, true, "narrow tree pane does not present Back");
   api.showDetail();
-  assert.equal(api.btn.hidden, false, "narrow detail presents Back");
+  assert.equal(api.btn.hidden, true, "narrow detail uses its visible sheet Back instead of an occluded duplicate");
   api.showFile();
   api.widen();
   assert.equal(api.btn.hidden, true, "growing above 760px hides Back immediately");

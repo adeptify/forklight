@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { runSetupCommand, SETUP_USAGE, type SetupCliDependencies } from "../src/cli/setup.js";
 import { SettingsService } from "../src/core/settings.js";
+import { upsertWorkerProfile } from "../src/core/worker-profiles.js";
 import { SetupService } from "../src/setup/service.js";
 import type { SetupKeychainStore, SetupSystemInspector } from "../src/setup/types.js";
 import { StateStore } from "../src/state/store.js";
@@ -276,6 +277,32 @@ test("built-in Worker list includes grok-4-6-xhigh and invalid ids do not mutate
       /not in the current settings/,
     );
     assert.equal(ctx.settings.get().workerProfiles.defaultProfileId, "grok-4-6-xhigh");
+  } finally {
+    ctx.close();
+  }
+});
+
+test("Worker list exposes Main assignment guidance in human and JSON output", async () => {
+  const ctx = await isolated();
+  try {
+    const current = ctx.settings.get();
+    ctx.settings.update({
+      workerProfiles: upsertWorkerProfile(current.workerProfiles, {
+        id: "guided-cli",
+        label: "Guided CLI Worker",
+        assignmentGuidance: "Prefer for setup and packaging work.",
+        runtime: "claude-code",
+        modelConfigId: "deepseek-flash",
+      }, current.modelCatalog),
+    });
+    const human = await runSetupCommand(["worker", "list"], ctx.deps());
+    assert.match(human.stdout, /Main assignment guidance: Prefer for setup and packaging work\./);
+    const json = await runSetupCommand(["worker", "list", "--json"], ctx.deps());
+    assert.equal(
+      ((json.json as { workers: Array<{ id: string; assignmentGuidance?: string }> }).workers
+        .find((item) => item.id === "guided-cli"))?.assignmentGuidance,
+      "Prefer for setup and packaging work.",
+    );
   } finally {
     ctx.close();
   }

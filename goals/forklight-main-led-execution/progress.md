@@ -1,16 +1,77 @@
 # ForkLight Main-led Execution — Progress
 
-Last reconciled: 2026-08-19 (Asia/Shanghai)
+Last reconciled: 2026-08-21 (Asia/Shanghai)
 
 ## Goal state
 
 - Status: M5 active — M1–M4 complete; 一骏 has confirmed the M4→M5 transition
-- Current phase: M5-B exact structural Candidate terminal-delivery recovery preparing
+- Current phase: pre-commit release checks green; unfamiliar-human M5-C gate deferred
 - Overall product milestones complete: 4/5 (M1 inherited and archived; M2–M4 graduated)
-- Blocked: none; the UI Candidate is reusable, its failed Goal handoff is preserved, and M5-C remains dependency-held
+- External evidence still missing: unfamiliar-human observation requires a genuinely unfamiliar
+  willing operator and a clean disposable environment; 一骏 has deferred that gate and no Agent
+  simulation or screenshot packet is treated as a substitute
 - Main Token saving claim: worker-runtime, storage-lifecycle and Hub comprehension are proven lower
 
 ## Current M5 result
+
+2026-08-20 preflight: 一骏 requested one bounded code review and simplification before commit/push.
+The accepted Work Item is
+`specs/m5-product-graduation/work-items/precommit-code-simplification/spec.md`; it is limited to the
+currently changed Worker-guidance and Hub paths, preserves product behavior, and treats fewer
+competing call/state paths—not raw line count—as the result. Main will rebuild/restart matched
+ForkLight, run one Grok 4.6 Xhigh isolated Candidate plus one Judge, independently inspect and run
+the full suite, then use 一骏's explicit commit/push authorization. No source Candidate, commit or
+push exists at this checkpoint.
+
+2026-08-20 stop: ForkLight Task `ed7d44c1-7201-4fc8-a457-87c8fe52e8d4` ultimately produced and
+safely integrated exact three-path Revision `f427a0f2-ee74-421e-97ae-09bba47cd267`. Two focused
+verification rounds, one usable Codex Judge and Main review accepted the simplification. Final
+`npm run check`, however, passed 3,180/3,181 and twice reproduced the same out-of-scope checkpoint
+start-exchange timing failure (1,306ms in the full suite, 1,693ms focused, required `< 1,000ms`).
+The Work Item is stopped before commit/push rather than weakening the gate or changing checkpoint
+behavior outside its Spec. Decision packet:
+`evidence/m5-precommit-simplification-stop-decision-packet.md`.
+
+2026-08-20 continuation: 一骏 authorized the narrow follow-on rather than publication with a red
+gate. Main's read-only segment fixture proves the checkpoint command is not synchronously blocking
+start: cold full `health` preflight was about 562 ms, while the actual `checkpoint_start` exchange
+was about 1.7 ms and returned `running`. The accepted Work Item now separates mutation identity
+safety from complete Runtime/Provider health, keeps both client pre-mutation and server on-receipt
+guards, and forbids threshold relaxation or checkpoint behavior changes. No product-code writer
+has started yet; `execution/m5-wave-6/02-checkpoint-start-identity-handshake.yaml` is the sole next
+Task.
+
+2026-08-21 completion: Grok 4.6 Xhigh Task `3971252c-a6dc-4ca9-a830-6846f7278e86`
+delivered exact four-path Revision `045796d9-8486-4e16-a2d4-126ad3a142c4`, digest
+`75defc38f686e3ff10ab44ba1dc71e94cb5cf4a039315076fd5eb74591fa4b26`, in one native-Goal
+Attempt. Independent verification passed, Codex Luna Max and DeepSeek Pro 1M both returned usable
+`accept`, Main accepted the exact Revision, and Integration `632c0b08-c07d-4440-8263-2eb499ffd91b`
+passed source apply/verify, artifact build and matched Daemon activation. Final `npm run check`
+passes 3,181/3,181, including the unchanged checkpoint timing gate. The release blocker is closed;
+commit/push is the only remaining action in the user-authorized publication unit.
+
+Latest truth: M5-A1/A2/A3 and M5-B are graduated while Main continues the evidence-backed
+complete-Hub operating audit requested by 一骏. Work and Decision Center retain their accepted
+hierarchies. Route reading continuity, the eight-model catalog and the bilingual Limits safety
+form remain accepted. Delivery now also starts from what is saved rather than an always-open
+configuration form: each profile leads with its human label and three-stage binding summary;
+internal ID, exact commands, Edit and Remove stay in requested technical detail; Create/Edit opens
+one explicit draft which Cancel can discard without changing Store state. Worker profiles now also
+accept optional Main-only assignment guidance: users describe when Main should choose that Worker;
+the read-only Worker catalog exposes it to Main, while resolved execution input and Worker prompts
+remain unchanged. Build passes, the focused Core/Setup/CLI/MCP/Main-skill files pass 202/202 and all
+six accepted Hub files pass 436/436; syntax, diff and temporary-debug checks pass. Desktop plus
+actual 433px Chinese/English narrow acceptance has no horizontal overflow, preserves an unsaved
+Worker draft across a Worker → Main → Worker round trip and uses 44px narrow controls. No live
+Store value, existing profile, Task, Provider call or Worker execution prompt changed.
+
+M5-C packet `/Users/Shared/ForkLight-Clean-Run.65178a8a` remains valid historical technical
+evidence for the earlier selected-branch source and passed 3164/3164 prepack, isolated install,
+CLI/MCP/Hub identity and clean shutdown. It is stale for a future human run because the accepted
+Decision Center, route, Model, Limits and Delivery sources changed afterward. Do not rebuild another packet
+until the unfamiliar-human run is actually scheduled, avoiding package churn without claiming that
+missing observation.
+Detailed M5 history below remains delivery trace.
 
 一骏 has explicitly entered M5 and rejected the incumbent ForkLight Hub as a visual or structural
 authority. The existing Hub remains useful only as functional/API evidence and an anti-reference;
@@ -2236,3 +2297,142 @@ cards with a real Goal → Plan → Task tree. The root adds a Goal, each Goal a
 adds a Task through the existing intake/confirmation flow. The tree is first on mobile; independent
 work remains reachable; no API/schema or backend hierarchy changes. Machine and five-viewport
 browser acceptance restart against this user-view result. M5-C remains held.
+
+## 2026-08-19 — M5-B user-view Hub redesign graduates; M5-C starts
+
+Main-direct decision `ceba063f-8ce3-4773-b8cd-fa039bd9ea17` is terminal `completed` with
+verification `passed`. The final Work surface leads with the user's real nested Goal → Plan → Task
+tree; New Goal, Goal-level Add Plan and Plan-level Add Task open one contextual instance of the
+existing intake/confirmation flow. The rejected form-first lesson is absent, independent work stays
+reachable, parent context is exact and raw ids remain out of primary copy. No API, schema, Core,
+Store or daemon hierarchy changed, and no successful Task, Candidate, Integration receipt or Token
+saving was fabricated for the Main-direct path.
+
+The final acceptance correction keeps contextual composers visible inside folded Goal/Plan
+branches, includes submit/error/confirm state in visible-work retention, prevents a closed then
+same-id-reopened Task from accepting an older response, and gives the mobile Task sheet one visible
+Back/focus lifecycle across loading, success and failure. `npm run build`, the six accepted Hub test
+files (424/424), `git diff --check`, Hub script parsing and the final full `npm run check`
+(3162/3162) pass. Real browser checks pass at 320, 360, 390, 667×375 and 1440×900, including
+overflow, hierarchy, search ancestry, contextual add/cancel, empty-submit recovery, System
+dismissal, Task detail Back/focus and narrow/wide transitions. The original UX and contract
+reviewers both return `accept` after the corrections, with no remaining Blocker/P1.
+
+Evidence is `evidence/m5-b-main-direct-user-view-delivery.md`. The two failed Grok UI Tasks and
+their historical evidence remain truthful and protected; no commit, push or reset occurred. M5-B
+is graduated. M5-C is now the sole active serial Work Item. Its accepted spec has been reread: Main
+can begin package/visual/restart preflight, but the 30-minute journey and uncoached comprehension
+answers require a genuinely unfamiliar operator and clean disposable environment. No synthetic or
+coached substitute is admitted.
+
+M5-C package preflight then produced a temporary normal `npm pack` artifact at
+`/tmp/forklight-m5c-preflight.qIQMjM/forklight-0.2.0.tgz`. Prepack independently reran and passed
+3162/3162 tests; the tarball contains the four built Hub assets and build identity, with SHA-256
+`d88ede8138429763397d648f723ca33f8b4f37ef1e37d7a98b4e2f86232a9b36`. This artifact is
+regenerable preflight evidence, not the final frozen unfamiliar-user bundle.
+
+The same preflight found one real packaged-journey blocker: `docs/m1-clean-user-runbook.md` still
+directs a new user to the retired Overview first-Task card, while graduated M5-B authenticates into
+the Work hierarchy. The accepted M5-C spec now contains one bounded pre-observation prerequisite:
+exactly the runbook and `tests/clean-run-bundle.test.ts`, no product-code change. ForkLight Task
+`83c3142a-8868-4ae6-94ca-22b2fcc51a5f` is queued on Grok 4.6 Xhigh native Goal with one base
+Attempt, one validation repair, zero other recovery/fallback, one ordinary Judge, and unlimited
+duration/Token/no-progress/model waiting. Its accepted task file is
+`execution/m5-wave-5/01-m5-c-current-work-runbook.yaml`.
+
+## 2026-08-19 — Reopen M5-B human acceptance after user review
+
+一骏 rejects the current Hub as still too mechanical. The accepted Goal → Plan → Task tree and its
+safe creation/detail continuity remain reusable, but the selected Goal still reads as a stack of
+system sections and status fragments instead of the user's current-work story. This is a real M5
+human-acceptance failure, so the earlier M5-B graduation evidence remains truthful history but no
+longer authorizes unfamiliar-user observation.
+
+Main updated the existing M5-B spec instead of creating another roadmap or UI Worker. The new
+boundary makes the Goal desired result, current truth and next action the opening hierarchy; treats
+the tree as a document outline; demotes redundant Work instructions, daemon/count chrome and empty
+no-decision/no-blocker panels; keeps decisions prominent only when real; and limits motion to
+state-explaining branch, composer, selection and pane transitions. No backend/API/Store/Core change
+is admitted.
+
+M5-C Task `83c3142a-8868-4ae6-94ca-22b2fcc51a5f` remains running because its exact runbook/test
+paths are orthogonal to the Hub assets and its instruction to use New Goal → Add Plan → Add Task
+remains correct. Main does not cancel, recreate or time-limit it. The Task may complete its quality
+chain, but the final unfamiliar-human clock stays held until the revised Hub passes machine,
+responsive, interaction, copy and final user review.
+
+## 2026-08-19 — Reopened M5-B closes on a user-readable Goal document
+
+Main completed the authorized UI revision without another UI Worker. Work now uses the tree as a
+real outline instead of a labeled object inventory. The selected Goal opens with its desired
+result, “Now” and “Next”; only a real decision is promoted; current Plan and Task read as the Goal's
+active chapter; empty blocker, delivery and active-task panels disappear; technical truth stays
+folded after the document. The rejected vocabulary lesson, duplicate Work heading and worker/count
+chrome no longer compete with the user's work. Contextual New Goal/Add Plan/Add Task still uses the
+existing proposal and confirmation path, and Task detail keeps the accepted Back, focus,
+stale-response and live-refresh behavior.
+
+`npm run build` passes. The accepted focused Hub pair passes 269/269, `git diff --check` and Hub
+script parsing pass, and the required single Impeccable detector run returns no findings. Batched
+browser QA confirms fitted desktop and landscape layouts plus exact 320/360/390 measurements with
+no horizontal overflow; the retained desktop, mobile Goal-file and mobile contextual-add captures
+are indexed in the existing M5-B evidence. One fresh independent read-only reviewer returns
+`accept` with no Blocker/P1 after independently rerunning the scoped checks.
+
+This is Main-direct truth: no Worker Attempt, Candidate Revision, Integration receipt or Token
+saving is claimed for the revision. No backend, API, schema, Store, Core or daemon path changed.
+M5-B is graduated again on the new human-acceptance result. M5-C is the sole active Work Item; its
+orthogonal runbook Task keeps its durable state and is not canceled, recreated or time-limited.
+
+## 2026-08-19 — M5-C runbook delivery and clean bundle complete technical preflight
+
+Grok 4.6 Xhigh native-Goal Task `83c3142a-8868-4ae6-94ca-22b2fcc51a5f` completed one Attempt and
+captured exact two-path Revision `f3c764c1-f8bf-4364-9122-4628057ec445`, digest
+`9f3c0f084f97c455af0f1eb05f13dd4bee0d50ac66ddaa843de9c54d1ebfa374`. The runbook now tells an
+unfamiliar operator to follow Work → New Goal → Add Plan → Add Task, review ForkLight's proposal
+and explicitly confirm before records or work begin, then continue through ordinary Task Detail.
+One focused real-file test prevents the retired Overview instruction from returning. Exactly the
+accepted runbook and test paths changed; no product behavior changed.
+
+ForkLight independent verification passed 32/32 focused tests, build and diff check. Review Graph
+`9d6b6e7f-52b8-4492-92d4-cf915b11070c` returned one usable Codex Luna Max `accept`. Main inspected
+the exact diff and accepted it. Preflight receipt `97f2a345-b09b-4c66-af28-e8591d919084` found no
+source/path rejection; Integration `c78b0c3a-fbc5-442f-9df3-a161694004df` passed source apply,
+three source checks, build, Daemon activation and matched-health verification. No repair, retry,
+correction, fallback or Competition was used. Worker Token volume remains unavailable, so this
+Task makes no Token-saving claim.
+
+The activated source generated `/Users/Shared/ForkLight-Clean-Run.43560ab8`. Its tarball SHA-256 is
+`e737f895a80cd8f180035190fdb4f880fecf28ebd1bc131c2f0f59b5cb98d30b`; build id is
+`43560ab8c35e70307fa742e25399eeb59a69da405313dcc37119ec2cef50b2ca`. Prepack passed 3163/3163;
+isolated prefix install, installed CLI/MCP/Hub entry, identity match, sensitive-filename scan and
+clean shutdown all passed. The packaged runbook contains the current Work path. This is the fresh
+frozen unfamiliar-user packet, not human evidence. M5-C now waits only for a genuinely unfamiliar
+operator in a clean disposable environment; Main does not substitute an Agent or favorable replay.
+
+## 2026-08-19 — Completion audit restores the required M2 delivery artifact
+
+The contract completion audit found that `evidence/README.md` indexed the required
+`m2-delivery-graduation.md`, but the file itself was absent. Current Store/Goal truth still proves
+the Coding final audits, handoff destination-truth recovery and exact non-Coding recovery are each
+durably `completed` at 4/4, so this was an evidence-packaging gap, not a product or Milestone
+regression.
+
+Main created the exact contract artifact from existing accepted Task, Revision, verification,
+Judge, Main-decision, Integration and zero-change audit records. It preserves original failures and
+links storage disposition to the existing M2 storage evidence; it does not rerun M2, invent a new
+roadmap, change product code or fabricate a cleaner history. The completion audit still does not
+graduate the overall Goal because M5-C's genuinely unfamiliar-human journey remains missing.
+
+## 2026-08-19 — M5-C unfamiliar-operator handoff is frozen
+
+Main added the final no-coaching observation protocol to the existing M5-C preflight evidence. It
+defines subject eligibility, clean-environment input, the only permitted opening sentence, exact
+timing checkpoints, intervention/privacy recording, five uncoached comprehension questions,
+visual/restart checks and a fail-closed verdict. This removes the risk that a future observer
+explains the product, reruns an unfavorable result or treats field presence as comprehension.
+
+No product code, package byte, Test, Task, Worker or runtime state changed. The verified packet
+remains `/Users/Shared/ForkLight-Clean-Run.43560ab8`. No eligible unfamiliar operator or separately
+authorized clean system environment is currently available, so no further in-scope automated work
+can produce the missing human evidence.

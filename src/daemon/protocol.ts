@@ -1,5 +1,6 @@
 export type DaemonMethod =
   | "health"
+  | "identity"
   | "validate_file"
   | "submit_file"
   | "reuse_task_class"
@@ -120,6 +121,7 @@ export interface DaemonResponse {
 
 const READ_ONLY_METHODS = new Set<DaemonMethod>([
   "health",
+  "identity",
   "validate_file",
   "status",
   "inspect",

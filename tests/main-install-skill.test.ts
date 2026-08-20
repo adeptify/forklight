@@ -129,6 +129,10 @@ test("packaged orchestrator skill requires truthful routing metadata without for
   assert.match(body, /taskFamily/);
   assert.match(body, /routingDecision/);
   assert.match(body, /forklight_model_routing/);
+  assert.match(body, /forklight_worker_catalog/);
+  assert.match(body, /assignmentGuidance/);
+  assert.match(body, /Never copy, quote or paraphrase/);
+  assert.match(body, /Worker prompt/);
   assert.match(body, /genuinely considered/i);
   assert.match(body, /at least two/i);
   assert.match(body, /Competition is never automatic/i);

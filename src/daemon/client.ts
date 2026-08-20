@@ -83,7 +83,8 @@ export async function daemonRequest<T = unknown>(
 ): Promise<T> {
   const clientIdentity = currentBuildIdentity();
   if (requiresMatchingBuildIdentity(method)) {
-    const handshake = await daemonExchange("health", {}, home, clientIdentity);
+    // Compatibility only: envelope identity, never coordinator/provider health.
+    const handshake = await daemonExchange("identity", {}, home, clientIdentity);
     if (!handshake.ok) {
       throw new Error(handshake.error ?? "ForkLight daemon identity handshake failed");
     }

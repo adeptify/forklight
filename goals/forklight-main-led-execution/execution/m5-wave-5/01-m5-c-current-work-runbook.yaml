@@ -1,0 +1,144 @@
+version: 2
+name: M5-C current Work first-Task runbook repair
+project: /Users/yijunwang/code/forklight
+taskClass: m5-unfamiliar-developer-runbook-current-work-path
+taskFamily: forklight-product-graduation
+workerProfileId: grok-4-6-xhigh
+executionPreference: auto
+routingDecision:
+  taskFamily: forklight-product-graduation
+  shortlist:
+    - provider: xai
+      model: grok-4.6
+      runtime: grok-build
+      effort: xhigh
+      workerProfileId: grok-4-6-xhigh
+  selectedWorker:
+    provider: xai
+    model: grok-4.6
+    runtime: grok-build
+    effort: xhigh
+    workerProfileId: grok-4-6-xhigh
+  selectedBecause:
+    code: user-specified
+    note: 一骏长期授权后续任务优先使用 Grok CLI 4.6 Xhigh Goal 模式；本任务是 M5-C 陌生用户验收前的真实包装文档阻断项。
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+reviewRequirement:
+  requiredJudges: 1
+  reason: 这是会直接引导陌生用户完成首个真实 Task 的包装文档，需要一个独立产品理解视角确认它与已毕业 Work 层级一致。
+runtime:
+  name: grok-build
+  effort: xhigh
+  maxBudgetUsd: null
+contract:
+  outcome: Make the packaged clean-user runbook follow the graduated Work Goal → Plan → Task hierarchy so an unfamiliar operator can create the first real Task without visiting the retired Overview or writing YAML.
+  presentation:
+    summary: 把首个真实任务的操作手册改到当前 Work 层级入口，并用一个聚焦测试防止旧 Overview 指引回来。
+    language: zh-CN
+  context:
+    - Read AGENTS.md and specs/m5-product-graduation/work-items/human-acceptance/spec.md completely. The Pre-observation blocker section is the only accepted boundary; create no second spec or roadmap.
+    - M5-B is graduated through Main-direct evidence/m5-b-main-direct-user-view-delivery.md. Do not edit or re-review Hub code.
+    - The current runbook section 5 says to use Overview / Run your first real Task, but the accepted Hub authenticates into Work and presents New Goal, Goal-level Add Plan and Plan-level Add Task.
+    - The real creation contract remains outcome intake → proposal → explicit confirmation. The runbook must not imply that clicking Add immediately creates or starts work.
+    - Preserve the no-YAML, no-manual-settings, ordinary Task Detail, Main review and safe Integration journey.
+    - ForkLight serves one local developer. Add no coordination, checksum, version handshake or unrelated process machinery.
+    - No Task duration, Token, no-progress or model-work waiting ceiling applies. Stop if the required path would need product-code or UI changes.
+  inScope:
+    - Replace only the stale first-real-Task instructions in docs/m1-clean-user-runbook.md with the current Work hierarchy journey.
+    - Tell the operator to use New Goal, then Add Plan at that Goal, then Add Task at that Plan, describing outcomes in plain language.
+    - Require the operator to review ForkLight's proposal and explicitly confirm before work starts, then continue in ordinary Task Detail.
+    - Add one focused test in tests/clean-run-bundle.test.ts that reads the real packaged runbook, rejects the stale Overview instruction and requires the current controls plus confirmation truth.
+  outOfScope:
+    - Any Hub asset, i18n, API, Core, Store, daemon, setup behavior, bundle implementation or other documentation.
+    - Reintroducing the guided Overview card, changing product behavior to match the old runbook, broad copy editing, commit, push, reset, retry, fallback or Competition.
+  executionSteps:
+    - Inspect only the accepted M5-C blocker section, current runbook first-Task section, current Work control labels and clean-run bundle test conventions.
+    - Rewrite the smallest complete runbook section using user-facing steps and explicit proposal/confirmation truth.
+    - Add one behavior-focused test beside the existing package/runbook contract tests; avoid fragile full-paragraph snapshots.
+    - Run the three accepted commands and return the exact two-path diff plus any remaining human-observation prerequisite.
+  deliverables:
+    - One current first-Task runbook section that an unfamiliar operator can follow from Work without YAML or hidden routes.
+    - One focused regression test proving the packaged instruction cannot silently return to retired Overview guidance.
+    - A concise handoff confirming no product behavior or other documentation changed.
+  modules:
+    - name: clean-user runbook
+      responsibility: Explain the current human path from Work hierarchy to one real Task and its ordinary detail.
+      consumes: [graduated M5-B Work controls, existing proposal and confirmation truth]
+      produces: [plain-language operator steps]
+      boundaries: [No product behavior change, no credential content, no internal id]
+    - name: runbook contract test
+      responsibility: Prevent the packaged first-Task instruction from pointing at the retired Overview.
+      consumes: [real docs/m1-clean-user-runbook.md]
+      produces: [focused semantic assertions]
+      boundaries: [No full document snapshot, no bundle machinery change]
+  callChain:
+    - The clean bundle packages docs/m1-clean-user-runbook.md unchanged from source.
+    - An unfamiliar operator opens Work, selects New Goal, adds a Plan under that Goal and a Task under that Plan.
+    - Each contextual action opens the existing outcome intake; ForkLight proposes the next record and nothing starts until explicit confirmation.
+    - The confirmed Task continues through ordinary Task Detail, independent checks, Main review and safe Integration.
+  scenarios:
+    - name: first real Task from Work
+      given: Setup is complete and the operator opens the default Work page.
+      when: They follow section 5 without developer coaching.
+      then: They can create Goal → Plan → Task in context, confirm the proposal once and reach ordinary Task Detail without YAML or Overview.
+    - name: no premature work claim
+      given: The operator clicks a contextual Add action.
+      when: The outcome composer opens.
+      then: The runbook says ForkLight proposes first and work starts only after explicit confirmation.
+    - name: stale instruction regression
+      given: The runbook is packaged into a future bundle.
+      when: The focused test reads the real file.
+      then: It fails if section 5 again directs users to Overview / Run your first real Task or omits the current hierarchy and confirmation boundary.
+  risks:
+    - Merely renaming Overview to Work while keeping the old single-card steps would still send users to a nonexistent control; name every current contextual action.
+    - Claiming Add immediately creates work would contradict durable intake/confirmation truth; keep proposal and confirmation explicit.
+    - Broad runbook cleanup would obscure the blocker and enlarge review; touch only section 5 plus the focused test.
+  changeBudget:
+    maxFiles: 2
+    maxDiffLines: 140
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 60000
+  fileLimit: 2
+  fileLimitMode: hard
+  changedLineLimit: 140
+  changedLineLimitMode: hard
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 0
+  maxMainReverifications: 0
+  maxWorkerValidationRepairs: 1
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: hard
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: hard
+  changeBudgetMode: hard
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, coverage]
+  generatedPaths: [dist/**, coverage/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - docs/m1-clean-user-runbook.md
+    - tests/clean-run-bundle.test.ts
+acceptance:
+  criteria:
+    - Runbook section 5 uses Work, New Goal, Add Plan and Add Task and no longer points the operator to Overview / Run your first real Task.
+    - The instructions preserve outcome intake, proposal and explicit confirmation before work starts, then ordinary Task Detail, Main review and safe Integration.
+    - An unfamiliar operator is not asked to write YAML/JSON, edit settings or inspect Store/database state.
+    - Exactly docs/m1-clean-user-runbook.md and tests/clean-run-bundle.test.ts change; no product behavior or other documentation changes.
+    - ForkLight independent verification passes. One independent ordinary Judge must accept the exact Revision before Main serial Integration.
+  commands:
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/clean-run-bundle.test.ts
+    - npm run build
+    - git diff --check

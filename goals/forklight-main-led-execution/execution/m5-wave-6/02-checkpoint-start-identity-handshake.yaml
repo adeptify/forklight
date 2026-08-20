@@ -1,0 +1,150 @@
+version: 2
+name: M5 checkpoint start identity handshake
+project: /Users/yijunwang/code/forklight
+taskClass: forklight-checkpoint-start-identity-handshake
+taskFamily: worker-runtime
+workerProfileId: grok-4-6-xhigh
+executionPreference: auto
+routingDecision:
+  taskFamily: worker-runtime
+  shortlist:
+    - provider: xai
+      model: grok-4.6
+      runtime: grok-build
+      effort: xhigh
+      workerProfileId: grok-4-6-xhigh
+  selectedWorker:
+    provider: xai
+    model: grok-4.6
+    runtime: grok-build
+    effort: xhigh
+    workerProfileId: grok-4-6-xhigh
+  selectedBecause:
+    code: relevant-delivery
+    note: The project requires Grok 4.6 Xhigh for a bounded core-runtime repair with exact deterministic checks and Main-owned integration.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+reviewRequirement:
+  requiredJudges: 2
+  reason: The change touches the Daemon mutation-safety handshake and checkpoint concurrency boundary, so project policy requires two independent read-only Judges.
+runtime:
+  name: grok-build
+  effort: xhigh
+  maxBudgetUsd: null
+contract:
+  outcome: Keep fail-closed pre-mutation build identity protection while replacing the heavyweight full-health preflight with one explicit lightweight identity-only handshake, so cold checkpoint_start returns quickly without changing checkpoint execution.
+  presentation:
+    summary: 将写请求的版本安全握手与完整运行环境健康检查分开，保留写保护并恢复 checkpoint_start 的短交换。
+    language: zh-CN
+  context:
+    - Read AGENTS.md and specs/m5-product-graduation/work-items/checkpoint-start-identity-handshake/spec.md completely. That Spec is the sole requirement source; create no second Spec, roadmap or evidence file.
+    - The current dirty tree is the accepted M5 baseline. Do not revert or rewrite unrelated changes.
+    - A fresh diagnostic measured the current full health preflight at about 562 ms and the actual checkpoint_start exchange at about 1.7 ms. The unchanged end-to-end timing test failed twice at 1306 ms and 1693 ms.
+    - Do not delete pre-mutation client protection. An old or incompatible Daemon must be rejected before the actual mutating request is sent, and the current Daemon must still enforce identity on receipt.
+    - Do not weaken full health, warm the test, raise the threshold, change sleep duration or alter checkpoint execution/report semantics.
+    - Do not commit, push, reset, touch credentials, mutate the real Store or run a live Provider/Task action.
+  inScope:
+    - Add the smallest explicit read-only identity-only Daemon protocol path or equivalent single-responsibility preflight.
+    - Route mutating daemonRequest calls through the lightweight preflight and exact existing identity comparison before one actual mutation exchange.
+    - Preserve server-side identity enforcement and add focused regression tests for compatibility and cold checkpoint timing.
+  outOfScope:
+    - Provider or Runtime health redesign, scheduling, Store/schema, Hub, dependencies, protocol migration, generated output, SSOT/evidence, commit or push.
+  executionSteps:
+    - Trace the current client preflight and server mutation guard, and confirm which responsibilities are duplicate versus defense in depth.
+    - Implement one bounded identity-only preflight that cannot load coordinator health or Provider/credential truth.
+    - Keep the actual request identity guard, add focused tests, and run every accepted command.
+    - Inspect the final diff and hand off the exact preflight and mutation call chain plus compatibility reasoning.
+  deliverables:
+    - One bounded Candidate limited to the three Daemon production files and two focused tests.
+    - Passing build, complete checkpoint-operation tests, focused identity tests and diff integrity.
+    - A plain-language handoff explaining why full health remains complete and why stale mutation remains fail-closed.
+  modules:
+    - name: Daemon protocol identity preflight
+      responsibility: Return the Daemon response-envelope identity without loading environment health or mutating state.
+      consumes: [client identity, local Daemon connection]
+      produces: [server build identity]
+      boundaries: [read-only, no coordinator health, no Provider or credential inspection]
+    - name: Daemon client mutation gate
+      responsibility: Compare identities before sending exactly one actual mutating request.
+      consumes: [method classification, client identity, identity preflight response]
+      produces: [compatible mutation exchange or stable pre-mutation error]
+      boundaries: [read-only requests unchanged, shutdown exception unchanged]
+    - name: Daemon server mutation guard
+      responsibility: Reject incompatible client identity before dispatch even after client preflight.
+      consumes: [request client identity]
+      produces: [dispatch or protocol/build mismatch]
+      boundaries: [must remain present]
+  callChain:
+    - daemonRequest(mutating) → lightweight identity preflight → compareBuildIdentity → actual daemonExchange(mutating) → server identity guard → dispatch.
+    - explicit health → coordinator health → complete cached environment and fresh operational truth.
+    - checkpoint_start dispatch → durable started evidence → background command → bounded wait/report; no command wait in start response.
+  scenarios:
+    - name: current cold checkpoint start
+      given: A fresh Daemon and current client with a one-second approved command.
+      when: checkpoint_start is requested.
+      then: The unchanged under-1000ms assertion passes and the command completes once in the background.
+    - name: stale client or daemon
+      given: Build or protocol identity differs.
+      when: A mutating daemonRequest is attempted.
+      then: The client refuses before sending the actual mutation and the Daemon guard would also refuse an incompatible request.
+    - name: explicit full health
+      given: A user requests health.
+      when: The health method runs.
+      then: Complete Runtime, Provider and operational truth remains present.
+  risks:
+    - Removing the preflight entirely would let an older Daemon receive a mutation before compatibility is known.
+    - Reusing full health keeps the cold-path latency and flaky gate.
+    - Adding a broad health cache or timing allowance would hide the responsibility error instead of fixing it.
+  changeBudget:
+    maxFiles: 5
+    maxDiffLines: 240
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 60000
+  fileLimit: 5
+  fileLimitMode: hard
+  changedLineLimit: 240
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxWorkerValidationRepairs: 1
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: warn
+  changeBudgetMode: warn
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, coverage]
+  generatedPaths: [dist/**, coverage/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/daemon/protocol.ts
+    - src/daemon/client.ts
+    - src/daemon/server.ts
+    - tests/daemon.test.ts
+    - tests/checkpoint-operation.test.ts
+acceptance:
+  criteria:
+    - Cold checkpoint_start passes the unchanged under-1000ms assertion and completes its approved command exactly once through bounded wait/report.
+    - Mutating daemonRequest compares build and protocol identity before the actual mutating exchange; stale identity remains fail-closed with stable errors.
+    - Server-side mutation identity enforcement, read-only mismatch behavior, shutdown exception and complete explicit health output remain unchanged.
+    - Identity preflight is read-only and never loads coordinator health, Provider or credential inspection.
+    - The Candidate changes only allowed paths and contains no generated output, threshold relaxation, debug code, Store mutation, commit or push.
+    - ForkLight independent verification passes and two independent Judges accept before Main integration.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/checkpoint-operation.test.ts
+    - node --disable-warning=ExperimentalWarning --test --import tsx --test-name-pattern='identity matching protects state changes|daemon exposes identity' tests/daemon.test.ts
+    - git diff --check

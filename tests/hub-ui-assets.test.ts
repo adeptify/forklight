@@ -65,6 +65,167 @@ test("Hub public assets exist with configure + operate chrome", async () => {
   assert.ok(css.length > 200);
 });
 
+test("Decision Center leads with Goal decisions and contains the independent backlog", async () => {
+  const [src, i18n] = await Promise.all([
+    readFile(path.join(hubPublic, "app.js"), "utf8"),
+    readFile(path.join(hubPublic, "i18n.js"), "utf8"),
+  ]);
+  const start = src.indexOf("function renderDecisionCenter(");
+  const end = src.indexOf("\nfunction rDecisions(", start);
+  const decisions = src.slice(start, end);
+  assert.ok(start >= 0 && end > start, "Decision Center renderer remains inspectable");
+  assert.ok(decisions.indexOf("model.groups.forEach") < decisions.indexOf("if(model.parentless.length)"),
+    "Goal-bound decisions remain before independent task decisions");
+  assert.ok(decisions.includes('document.createElement("details")'),
+    "independent decisions use one native disclosure");
+  assert.ok(decisions.includes("model.parentless.length <= 3"),
+    "large independent backlogs start folded");
+  assert.ok(decisions.includes('workCollapse["decision-parentless:tasks"] = parentless.open'),
+    "an explicit disclosure choice persists in the bounded tab-local reading state");
+  assert.ok(decisions.includes("renderDecisionItem(item)"),
+    "opening the disclosure keeps every canonical decision card and action");
+  assert.ok(i18n.includes('decisionParentlessCount: "Independent task decisions · {count}"'));
+  assert.ok(i18n.includes('decisionParentlessCount: "独立任务的决定 · {count}"'));
+
+  const statusStart = src.indexOf("function updStatus(");
+  const statusEnd = src.indexOf("\nfunction setPageChrome(", statusStart);
+  const status = src.slice(statusStart, statusEnd);
+  assert.ok(status.includes('(S.tab || "work") !== "decisions"'),
+    "generic Runtime count chips do not compete with Decision Center content");
+});
+
+test("narrow page Back has one owner while Task Detail is open", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const back = extractFunctionSource(src, "workUpdateMobileBack");
+  assert.ok(back.includes("if(narrow && S.detail) show = false"),
+    "the Task Detail drawer owns Back while the sheet is open");
+  assert.ok(back.includes('else if(narrow && (S.tab || "work") === "work" && S.workMobilePane !== "tree") show = true'),
+    "Work-pane Back when detail is closed is unchanged");
+  assert.doesNotMatch(back, /S\.tab === ["']decisions["']\s*&&\s*S\.detail/,
+    "page Back has no later decisions-and-detail branch");
+});
+
+test("Goal file CSS has no orphan reason or task-facts selectors", async () => {
+  const css = await readFile(path.join(hubPublic, "app.css"), "utf8");
+  assert.equal(css.includes(".goal-file-reason"), false, "orphan .goal-file-reason is gone");
+  assert.equal(css.includes(".goal-file-task-facts"), false, "orphan .goal-file-task-facts is gone");
+  assert.match(css, /\.goal-file-lead,\s*\n\.goal-file-fact,\s*\n\.goal-file-retained/,
+    "live Goal-file lead/fact/retained grouping remains");
+  assert.match(css, /\.goal-file-fact,\s*\n\.goal-file-retained,\s*\n\.goal-file-next,\s*\n\.goal-file-blocker/,
+    "live Goal-file fact/retained/next/blocker grouping remains");
+  assert.ok(css.includes(".goal-file-blocker"), "live Goal-file blocker selector remains");
+  assert.ok(css.includes(".goal-file-more-tasks"), "live Goal-file more-tasks selector remains");
+});
+
+test("Hub route changes do not open a different page at the previous scroll offset", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const switching = extractFunctionSource(src, "switchTab");
+  const reset = extractFunctionSource(src, "resetRouteReadingStart");
+  const work = extractFunctionSource(src, "rWork");
+
+  assert.ok(switching.includes("var routeChanged = effective !== previousTab"),
+    "same-route refresh and deliberate navigation remain distinguishable");
+  assert.ok(switching.includes('if(previousTab === "work" && routeChanged)'),
+    "Work continuity is captured only when the user actually leaves Work");
+  assert.ok(reset.includes('if(tab === "work") return false'),
+    "the generic destination reset cannot erase the Goal reading position");
+  assert.ok(reset.includes("content.scrollTop = 0") && reset.includes("content.scrollLeft = 0"),
+    "new auxiliary pages start at their title rather than the prior page midpoint");
+  assert.ok(work.includes("workRouteContinuity = null"),
+    "a valid Work return consumes the route context exactly once");
+  assert.doesNotMatch(reset, /scrollIntoView|behavior\s*:\s*["']smooth["']/,
+    "route entry does not add surprising motion or focus stealing");
+});
+
+test("Model catalog leads with recognizable names and requests technical management detail", async () => {
+  const [src, i18n] = await Promise.all([
+    readFile(path.join(hubPublic, "app.js"), "utf8"),
+    readFile(path.join(hubPublic, "i18n.js"), "utf8"),
+  ]);
+  const model = extractFunctionSource(src, "rModel");
+  assert.ok(model.includes('"configure-list model-catalog"')
+    && model.includes('data-fl-role", "model-row"'), "saved models use one bounded catalog");
+  assert.ok(model.includes('cardHead(\n      mc.label,\n      ""'),
+    "the primary title is the human label without a configuration ID suffix");
+  assert.ok(model.includes("providerDisplayName(mc.provider)"),
+    "the primary row uses a recognizable provider name");
+  assert.ok(model.includes('document.createElement("details")')
+    && model.includes('data-fl-role", "model-row-details"'),
+    "technical facts and management use a native per-model disclosure");
+  assert.ok(model.indexOf('technicalLine(t("modelsTechnicalConfigId"), mc.id)')
+    < model.indexOf("technicalBody.appendChild(actions)"),
+    "raw identity and the existing Remove action stay inside requested detail");
+  assert.ok(!model.includes('mc.label + " (" + mc.id + ")"'),
+    "raw config IDs no longer appear in primary model titles");
+  for (const phrase of [
+    "Saved models · {count}", "Connection and technical details",
+    "已保存的模型 · {count}", "连接与技术信息",
+  ]) assert.ok(i18n.includes(phrase), phrase);
+});
+
+test("System limits explain consequences and preserve the canonical settings contract", async () => {
+  const [src, i18n] = await Promise.all([
+    readFile(path.join(hubPublic, "app.js"), "utf8"),
+    readFile(path.join(hubPublic, "i18n.js"), "utf8"),
+  ]);
+  const limits = extractFunctionSource(src, "rLimits");
+  assert.ok(limits.includes('t("systemLimitsTitle")')
+    && limits.includes('t("systemLimitsBody")'), "Limits opens with a human consequence story");
+  assert.doesNotMatch(limits, /Default max budget \(USD\)|Hard maximum budget \(USD\)|Max concurrency/,
+    "backend field names are not visible labels");
+  assert.ok(limits.includes("msDurationParts(hs.noProgressTimeoutMs)")
+    && limits.includes("durationPartsToMs(timeoutIn.value, timeoutUnit.value)"),
+    "the readable duration round-trips through the existing millisecond adapter");
+  assert.ok(!limits.includes("hs.noProgressTimeoutMs || 600000"),
+    "the page never substitutes a tighter progress stop for the saved value");
+  assert.ok(limits.includes('String(b.value).trim() === "" ? null : Number(b.value)'),
+    "a blank default budget remains the canonical unlimited null value");
+  for (const field of [
+    "defaultMaxBudgetUsd", "maximumBudgetUsd", "maxConcurrency", "noProgressTimeoutMs",
+  ]) assert.ok(limits.includes(`${field}:`), `${field} remains in the settings POST`);
+  for (const phrase of [
+    "This is not a total runtime deadline",
+    "Limits", "The final safety line shared by every Worker",
+    "这不是任务总时长", "限额", "所有 Worker 共用的最后安全线",
+  ]) assert.ok(i18n.includes(phrase), phrase);
+});
+
+test("Delivery opens as a human overview and mounts configuration only on request", async () => {
+  const [src, i18n] = await Promise.all([
+    readFile(path.join(hubPublic, "app.js"), "utf8"),
+    readFile(path.join(hubPublic, "i18n.js"), "utf8"),
+  ]);
+  const list = extractFunctionSource(src, "deliveryRenderProfileList");
+  const editor = extractFunctionSource(src, "deliveryRenderEditor");
+  const route = extractFunctionSource(src, "rDelivery");
+  assert.ok(list.includes('h("div", "dp-label", p.label)')
+    && list.includes('t("deliveryStageSummary"'),
+    "saved delivery rows lead with a human label and stage summary");
+  assert.ok(list.includes('document.createElement("details")')
+    && list.includes('t("deliveryTechnicalDetails")'),
+    "technical commands and management are requested native detail");
+  assert.ok(list.indexOf('t("deliveryTechnicalId")') < list.indexOf("technical.appendChild(actions)"),
+    "internal ID, Edit and Remove remain together inside technical detail");
+  assert.ok(!list.includes('h("span", "dp-id", p.id)'),
+    "internal setup IDs no longer lead the saved catalog");
+  assert.ok(route.includes("if(S.deliveryEditorDraft) profilesCard.appendChild(deliveryRenderEditor")
+    && route.includes("if(S.deliveryDirty) viewEl.appendChild(deliveryRenderSaveBar"),
+    "empty editor and inactive save panel are absent from the reading view");
+  assert.ok(src.includes("function deliveryProfileOptionLabel(")
+    && src.includes("duplicate ? (profile.label"),
+    "selectors add an internal ID only to disambiguate duplicate display names");
+  assert.ok(editor.includes('addEventListener("input"')
+    && editor.includes("S.deliveryEditorDraft[pair[1]]"),
+    "unsaved editor fields survive a same-tab rebuild without becoming saved settings");
+  assert.ok(editor.includes("deliveryCancelEditor")
+    && src.includes('focus({ preventScroll: true })'),
+    "create and edit both have a focused non-mutating Cancel path");
+  for (const phrase of [
+    "Saved delivery setups · {count}", "Delivery steps and management",
+    "已保存的交付方式 · {count}", "交付步骤与管理",
+  ]) assert.ok(i18n.includes(phrase), phrase);
+});
+
 test("Hub explains the real Competition and exposes an explicit Main decision flow", async () => {
   const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
   const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
@@ -8603,6 +8764,74 @@ test("FL-112B Work expresses Goal → Plan → Task through one contextual tree"
     "the rail is named from the user's point of view");
 });
 
+test("M5-B Goal Tree opens only the selected reading path by default", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const keySource = extractFunctionSource(src, "workTreeBranchKey");
+  const expandedSource = extractFunctionSource(src, "workTreeBranchExpanded");
+  const setSource = extractFunctionSource(src, "workTreeBranchSetExpanded");
+  const factory = new Function(`
+    var workCollapse = null;
+    var saved = {};
+    function workCollapseLoad(){ return saved; }
+    function workCollapseSave(next){ saved = Object.assign({}, next); }
+    ${keySource}
+    ${expandedSource}
+    ${setSource}
+    return {
+      key: workTreeBranchKey,
+      expanded: workTreeBranchExpanded,
+      set: workTreeBranchSetExpanded,
+      saved: function(){ return saved; }
+    };
+  `);
+  const api = factory() as {
+    key: (kind: string, id: string) => string;
+    expanded: (kind: string, id: string, defaultExpanded: boolean) => boolean;
+    set: (kind: string, id: string, expanded: boolean) => void;
+    saved: () => Record<string, boolean>;
+  };
+
+  assert.equal(api.expanded("goal", "goal-selected", true), true,
+    "the selected Goal opens when no reading preference exists");
+  assert.equal(api.expanded("goal", "goal-sibling", false), false,
+    "a parallel sibling Goal starts folded");
+  api.set("goal", "goal-sibling", true);
+  assert.equal(api.expanded("goal", "goal-sibling", false), true,
+    "an explicit disclosure survives a Work rebuild");
+  api.set("goal", "goal-selected", false);
+  assert.equal(api.expanded("goal", "goal-selected", true), false,
+    "an explicit fold remains a tab-local reading preference");
+  assert.match(api.key("plan", "/project/goals/current/plan.json"), /^tree-plan:[A-Za-z0-9:_-]+$/,
+    "path-shaped Plan identity becomes a bounded session-safe key");
+  assert.equal(Object.keys(api.saved()).length, 2, "only touched branches become stored preferences");
+
+  const goal = extractFunctionSource(src, "renderWorkTreeGoal");
+  const plan = extractFunctionSource(src, "renderWorkTreePlan");
+  const disclosure = extractFunctionSource(src, "renderWorkTreeDisclosure");
+  const selectWorkspace = extractFunctionSource(src, "workSelectWorkspace");
+  const selectPlan = extractFunctionSource(src, "workSelectGoalPlan");
+  assert.ok(goal.includes('workTreeBranchExpanded("goal", item.id, selected)'),
+    "Goal default follows the selected reading path");
+  assert.ok(!goal.includes("!item.terminal"),
+    "non-terminal status no longer expands every parallel Goal");
+  assert.ok(plan.includes('workTreeBranchExpanded("plan", item.id, selected)'),
+    "Plan default follows the selected/current phase");
+  assert.ok(!plan.includes("item.tasks.length <= 6"),
+    "short sibling Plans no longer expand merely because they have few Tasks");
+  for (const renderer of [goal, plan]) {
+    assert.ok(renderer.includes("!!S.workTreeQuery") && renderer.includes("workCreateTargetExpands"),
+      "search and an open contextual composer still reveal ancestry");
+  }
+  assert.ok(disclosure.includes("workTreeBranchSetExpanded(kind, id, expanded)"),
+    "disclosure writes the existing tab-local reading state");
+  assert.ok(selectWorkspace.includes('workTreeBranchSetExpanded("goal", next.id, true)')
+    && selectWorkspace.includes('workTreeBranchSetExpanded("plan", next.id, true)'),
+  "selecting a folded workspace opens that exact branch");
+  assert.ok(selectPlan.includes('workTreeBranchSetExpanded("goal", goalId, true)')
+    && selectPlan.includes('workTreeBranchSetExpanded("plan", planId, true)'),
+  "selecting a Goal phase opens both ancestors");
+});
+
 test("FL-112B terminal Goals stay in the History tree without a duplicate lane", async () => {
   const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
   const css = await readFile(path.join(hubPublic, "app.css"), "utf8");
@@ -10283,6 +10512,53 @@ test("FL-112E10 tree location opens one composer with exact parent context", asy
   assert.ok(!opener.includes("postJSON") && !opener.includes("refresh("),
     "opening the composer creates nothing and starts no request");
 
+  const visibleTruth = extractFunctionSource(src, "workVisibleTruthSnapshot");
+  assert.ok(visibleTruth.includes("createTarget: workStableTruthClone(S.workCreateTarget"),
+    "opening or closing the contextual composer invalidates the identical-poll DOM snapshot");
+  for (const state of ["outcomeSubmitting", "outcomeCreateError", "outcomeConfirmPendingId", "outcomeConfirmError"]){
+    assert.ok(visibleTruth.includes(state), `${state} visibly invalidates the identical-poll DOM snapshot`);
+  }
+
+  const expandGoalSource = extractFunctionSource(src, "workCreateTargetExpandsGoal");
+  const expandPlanSource = extractFunctionSource(src, "workCreateTargetExpandsPlan");
+  const expansion = new Function(`${expandGoalSource}\n${expandPlanSource}; return {
+    goal: workCreateTargetExpandsGoal,
+    plan: workCreateTargetExpandsPlan,
+  };`)() as {
+    goal: (target: Record<string, string> | null, goalId: string) => boolean;
+    plan: (target: Record<string, string> | null, goalId: string, planId: string) => boolean;
+  };
+  assert.equal(expansion.goal({ shape: "plan", goalId: "g1" }, "g1"), true,
+    "Add Plan expands its folded Goal");
+  assert.equal(expansion.goal({ shape: "task", goalId: "g1", planId: "p1" }, "g1"), true,
+    "Add Task expands its folded Goal ancestor");
+  assert.equal(expansion.plan({ shape: "task", goalId: "g1", planId: "p1" }, "g1", "p1"), true,
+    "Add Task expands its exact folded Plan");
+  assert.equal(expansion.plan({ shape: "task", goalId: "g1", planId: "p2" }, "g1", "p1"), false,
+    "an unrelated creation target does not open another Plan");
+
+  const showTask = extractFunctionSource(src, "showTask");
+  assert.equal((showTask.match(/taskDetailLoadIsCurrent\(loadGeneration, id\)/g) ?? []).length, 2,
+    "a late Task success or failure is bound to the exact Task-detail request generation");
+  assert.ok(showTask.includes("failureClose.focus()"),
+    "a Task load failure restores focus to the visible sheet Back");
+  const loadingDetail = extractFunctionSource(src, "loadingDetail");
+  assert.ok(loadingDetail.includes("closeBtn()") && loadingDetail.includes('t("mobileBack")'),
+    "the full-width mobile loading sheet offers a visible Back before Task data arrives");
+  assert.ok(loadingDetail.includes("workUpdateMobileBack()"),
+    "opening the full-width sheet hides the occluded page-level Back immediately");
+  assert.ok(loadingDetail.includes("loadingClose.focus()"),
+    "the loading sheet focuses its visible Back immediately");
+
+  const currentSource = extractFunctionSource(src, "taskDetailLoadIsCurrent");
+  const detailCurrent = new Function("S", "generation", `${currentSource};
+    var taskDetailLoadGeneration = generation;
+    return taskDetailLoadIsCurrent;
+  `)({ detail: true, detailTaskId: "task-a" }, 3) as (generation: number, id: string) => boolean;
+  assert.equal(detailCurrent(3, "task-a"), true, "the current same-id request may render");
+  assert.equal(detailCurrent(2, "task-a"), false, "a closed then reopened same-id request is stale");
+  assert.equal(detailCurrent(3, "task-b"), false, "a different Task request cannot overwrite the current sheet");
+
   const contextSource = extractFunctionSource(src, "workCreateTargetContext");
   const contextFor = new Function(`${contextSource}; return workCreateTargetContext;`)() as
     (target: Record<string, string>) => string;
@@ -11756,7 +12032,7 @@ test("FL-112F Work copy and calm empty columns preserve the canonical board cont
   const { enSection, zhSection } = splitI18n(i18n);
   assert.ok(enSection.includes("One finite phase made of ordered Tasks"));
   assert.ok(zhSection.includes("一个由有序 Task 组成的有限阶段"));
-  assert.ok(enSection.includes("Tasks in this phase") && zhSection.includes("当前阶段的 Task"));
+  assert.ok(enSection.includes("Tasks in this phase") && zhSection.includes("本阶段的任务"));
   assert.ok(enSection.includes("This Goal owns ordered phases") && zhSection.includes("Goal 包含阶段"));
   const goal = extractFunctionSource(src, "renderWorkFocusedGoal");
   assert.ok(goal.includes('"workPhaseTasksTitle"') && goal.includes('"workGoalTasksHint"'),
@@ -12018,13 +12294,57 @@ test("FL-116A Worker settings lead with a compact selectable list and one groupe
 
   // Every existing flexible control id remains reachable inside the grouped form.
   for (const id of [
-    "fl-wp-id", "fl-wp-label", "fl-wp-budget-mode", "fl-wp-budget",
+    "fl-wp-id", "fl-wp-label", "fl-wp-assignment-guidance", "fl-wp-budget-mode", "fl-wp-budget",
     "fl-wp-execution", "fl-wp-network-mode", "fl-wp-network-http",
     "fl-wp-network-https", "fl-wp-network-noproxy",
   ]) {
     assert.ok(block.includes(id), `control ${id} still ships`);
   }
   assert.ok(src.includes('t("workersPricingRoute")'), "pricing route control still ships");
+});
+
+test("Worker assignment guidance is visible to Main and isolated from Worker execution", async () => {
+  const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  const css = await readFile(path.join(hubPublic, "app.css"), "utf8");
+  const workerStart = src.indexOf("function rWorker()");
+  const workerEnd = src.indexOf("\nfunction rLimits()", workerStart);
+  const block = src.slice(workerStart, workerEnd);
+
+  assert.ok(block.includes('assignmentIn.id = "fl-wp-assignment-guidance"'),
+    "the Worker editor has one stable assignment-guidance control");
+  assert.ok(block.includes("assignmentIn.maxLength = WORKER_ASSIGNMENT_GUIDANCE_MAX"),
+    "the browser uses the same bounded guidance length");
+  assert.ok(block.includes("editingProfile.assignmentGuidance || \"\""),
+    "editing loads the saved guidance");
+  assert.ok(block.includes("profile.assignmentGuidance = assignmentIn.value.trim()"),
+    "save sends only trimmed non-blank guidance");
+  assert.ok(src.includes('assignmentGuidance: v("fl-wp-assignment-guidance")'),
+    "draft capture retains unsaved guidance");
+  assert.ok(block.includes('setVal("fl-wp-assignment-guidance"'),
+    "draft restore returns guidance after a presentation rebuild");
+  assert.ok(src.includes("assignmentGuidance: profile.assignmentGuidance"),
+    "polling detects a real saved-guidance change");
+  assert.ok(block.includes("workersAssignmentGuidanceSaved")
+    && block.includes("workersAssignmentGuidanceEmpty"),
+  "saved rows explain both the configured and absent states");
+
+  for (const key of [
+    "workersAssignmentGuidanceLabel",
+    "workersAssignmentGuidanceHint",
+    "workersAssignmentGuidanceSaved",
+    "workersAssignmentGuidanceEmpty",
+  ]) {
+    assert.equal((i18n.match(new RegExp(`${key}:`, "g")) ?? []).length, 2, `${key} is bilingual`);
+  }
+  assert.ok(i18n.includes("只给 Main 选 Worker 时参考"), "Chinese copy names the Main-only boundary");
+  assert.ok(i18n.includes("不会发给 Worker"), "Chinese copy denies Worker injection");
+  assert.ok(i18n.includes("Main uses this only to choose a Worker"), "English copy names the Main-only boundary");
+  assert.ok(i18n.includes("never sent to the Worker"), "English copy denies Worker injection");
+  assert.match(css, /\.worker-assignment-summary\s*\{[\s\S]*?overflow-wrap:\s*anywhere/,
+    "long saved guidance stays inside the Worker row");
+  assert.match(css, /\.settings-group-body textarea\s*\{[\s\S]*?resize:\s*vertical/,
+    "the editor supports readable multi-line guidance without fixed overflow");
 });
 
 test("FL-116A Worker settings copy is bilingual and the recovery narrative is truthful", async () => {
@@ -12214,10 +12534,20 @@ test("FL-116A unsaved draft survives deliberate rWorker rebuilds without autosav
   assert.ok(block.includes("S.workerFormContextId === S.workerEditId"),
     "switching Worker rows cannot restore the previous Worker's draft into the new selection");
   assert.ok(block.includes("workerRestoreDraft()"), "rWorker restores the captured draft");
+  assert.ok(block.indexOf("form.appendChild(contractGroup)") < block.lastIndexOf("workerRestoreDraft()"),
+    "draft restore runs only after every grouped control is attached to the form");
+  assert.ok(src.includes('assignmentGuidance: v("fl-wp-assignment-guidance")'),
+    "the Main assignment note is part of the retained draft");
+  assert.ok(block.includes('setVal("fl-wp-assignment-guidance"'),
+    "the Main assignment note restores after language/tab rebuilds");
   assert.ok(block.includes("S.workerSummariesRefresher = workerRefreshSummaries"),
     "preview can refresh the summaries after a rebuild");
   const switchSrc = extractFunctionSource(src, "switchTab");
   assert.ok(switchSrc.includes("workerCaptureDraftFromDom"), "leaving the tab captures the draft");
+  assert.ok(switchSrc.includes('S.tab === "worker" && S.workerFormRendered'),
+    "an explicit route leave does not depend on a fragile input-active signal");
+  assert.ok(!switchSrc.includes('S.workerFormRendered && S.workerFormActive'),
+    "route continuity captures rendered values even when the browser did not bubble an input event");
   const languageHandlerStart = src.indexOf("window.onForklightLangChange = function()");
   const languageHandlerEnd = src.indexOf("\n  };", languageHandlerStart);
   const languageHandler = src.slice(languageHandlerStart, languageHandlerEnd);

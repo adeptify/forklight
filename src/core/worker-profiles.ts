@@ -53,9 +53,14 @@ const QUALITY_MIN_FIELDS = new Set<string>([
   "minModuleResponsibilityCharacters",
 ]);
 
+export const WORKER_ASSIGNMENT_GUIDANCE_MAX_CHARS = 1_200;
+
 export interface WorkerProfile {
   id: string;
   label: string;
+  /** User-authored advice for Main's Worker selection only. It is deliberately
+   *  absent from ResolvedWorkerSelection and must never become Worker input. */
+  assignmentGuidance?: string;
   runtime: RuntimeName;
   /** Preferred: select from model catalog. */
   modelConfigId?: string;
@@ -244,6 +249,19 @@ export function validateWorkerProfile(
   if (typeof o.label !== "string" || o.label.trim().length < 1 || o.label.length > 80) {
     throw new Error(`${label}.label must be a non-empty string ≤ 80 chars`);
   }
+  let assignmentGuidance: string | undefined;
+  if (o.assignmentGuidance !== undefined) {
+    if (typeof o.assignmentGuidance !== "string") {
+      throw new Error(`${label}.assignmentGuidance must be a string`);
+    }
+    const normalized = o.assignmentGuidance.trim();
+    if (normalized.length > WORKER_ASSIGNMENT_GUIDANCE_MAX_CHARS) {
+      throw new Error(
+        `${label}.assignmentGuidance must be ≤ ${WORKER_ASSIGNMENT_GUIDANCE_MAX_CHARS} chars`,
+      );
+    }
+    if (normalized.length > 0) assignmentGuidance = normalized;
+  }
   if (typeof o.runtime !== "string" || !isRuntimeName(o.runtime)) {
     throw new Error(`${label}.runtime is unsupported`);
   }
@@ -367,6 +385,7 @@ export function validateWorkerProfile(
   return {
     id: o.id,
     label: o.label.trim(),
+    ...(assignmentGuidance === undefined ? {} : { assignmentGuidance }),
     runtime: o.runtime,
     ...(modelConfigId === undefined ? {} : { modelConfigId }),
     ...(provider === undefined ? {} : { provider }),

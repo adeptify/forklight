@@ -1,0 +1,166 @@
+version: 2
+name: M5 pre-commit code review and simplification
+project: /Users/yijunwang/code/forklight
+taskClass: forklight-precommit-code-simplification
+taskFamily: forklight-product-graduation
+workerProfileId: grok-4-6-xhigh
+executionPreference: auto
+routingDecision:
+  taskFamily: forklight-product-graduation
+  shortlist:
+    - provider: xai
+      model: grok-4.6
+      runtime: grok-build
+      effort: xhigh
+      workerProfileId: grok-4-6-xhigh
+  selectedWorker:
+    provider: xai
+    model: grok-4.6
+    runtime: grok-build
+    effort: xhigh
+    workerProfileId: grok-4-6-xhigh
+  selectedBecause:
+    code: relevant-delivery
+    note: The project requires a current Grok 4.6 Xhigh dogfood slice; this bounded review benefits from independent long-context inspection of the dirty M5 call chains.
+  competition:
+    intent: none
+    triggers: []
+  evidenceSnapshot:
+    scope: none
+    exactSampleCounts: {}
+reviewRequirement:
+  requiredJudges: 1
+  reason: A meaningful cross-layer pre-commit simplification needs one independent read-only check after verification; Main remains the final judge.
+runtime:
+  name: grok-build
+  effort: xhigh
+  maxBudgetUsd: null
+contract:
+  outcome: Review and simplify only the current uncommitted M5 Worker-guidance and Hub refinements so each behavior has one clear owner and call chain without changing accepted product behavior.
+  presentation:
+    summary: 审查当前待提交代码，删除可证明的重复投影、重复状态和无用分支，同时保持已验收行为不变。
+    language: zh-CN
+  context:
+    - Read AGENTS.md and specs/m5-product-graduation/work-items/precommit-code-simplification/spec.md completely. That Spec is the sole requirement source; create no second Spec, roadmap or evidence file.
+    - The project working tree intentionally contains the accepted uncommitted M5 result. Treat it as the baseline to simplify; do not revert accepted behavior to HEAD.
+    - First trace every changed production field/helper to its producer and consumers. Change code only where duplication, an unreachable branch, an unused helper or competing state owner is demonstrated.
+    - Worker assignment guidance must remain Main-only and must never enter Task or Worker execution input.
+    - Do not optimize for raw line count. A shared helper is useful only when it replaces genuinely identical semantics without coupling unrelated layers.
+    - Do not commit, push, reset, touch credentials, mutate the real Store or run any live Provider/Task action.
+  inScope:
+    - Consolidate duplicate Worker identity/guidance projection if one pure shared projection can serve setup and MCP without changing either output contract.
+    - Remove redundant normalization, transient state, helper or rendering branch inside the currently changed Hub flows when current tests prove one surviving owner.
+    - Simplify focused tests only when their behavioral failure meaning remains explicit.
+    - Return a concise audit of retained paths that looked repetitive but have distinct responsibilities.
+  outOfScope:
+    - New routing, ranking, Competition, Worker prompt input, API or Store schema.
+    - Broad Hub redesign, new copy, new visual primitives, unrelated refactor, dependency changes, generated output, SSOT/evidence edits, commit or push.
+  executionSteps:
+    - Map the current diff by production producer, normalization owner, projection, consumer and side effect.
+    - Identify concrete duplicate or unreachable paths; for each proposed edit name the surviving owner.
+    - Implement the smallest behavior-preserving simplifications inside the allowed paths.
+    - Run all accepted commands, inspect the final diff and remove any debug or unrelated change.
+    - In the final handoff list removed redundancy, the single surviving call chain and anything intentionally retained because semantics differ.
+  deliverables:
+    - One bounded Candidate containing only proven simplifications and matching focused tests.
+    - A plain-language call-chain handoff for Worker assignment guidance and each changed Hub state concern.
+    - Independent command evidence for build, focused cross-layer behavior, Hub behavior, syntax and diff integrity.
+  modules:
+    - name: Worker profile guidance
+      responsibility: Normalize and persist optional Main-only assignment advice once.
+      consumes: [Hub or settings Worker Profile input]
+      produces: [validated WorkerProfile]
+      boundaries: [No Task input, no Worker prompt, no automatic routing]
+    - name: Main Worker catalog
+      responsibility: Project safe saved Worker identity and optional advice before Main selection.
+      consumes: [validated settings and existing model resolution]
+      produces: [read-only catalog]
+      boundaries: [No Provider call, no mutation, no ranking]
+    - name: Hub changed-flow state
+      responsibility: Own disclosure, route-start, editor-draft and stale-detail state exactly once per concern.
+      consumes: [current Hub API truth and local interaction]
+      produces: [accepted desktop and narrow interaction]
+      boundaries: [No backend truth change, no second state system]
+  callChain:
+    - Hub/settings input → validateWorkerProfile → persisted WorkerProfile.
+    - Saved settings → one safe catalog projection → forklight_worker_catalog → Main selection judgment → frozen routingDecision.
+    - Resolved Worker selection consumes only identity/execution fields → Task/Runtime prompt; assignmentGuidance stops before this boundary.
+    - Hub route/API truth → one local owner for disclosure or draft/detail state → renderer → existing mutation endpoint only after explicit user action.
+  scenarios:
+    - name: Main reads advice and chooses
+      given: A Worker Profile has saved assignment guidance.
+      when: Main reads the catalog and selects a Worker.
+      then: The catalog includes the advice, the frozen reason records Main judgment and Worker input contains no advice text.
+    - name: legacy or blank profile
+      given: A profile has no guidance or the user saves whitespace.
+      when: Settings are validated and listed.
+      then: The field is absent and existing resolution behavior is unchanged.
+    - name: Hub interaction continuity
+      given: The accepted current Hub routes and narrow viewport.
+      when: The user discloses branches, changes routes, edits a draft or opens/closes Task detail.
+      then: One state owner preserves accepted context, focus and stale-response protection without overflow.
+  risks:
+    - Merging setup readiness and routing identity projections too aggressively could change output or create coupling; share only exact pure identity semantics.
+    - Removing apparently duplicate Hub state may break route rebuild, focus restoration or unsaved drafts; require focused tests before deletion.
+    - The dirty source is intentional accepted work; never use HEAD as desired behavior or discard unrelated user changes.
+  changeBudget:
+    maxFiles: 17
+    maxDiffLines: 700
+advancedPolicy:
+  maxDurationMs: null
+  observedTokenCeiling: null
+  noProgressTimeoutMs: null
+  workerStopGraceMs: 60000
+  fileLimit: 17
+  fileLimitMode: hard
+  changedLineLimit: 700
+  changedLineLimitMode: warn
+  baseMaxAttempts: 1
+  maxExtraAttempts: 0
+  maxMainCorrections: 1
+  maxMainReverifications: 1
+  maxWorkerValidationRepairs: 1
+  maxConcurrency: 1
+  completionMode: hard
+  changeBudgetMode: warn
+  maxAdaptationRounds: 0
+completionPolicy:
+  noChangeMode: warn
+  changeBudgetMode: warn
+workspace:
+  exclude: [.git, node_modules, dist, .runtime, .forklight, coverage]
+  generatedPaths: [dist/**, coverage/**]
+worker:
+  allowEdits: true
+  allowedCommands: []
+  focusPaths:
+    - src/core/worker-profiles.ts
+    - src/setup/types.ts
+    - src/setup/service.ts
+    - src/cli/setup.ts
+    - src/mcp/server.ts
+    - src/hub/public/app.js
+    - src/hub/public/app.css
+    - src/hub/public/i18n.js
+    - plugins/forklight/skills/forklight-orchestrator/SKILL.md
+    - tests/worker-profiles.test.ts
+    - tests/setup-service.test.ts
+    - tests/cli-setup.test.ts
+    - tests/mcp.test.ts
+    - tests/main-install-skill.test.ts
+    - tests/hub-responsive-layout.test.ts
+    - tests/hub-settings.test.ts
+    - tests/hub-ui-assets.test.ts
+acceptance:
+  criteria:
+    - Every changed production path has one named responsibility; proven duplicate projection/state/helper paths are removed and intentionally retained similarities have distinct semantics.
+    - Worker assignment guidance has one normalization owner, reaches Main through a read-only safe catalog and never reaches resolved Worker or Task/Runtime prompt input.
+    - Existing Worker Profile compatibility, setup/CLI output, Main catalog, Work/Decision/System, Delivery/Worker drafts and task-detail continuity remain unchanged.
+    - The Candidate changes only allowed paths, contains no generated output, debug code, Store mutation, commit or push.
+    - ForkLight independent verification passes and one independent Judge accepts before Main integration.
+  commands:
+    - npm run build
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/worker-profiles.test.ts tests/setup-service.test.ts tests/cli-setup.test.ts tests/mcp.test.ts tests/main-install-skill.test.ts
+    - node --disable-warning=ExperimentalWarning --test --import tsx tests/hub-responsive-layout.test.ts tests/hub-settings.test.ts tests/hub-ui-assets.test.ts
+    - node --check src/hub/public/app.js
+    - git diff --check

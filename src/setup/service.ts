@@ -191,6 +191,9 @@ export class SetupService {
       return {
         id: profile.id,
         label: profile.label,
+        ...(profile.assignmentGuidance === undefined
+          ? {}
+          : { assignmentGuidance: profile.assignmentGuidance }),
         runtime: profile.runtime,
         provider: model.provider,
         model: model.model,
