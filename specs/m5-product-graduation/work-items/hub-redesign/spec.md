@@ -683,3 +683,81 @@ render and Cancel returns focus to the originating action. Desktop and actual na
 fit without horizontal overflow and retain 44px disclosure/actions. Build, focused and six-file Hub
 tests, parsing, diff and bilingual copy checks must pass. Existing primitives are reused, so no new
 Impeccable detector, UI Worker or Judge is introduced.
+
+## 2026-08-22 user-discovered local-access bootstrap correction
+
+### Evidence and corrected boundary
+
+一骏 opened the current Hub at its printed bare loopback address and received “未认证会话。请运行：
+forklight hub”. The Hub and Daemon were healthy and the same page worked only when its tab had first
+received the process token through the URL fragment. This is a real local-App acceptance failure:
+the user should not have to understand, preserve or recover a transport credential in order to
+open, refresh, bookmark or create another tab for `127.0.0.1`.
+
+The retained requirement is a local request gate. Without one, another browser origin can attempt
+requests against a loopback service that can start paid Workers, change settings, make Main
+decisions and authorize delivery. The replaced behavior is the user-visible URL-fragment and
+tab-session ceremony. GoalBoard is the accepted family reference: the page receives its local
+control credential invisibly and attaches it to requests while the user opens an ordinary bare
+loopback URL. GoalBoard's repository and data model remain out of scope.
+
+### Accepted behavior and call chain
+
+1. Each running Hub still owns one high-entropy process token. The descriptor keeps it for the
+   authenticated CLI liveness proof; API requests still require the constant-time-checked private
+   header before any daemon or Store operation.
+2. The Hub validates that the HTTP `Host` is loopback before serving any page or API response.
+   This closes the DNS-rebinding route that would otherwise let a hostile origin ask the Hub to
+   render its credential under a non-loopback host.
+3. `GET /` and `GET /index.html` inject the current token into the in-memory HTML response as a
+   non-visible meta value. The token is never written into the checked-in static asset, URL,
+   browser history, CLI output, JSON, logs or evidence.
+4. Browser bootstrap reads the injected meta value into memory and uses the existing
+   `X-ForkLight-Hub-Token` request header. It no longer reads a URL fragment or depends on
+   `sessionStorage`. Direct navigation, refresh, bookmark and a second tab therefore work from the
+   ordinary `http://127.0.0.1:<port>/` address.
+5. CLI discovery and browser-open helpers return only the bare loopback URL after proving the
+   descriptor and live owner. The private descriptor token remains an internal liveness input, not
+   a browser-navigation value.
+6. If a long-lived page receives `401` after a Hub replacement, it performs at most one full reload
+   to receive the new injected credential. A repeated bootstrap failure stops with a plain local-
+   connection recovery message; it never loops and never asks the user to understand an
+   “unauthenticated session”.
+
+### Scope
+
+Allowed product and focused evidence paths:
+
+- `src/cli.ts`, `src/hub/instance.ts`, `src/hub/server.ts`
+- `src/hub/public/index.html`, `src/hub/public/app.js`, `src/hub/public/i18n.js`
+- focused Hub instance, operations, settings, CLI and UI-asset tests
+- `docs/operations.md`, `docs/configuration.md`
+- this existing M5-B Spec and the existing Goal SSOT, updated serially by Main
+
+`dist/**` may be regenerated only by the build acceptance command and must be declared as generated
+output in ForkLight. It is not a Candidate deliverable and must not be integrated or counted as a
+source change.
+
+No API mutation semantics, confirmation gate, Daemon protocol, Store schema, credential storage,
+GoalBoard code, remote access, cookie/login system, Provider call, commit or push is admitted. The
+large uncommitted M5 source result is the immutable input baseline; this correction must preserve
+unrelated edits and may not rewrite or normalize them.
+
+### Acceptance and verification
+
+- A fresh bare-URL tab and a same-tab refresh reach the real Work page without a URL fragment,
+  session storage, login prompt or manual command recovery.
+- The checked-in `index.html`, CLI output, browser-visible URL, JSON and logs contain no Hub token.
+- Missing/wrong API tokens and non-loopback Host values fail before daemon calls; correct injected
+  credentials retain the existing read and confirmed-mutation paths.
+- One stale-page `401` reloads once and either reconnects or shows one bounded local-connection
+  recovery state without a reload loop.
+- Current Chinese and English UI contain no user-facing “未认证会话” / “Unauthenticated session”
+  requirement.
+- `npm run build`; focused Hub instance/CLI/operations/settings/UI tests; `npm run check`;
+  `git diff --check`; an actual
+  restarted Hub; and fresh direct-address browser checks pass. Per 一骏's 2026-08-22 correction,
+  Main implements and verifies this slice directly; no further ForkLight Worker, Judge or
+  ForkLight Integration is part of this correction. The Impeccable detector runs once on the final
+  changed Hub assets; M5-C's unfamiliar-human observation remains deferred and is not claimed by
+  this fix.

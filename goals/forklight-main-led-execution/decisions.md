@@ -2740,3 +2740,19 @@ and Integration `632c0b08-c07d-4440-8263-2eb499ffd91b` applies, rebuilds and act
 Candidate. The final full suite passes 3,181/3,181. The earlier red-gate publication stop is closed,
 so Main may now use 一骏's existing commit/push authority after one final whole-diff and Git-status
 review. This decision does not graduate or waive the deferred unfamiliar-human M5-C gate.
+
+## 2026-08-22 — Keep local control invisible; switch future implementation to Main-direct
+
+The Hub still needs a private per-process request gate because its loopback API can launch paid
+work and make durable decisions. That gate is an implementation detail, not a user authentication
+step. The accepted local-App contract is therefore: bare loopback URL, loopback Host validation,
+server-only in-memory index injection, browser memory plus private header, no token in static
+assets/URL/history/output/logs, and one bounded reload after Hub replacement. A missing production
+marker fails closed rather than serving an unprotected or misleading page.
+
+一骏 explicitly directs that subsequent ForkLight repository implementation and review be performed
+directly by Main. ForkLight Workers, Judges, Competitions, correction Tasks and ForkLight
+Integration are no longer the default or required development path and must not be used unless
+一骏 explicitly reverses this instruction. ForkLight may still be built, started and tested as the
+product itself. This supersedes earlier dogfood/orchestration requirements without changing runtime
+safety, product truth, acceptance rigor or the deferred M5-C human gate.

@@ -294,7 +294,7 @@ test("detached restart coordinator is importable for CLI wiring", async () => {
     discover: async () => ({
       kind: "reuse",
       port: 1,
-      url: "http://127.0.0.1:1/#x",
+      url: "http://127.0.0.1:1/",
     }),
     launch: () => {
       launches += 1;

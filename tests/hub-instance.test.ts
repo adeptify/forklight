@@ -149,7 +149,9 @@ test("a published authenticated Hub is reused with the same URL", async () => {
     }));
     assert.equal(second.kind, "reuse");
     assert.equal(second.port, live.port);
-    assert.equal(second.url, `http://127.0.0.1:${live.port}/#${token}`);
+    assert.equal(second.url, `http://127.0.0.1:${live.port}/`);
+    assert.ok(!second.url.includes("#"), "browser URL must be bare");
+    assert.ok(!second.url.includes(token), "browser URL must not contain the process token");
     assert.equal(statSync(descriptorFile(home)).mode & 0o777, 0o600);
   } finally {
     await close?.();
@@ -374,6 +376,8 @@ test("version-aware discovery reuses a matching owner", async () => {
     const second = await discoverOrClaimHub(home, options({ runIdentity: TEST_BUILD }));
     assert.equal(second.kind, "reuse");
     assert.equal(second.port, live.port);
+    assert.equal(second.url, `http://127.0.0.1:${live.port}/`);
+    assert.ok(!second.url.includes(token));
   } finally {
     await close?.();
     if (claim !== undefined) releaseHubInstance(home, claim);
@@ -397,6 +401,8 @@ test("version-aware discovery diagnoses a mismatched build identity", async () =
     const second = await discoverOrClaimHub(home, options({ runIdentity: TEST_BUILD }));
     assert.equal(second.kind, "stale-owner");
     assert.equal(second.port, live.port);
+    assert.equal(second.url, `http://127.0.0.1:${live.port}/`);
+    assert.ok(!second.url.includes(token));
     assert.equal(second.replacement.descriptor.buildIdentity?.buildId, STALE_BUILD.buildId);
     // The stale owner is not signalled by discovery.
     assert.equal(live.port, second.port, "port unchanged — no signal sent");
@@ -431,6 +437,8 @@ test("version-aware discovery diagnoses a legacy descriptor (no build identity)"
     const second = await discoverOrClaimHub(home, options({ runIdentity: TEST_BUILD }));
     assert.equal(second.kind, "legacy-owner");
     assert.equal(second.port, live.port);
+    assert.equal(second.url, `http://127.0.0.1:${live.port}/`);
+    assert.ok(!second.url.includes(token));
   } finally {
     await close?.();
     if (claim !== undefined) releaseHubInstance(home, claim);
@@ -761,13 +769,23 @@ test("CLI second invocation reuses the active Hub even with another requested po
 
   try {
     await waitForOutput(first, () => output, /\[frontend\] hub UI:/, 10_000);
+    await waitForOutput(first, () => output, /Open this URL for ForkLight Hub:/, 5_000);
     const before = readFileSync(descriptorFile(home), "utf8");
+    const descriptor = JSON.parse(before) as { port: number; token: string };
+    const bareUrl = `http://127.0.0.1:${descriptor.port}/`;
+    assert.match(output, /\[frontend\] hub UI: http:\/\/127\.0\.0\.1:\d+\//);
+    assert.match(output, new RegExp(`Open this URL for ForkLight Hub:\\n${bareUrl.replaceAll(".", "\\.")}\\n`));
+    assert.doesNotMatch(output, /127\.0\.0\.1:\d+\/#/);
+    assert.ok(!output.includes(descriptor.token), "owner stdout must not contain the process token");
     const second = await execFileAsync(process.execPath, [
       ...cliArgs.slice(0, -1),
       "65534",
     ], { cwd: root, env, timeout: 10_000 });
     assert.match(second.stdout, /already active/);
     assert.match(second.stdout, /Open this URL:/);
+    assert.match(second.stdout, new RegExp(`Open this URL: ${bareUrl.replaceAll(".", "\\.")}\\n`));
+    assert.doesNotMatch(second.stdout, /127\.0\.0\.1:\d+\/#/);
+    assert.ok(!second.stdout.includes(descriptor.token), "reuse stdout must not contain the process token");
     assert.equal(first.exitCode, null, "the original owner remains running");
     assert.equal(readFileSync(descriptorFile(home), "utf8"), before);
   } finally {
@@ -1449,7 +1467,7 @@ test("detached restart no-ops when Hub is already current", async () => {
   try {
     const result = await restartHubDetached(home, {
       runIdentity: TEST_BUILD,
-      discover: async () => ({ kind: "reuse", port: 5555, url: "http://127.0.0.1:5555/#x" }),
+      discover: async () => ({ kind: "reuse", port: 5555, url: "http://127.0.0.1:5555/" }),
       replace: async () => {
         replaces += 1;
         return { success: true, reason: "should not run" };
@@ -1489,7 +1507,7 @@ test("detached restart fails closed when current owner changes during confirmati
   try {
     const result = await restartHubDetached(home, {
       runIdentity: TEST_BUILD,
-      discover: async () => ({ kind: "reuse", port: 5555, url: "http://127.0.0.1:5555/#x" }),
+      discover: async () => ({ kind: "reuse", port: 5555, url: "http://127.0.0.1:5555/" }),
       launch: () => {
         launches += 1;
         return childHandle(9999);
@@ -1529,7 +1547,7 @@ test("detached restart replaces a stale owner once and waits for current child",
       discover: async () => ({
         kind: "stale-owner",
         port: 4_100,
-        url: "http://127.0.0.1:4100/#x",
+        url: "http://127.0.0.1:4100/",
         replacement,
       }),
       replace: async (_home, target) => {
@@ -1611,7 +1629,7 @@ test("detached restart preserves prior port and honors explicit override", async
       discover: async () => ({
         kind: "stale-owner",
         port: 4_300,
-        url: "http://127.0.0.1:4300/#x",
+        url: "http://127.0.0.1:4300/",
         replacement,
       }),
       replace: async () => ({ success: true, reason: "gone" }),
@@ -1634,7 +1652,7 @@ test("detached restart preserves prior port and honors explicit override", async
       discover: async () => ({
         kind: "stale-owner",
         port: 4_300,
-        url: "http://127.0.0.1:4300/#x",
+        url: "http://127.0.0.1:4300/",
         replacement,
       }),
       replace: async () => ({ success: true, reason: "gone" }),
@@ -1764,7 +1782,7 @@ test("detached restart does not launch when exact replacement fails", async () =
       discover: async () => ({
         kind: "stale-owner",
         port: replacement.descriptor.port,
-        url: "http://127.0.0.1:1/#x",
+        url: "http://127.0.0.1:1/",
         replacement,
       }),
       replace: async () => ({
@@ -1803,7 +1821,7 @@ test("detached restart result JSON is privacy-safe", async () => {
       discover: async () => ({
         kind: "stale-owner",
         port: 4_600,
-        url: `http://127.0.0.1:4600/#${token}`,
+        url: `http://127.0.0.1:4600/`,
         replacement: {
           ...fakeReplacement(4_600),
           descriptor: {
@@ -1852,8 +1870,9 @@ test("resolveHubOpenUrl only returns the URL for the proven owner", async () => 
     close = live.close;
     publishHubInstance(home, claim, live.port, token, TEST_BUILD);
     const url = resolveHubOpenUrl(home, claim.pid, live.port);
-    assert.ok(url?.includes(`:${live.port}/#`));
-    assert.ok(url?.includes(encodeURIComponent(token)));
+    assert.equal(url, `http://127.0.0.1:${live.port}/`);
+    assert.ok(!url.includes("#"));
+    assert.ok(!url.includes(token), "open URL must not contain the process token");
     assert.equal(resolveHubOpenUrl(home, claim.pid + 1, live.port), undefined);
     assert.equal(resolveHubOpenUrl(home, claim.pid, live.port + 1), undefined);
   } finally {

@@ -51,6 +51,18 @@
 
 ## Dogfood ForkLight and prefer Grok
 
+### Current user override (2026-08-22)
+
+- 一骏 explicitly requires subsequent ForkLight repository implementation and review to be done
+  directly by Main. Do not launch ForkLight Workers, Judges, Competitions, correction Tasks or
+  ForkLight Integration for repository work unless 一骏 explicitly reverses this instruction.
+- ForkLight remains the product under test. Main may build it, run its CLI, start/restart the local
+  Daemon or Hub and inspect durable product truth for direct verification. This override changes
+  the development orchestration method, not the product's runtime behavior or safety boundaries.
+- The override supersedes the Worker/Judge/dogfood requirements below wherever they prescribe how
+  repository implementation is executed. Their product design and historical evidence remain
+  valid.
+
 - Meaningful ForkLight implementation or review must use ForkLight for a real bounded slice.
   Run `forklight health --json` first; a ceremonial documentation Task does not satisfy dogfood.
 - Prefer the `grok-build` profile using `grok-4.6` and `xhigh` after a current smoke proves it

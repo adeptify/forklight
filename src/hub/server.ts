@@ -13,7 +13,7 @@
 
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { homedir } from "node:os";
@@ -138,6 +138,48 @@ import {
 const LOOPBACK = "127.0.0.1";
 const MAX_BODY_BYTES = 20_480;
 const TOKEN_HEADER = "x-forklight-hub-token";
+/** Non-secret checked-in placeholder; the live process token replaces it only in memory. */
+export const HUB_CONTROL_TOKEN_MARKER = "__FORKLIGHT_HUB_CONTROL__";
+export const HUB_CONTROL_META_NAME = "forklight-hub-control";
+const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
+
+/** Accept only a loopback Host so HTML injection cannot answer a DNS-rebound name. */
+export function isLoopbackHttpHost(host: unknown): boolean {
+  if (typeof host !== "string" || host.length === 0) return false;
+  if (host !== host.trim()) return false;
+  const value = host.toLowerCase();
+
+  let hostname: string;
+  let port: string | undefined;
+  if (value.startsWith("[")) {
+    const end = value.indexOf("]");
+    if (end < 1) return false;
+    hostname = value.slice(0, end + 1);
+    const rest = value.slice(end + 1);
+    if (rest === "") {
+      port = undefined;
+    } else if (rest.startsWith(":") && /^[0-9]{1,5}$/.test(rest.slice(1))) {
+      port = rest.slice(1);
+    } else {
+      return false;
+    }
+  } else {
+    const colon = value.lastIndexOf(":");
+    if (colon === -1) {
+      hostname = value;
+    } else {
+      hostname = value.slice(0, colon);
+      port = value.slice(colon + 1);
+      if (!/^[0-9]{1,5}$/.test(port)) return false;
+    }
+  }
+  if (!LOOPBACK_HOSTNAMES.has(hostname)) return false;
+  if (port !== undefined) {
+    const n = Number(port);
+    if (!Number.isInteger(n) || n < 1 || n > 65_535) return false;
+  }
+  return true;
+}
 // Longer than the default two-second Hub refresh interval, so one open tab
 // does not repeat every runtime subprocess check on every refresh.
 const DEFAULT_HUB_EVIDENCE_TTL_MS = 15_000;
@@ -2086,6 +2128,10 @@ export class HubServer {
   }
 
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (!isLoopbackHttpHost(req.headers.host)) {
+      this.sendJson(req, res, 403, { error: "Forbidden" });
+      return;
+    }
     const raw = req.url ?? "/";
     if (/\.\./.test(raw) || raw.includes("\0")) {
       this.sendJson(req, res, 400, { error: "Invalid path" });
@@ -4891,6 +4937,10 @@ export class HubServer {
       this.sendJson(req, res, 400, { error: "Invalid path" });
       return;
     }
+    if (rel === "/index.html") {
+      await this.serveIndexHtml(req, res, filePath);
+      return;
+    }
     try {
       const st = await stat(filePath);
       if (!st.isFile()) {
@@ -4911,5 +4961,40 @@ export class HubServer {
     } catch {
       this.sendJson(req, res, 404, { error: "Not found" });
     }
+  }
+
+  private async serveIndexHtml(
+    req: IncomingMessage,
+    res: ServerResponse,
+    filePath: string,
+  ): Promise<void> {
+    let template: string;
+    try {
+      template = await readFile(filePath, "utf8");
+    } catch {
+      this.sendJson(req, res, 404, { error: "Not found" });
+      return;
+    }
+    const first = template.indexOf(HUB_CONTROL_TOKEN_MARKER);
+    const last = template.lastIndexOf(HUB_CONTROL_TOKEN_MARKER);
+    if (first < 0 || first !== last) {
+      this.sendJson(req, res, 500, { error: "Hub page is unavailable" });
+      return;
+    }
+    const html = template.slice(0, first)
+      + this.token
+      + template.slice(first + HUB_CONTROL_TOKEN_MARKER.length);
+    const payload = Buffer.from(html, "utf8");
+    res.writeHead(200, {
+      ...SECURITY_HEADERS,
+      "Cache-Control": "no-store",
+      "Content-Type": MIME[".html"] ?? "text/html; charset=utf-8",
+      "Content-Length": payload.length,
+    });
+    if (req.method === "HEAD") {
+      res.end();
+      return;
+    }
+    res.end(payload);
   }
 }

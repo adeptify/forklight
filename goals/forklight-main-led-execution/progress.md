@@ -2436,3 +2436,30 @@ No product code, package byte, Test, Task, Worker or runtime state changed. The 
 remains `/Users/Shared/ForkLight-Clean-Run.43560ab8`. No eligible unfamiliar operator or separately
 authorized clean system environment is currently available, so no further in-scope automated work
 can produce the missing human evidence.
+
+## 2026-08-22 — Bare local Hub access becomes invisible and Main-direct
+
+一骏 opened the printed bare `http://127.0.0.1:62283/` address and received the retired
+“未认证会话。请运行：forklight hub” state. GoalBoard confirmed the intended family behavior: retain
+one private local control token but inject it invisibly, so the user never manages authentication.
+The existing M5-B Spec now freezes that corrected boundary.
+
+Main directly applied the correction after 一骏 stopped further ForkLight implementation. CLI
+start/reuse/restart paths now return bare loopback URLs. The Hub rejects non-loopback Host values
+before page or API work, injects its per-process token only into the in-memory index response and
+keeps the checked-in asset token-free. The browser reads that meta value into memory, sends the
+existing private header, never reads a fragment or persists the token in session storage, and
+reloads at most once after a stale-token 401. Repeated failure stops in one plain local-connection
+state. Existing mutation confirmation and Daemon boundaries are unchanged.
+
+Build passes; the accepted instance/CLI/operations/UI suite passes 316/316; the corrected settings
+fixture passes 75/75; JavaScript parsing and `git diff --check` pass; final `npm run check` passes
+3186/3186. The single final Impeccable detector run returns no findings. Hub PID 62329 is active on
+port 62283 after confirmed detached replacement. A real bare-address reload reaches the Work
+surface, keeps the browser URL exactly `http://127.0.0.1:62283/`, and contains neither the retired
+unauthenticated copy nor the local-connection failure state.
+
+The first failed isolated attempt and the user-canceled recovery remain historical product data;
+they are not delivery evidence. Per 一骏's current rule, subsequent repository implementation and
+review are Main-direct unless he explicitly reverses it. No commit or push occurred. M5-C's
+unfamiliar-human evidence remains deferred and missing.

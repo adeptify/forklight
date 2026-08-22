@@ -234,8 +234,8 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function hubUrl(port: number, token: string): string {
-  return `http://${LOOPBACK}:${port}/#${encodeURIComponent(token)}`;
+function hubUrl(port: number): string {
+  return `http://${LOOPBACK}:${port}/`;
 }
 
 function claimMatchesDescriptor(claim: HubOwnerClaim, descriptor: HubInstanceDescriptor): boolean {
@@ -388,7 +388,7 @@ export async function discoverOrClaimHub(
         && claimMatchesDescriptor(claim, descriptor)
         && await probeLiveHub(descriptor, probeMs)
       ) {
-        const url = hubUrl(descriptor.port, descriptor.token);
+        const url = hubUrl(descriptor.port);
         // Version-aware identity comparison.
         if (runIdentity !== undefined) {
           if (descriptor.buildIdentity === undefined) {
@@ -507,7 +507,7 @@ type HubInspectionNextAction =
   | "investigate";
 
 /** Token-free status surface. The type is incapable of carrying the URL,
- *  fragment token, nonce, raw record bytes, or any private path. */
+ *  token, nonce, raw record bytes, or any private path. */
 export interface HubInspectionStatus {
   readonly state: HubInspectionState;
   /** PID is only populated when the same exact lifetime claim and descriptor
@@ -842,7 +842,7 @@ export interface HubChildHandle {
 }
 
 /** Closed success/failure surface for detached restart. Incapable of carrying
- *  token, nonce, path, environment, URL fragment, or raw child output. */
+ *  token, nonce, path, environment, URL, or raw child output. */
 type DetachedHubRestartState = "current" | "ready" | "failed";
 
 export type DetachedHubRestartReplacement =
@@ -1008,7 +1008,7 @@ export function resolveHubOpenUrl(
   if (descriptor === undefined) return undefined;
   if (descriptor.pid !== expectedPid || descriptor.port !== expectedPort) return undefined;
   if (typeof descriptor.token !== "string" || !TOKEN_RE.test(descriptor.token)) return undefined;
-  return hubUrl(descriptor.port, descriptor.token);
+  return hubUrl(descriptor.port);
 }
 
 function failedDetachedResult(

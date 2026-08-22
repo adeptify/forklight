@@ -1004,3 +1004,10 @@ Global Grok execution rule from this point forward: do not set Task duration, To
 model-work waiting ceilings. Any forced client/tool timeout is only a bounded observation request
 and cannot alter a still-running Task; continue from durable events rather than treating that
 window as Runtime failure.
+
+Latest execution override: 一骏 now requires subsequent ForkLight repository implementation and
+review to be Main-direct. Do not admit a ForkLight Worker, Judge, Competition, correction Task or
+ForkLight Integration unless he explicitly reverses that instruction. Direct work keeps the same
+Spec, acceptance, full-diff and evidence standards. The bare-local-Hub correction is complete and
+live on port 62283; the only unclosed Milestone gate remains M5-C's genuinely unfamiliar-human
+observation.

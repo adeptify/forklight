@@ -4092,7 +4092,10 @@ async function main(): Promise<void> {
       }
       const token = server.getToken();
       publishHubInstance(home, claim, startedPort, token, builtIdentity);
-      const url = `http://127.0.0.1:${startedPort}/#${encodeURIComponent(token)}`;
+      const url = resolveHubOpenUrl(home, claim.pid, startedPort);
+      if (url === undefined) {
+        throw new Error("ForkLight Hub published but the browser address could not be resolved");
+      }
       process.stdout.write(`  [frontend] hub UI: http://127.0.0.1:${startedPort}/\n`);
       if (daemonHealth?.ok === false) {
         process.stdout.write("  note: daemon health reported ok=false\n");

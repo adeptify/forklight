@@ -12,7 +12,11 @@ import {
   type ProviderReadiness,
 } from "../src/core/providers.js";
 import { buildHubSettingsPatch, viewHubSettings } from "../src/hub/settings-api.js";
-import { buildSafeFailureSummary, HubServer } from "../src/hub/server.js";
+import {
+  buildSafeFailureSummary,
+  HubServer,
+  HUB_CONTROL_TOKEN_MARKER,
+} from "../src/hub/server.js";
 import { SetupService } from "../src/setup/service.js";
 import type { SetupKeychainStore, SetupSystemInspector } from "../src/setup/types.js";
 import { StateStore } from "../src/state/store.js";
@@ -85,7 +89,11 @@ async function makeHub() {
   const setup = new SetupService(settings, keychain, inspector());
   const staticDir = path.join(home, "static");
   await mkdir(staticDir, { recursive: true });
-  await writeFile(path.join(staticDir, "index.html"), "<!DOCTYPE html><title>Hub</title>\n", "utf8");
+  await writeFile(
+    path.join(staticDir, "index.html"),
+    `<!DOCTYPE html><meta name="forklight-hub-control" content="${HUB_CONTROL_TOKEN_MARKER}"><title>Hub</title>\n`,
+    "utf8",
+  );
   let daemonRunning = true;
   let ensureCount = 0;
   let health: Record<string, unknown> = {
@@ -1693,12 +1701,14 @@ test("Hub provider-key refuses an unreadable existing item and leaves settings u
   }
 });
 
-test("Hub serves static index without token", async () => {
+test("Hub serves index with the process token injected only into the response", async () => {
   const ctx = await makeHub();
   try {
     const page = await doHttp(`http://127.0.0.1:${ctx.port}/`, "GET");
     assert.equal(page.status, 200);
     assert.match(String(page.body), /ForkLight|Control Center|Hub/i);
+    assert.ok(String(page.body).includes(ctx.token));
+    assert.ok(!String(page.body).includes(HUB_CONTROL_TOKEN_MARKER));
   } finally {
     await ctx.cleanup();
   }

@@ -343,8 +343,11 @@ fix at the policy boundary, not a limit to widen.
 These are fixed by the implementation and cannot be changed through settings:
 
 - **Loopback binding**: Hub always binds `127.0.0.1`. External network access is impossible.
-- **Auth + confirm gates**: Hub requires a session token; billable or irreversible
-  actions need an explicit confirm in the UI.
+- **Invisible local control + confirm gates**: Hub rejects non-loopback Host
+  headers and requires the per-process control token on every API request.
+  The browser opens the bare loopback URL; the token is injected invisibly
+  into the page and is never placed in the address bar. Billable or
+  irreversible actions still need an explicit confirm in the UI.
 - **Keychain redaction**: Hub settings views never emit fields matching `keychain`.
   Credential values are never exposed to the browser.
 - **Credential-field rejection**: Settings patches containing any field name

@@ -8,16 +8,25 @@
  * tests/work-hierarchy.test.ts and tests/task-action-policy.test.ts.
  */
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
-import { get } from "node:http";
+import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { request as httpRequest, type IncomingHttpHeaders } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { SettingsService } from "../src/core/settings.js";
-import { HubServer } from "../src/hub/server.js";
+import {
+  HubServer,
+  HUB_CONTROL_META_NAME,
+  HUB_CONTROL_TOKEN_MARKER,
+  isLoopbackHttpHost,
+} from "../src/hub/server.js";
 import { SetupService } from "../src/setup/service.js";
 import type { SetupKeychainStore, SetupSystemInspector } from "../src/setup/types.js";
 import { StateStore } from "../src/state/store.js";
+
+const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
+const hubPublic = path.join(root, "src", "hub", "public");
 
 class MemoryKeychain implements SetupKeychainStore {
   readonly values = new Map<string, string>();
@@ -37,23 +46,70 @@ function inspector(): SetupSystemInspector {
   };
 }
 
+function doHttp(
+  url: string,
+  options: {
+    method?: string;
+    token?: string;
+    host?: string;
+    body?: unknown;
+  } = {},
+): Promise<{ status: number; headers: IncomingHttpHeaders; raw: string; body: unknown }> {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const headers: Record<string, string> = { Accept: "*/*" };
+    if (options.host !== undefined) headers.host = options.host;
+    if (options.token) headers["x-forklight-hub-token"] = options.token;
+    let payload: string | undefined;
+    if (options.body !== undefined) {
+      payload = JSON.stringify(options.body);
+      headers["Content-Type"] = "application/json";
+      headers["Content-Length"] = String(Buffer.byteLength(payload));
+    }
+    const req = httpRequest(
+      {
+        hostname: parsed.hostname,
+        port: parsed.port,
+        path: `${parsed.pathname}${parsed.search}`,
+        method: options.method ?? "GET",
+        setHost: options.host === undefined,
+        headers,
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (chunk: Buffer) => { chunks.push(chunk); });
+        res.on("end", () => {
+          const raw = Buffer.concat(chunks).toString("utf8");
+          let body: unknown = raw;
+          try { if (raw) body = JSON.parse(raw); } catch { /* html or raw */ }
+          resolve({
+            status: res.statusCode ?? 0,
+            headers: res.headers,
+            raw,
+            body,
+          });
+        });
+      },
+    );
+    req.on("error", reject);
+    if (payload !== undefined) req.write(payload);
+    req.end();
+  });
+}
+
 function doGet(
   url: string,
   token?: string,
 ): Promise<{ status: number; body: unknown }> {
-  return new Promise((resolve, reject) => {
-    const headers: Record<string, string> = { Accept: "application/json" };
-    if (token) headers["x-forklight-hub-token"] = token;
-    get(url, { headers }, (res) => {
-      let data = "";
-      res.on("data", (chunk: Buffer) => { data += chunk.toString(); });
-      res.on("end", () => {
-        let parsed: unknown = data;
-        try { if (data) parsed = JSON.parse(data); } catch { /* raw */ }
-        resolve({ status: res.statusCode ?? 0, body: parsed });
-      });
-    }).on("error", reject);
-  });
+  const options = token === undefined ? {} : { token };
+  return doHttp(url, options).then((res) => ({ status: res.status, body: res.body }));
+}
+
+function controlTokenFromHtml(html: string): string | undefined {
+  const match = new RegExp(
+    `<meta\\s+name="${HUB_CONTROL_META_NAME}"\\s+content="([^"]*)"`,
+  ).exec(html);
+  return match?.[1];
 }
 
 const TS = "2026-08-03T12:00:00.000Z";
@@ -198,22 +254,22 @@ function hierarchyPayload(cards: Record<string, unknown>[]): Record<string, unkn
   };
 }
 
-async function makeHub(daemonRequest: (method: string, params: Record<string, unknown>) => unknown) {
+async function makeHub(
+  daemonRequest: (method: string, params: Record<string, unknown>) => unknown,
+  staticRoot: string = hubPublic,
+) {
   const home = await mkdtemp(path.join(tmpdir(), "fl-hub-ops-"));
   const store = new StateStore(home);
   const settings = new SettingsService(store);
   const keychain = new MemoryKeychain();
   const setup = new SetupService(settings, keychain, inspector());
-  const staticDir = path.join(home, "static");
-  await mkdir(staticDir, { recursive: true });
-  await writeFile(path.join(staticDir, "index.html"), "<!DOCTYPE html><title>Hub</title>\n", "utf8");
 
   const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
   const server = new HubServer({
     settings,
     setup,
     keychain,
-    staticRoot: staticDir,
+    staticRoot,
     account: () => "hub-ops-user",
     port: 0,
     ensureDaemon: async () => ({ ok: true, pid: 99 }),
@@ -227,6 +283,7 @@ async function makeHub(daemonRequest: (method: string, params: Record<string, un
   return {
     base: `http://127.0.0.1:${port}`,
     token: server.getToken(),
+    nonce: server.getNonce(),
     calls,
     cleanup: async () => {
       await server.stop();
@@ -304,9 +361,10 @@ test("Hub work-hierarchy read rejects without token", async () => {
     throw new Error(`unexpected method ${method}`);
   });
   try {
-    const unauthorized = await doGet(`${ctx.base}/api/ops/work-hierarchy`);
+    const unauthorized = await doHttp(`${ctx.base}/api/ops/work-hierarchy`);
     assert.equal(unauthorized.status, 401);
     assert.equal(ctx.calls.length, 0, "no daemon call without token");
+    assert.ok(!unauthorized.raw.includes(ctx.token), "rejection must not reveal the process token");
   } finally {
     await ctx.cleanup();
   }
@@ -324,6 +382,157 @@ test("Hub work-hierarchy daemon failure returns a bounded privacy-safe message",
     assert.equal(body.error, "Work hierarchy is unavailable right now; try again.");
     assert.ok(!JSON.stringify(body).includes("boom secretValue"));
     assert.ok(!JSON.stringify(body).includes("\n    at "), "raw stack must not leak");
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test("isLoopbackHttpHost accepts only loopback Host values", () => {
+  assert.equal(isLoopbackHttpHost("127.0.0.1"), true);
+  assert.equal(isLoopbackHttpHost("127.0.0.1:62182"), true);
+  assert.equal(isLoopbackHttpHost("LOCALHOST"), true);
+  assert.equal(isLoopbackHttpHost("localhost:80"), true);
+  assert.equal(isLoopbackHttpHost("[::1]"), true);
+  assert.equal(isLoopbackHttpHost("[::1]:8080"), true);
+  assert.equal(isLoopbackHttpHost("example.com"), false);
+  assert.equal(isLoopbackHttpHost("127.0.0.1.example.com"), false);
+  assert.equal(isLoopbackHttpHost(" 127.0.0.1"), false);
+  assert.equal(isLoopbackHttpHost("127.0.0.1:0"), false);
+  assert.equal(isLoopbackHttpHost(""), false);
+  assert.equal(isLoopbackHttpHost(undefined), false);
+});
+
+test("bare loopback index injects the process token and authorizes Work reads", async () => {
+  const payload = hierarchyPayload([depHeldCard()]);
+  const ctx = await makeHub((method, _params) => {
+    if (method === "work_hierarchy") return payload;
+    throw new Error(`unexpected method ${method}`);
+  });
+  try {
+    const checkedIn = await readFile(path.join(hubPublic, "index.html"), "utf8");
+    assert.ok(
+      checkedIn.includes(`name="${HUB_CONTROL_META_NAME}"`),
+      "checked-in index must include the non-secret control meta",
+    );
+    assert.ok(checkedIn.includes(HUB_CONTROL_TOKEN_MARKER));
+    assert.ok(!checkedIn.includes(ctx.token), "checked-in index must not contain the process token");
+
+    async function assertInjected(pathName: string): Promise<string> {
+      const first = await doHttp(`${ctx.base}${pathName}`);
+      const second = await doHttp(`${ctx.base}${pathName}`);
+      assert.equal(first.status, 200);
+      assert.equal(second.status, 200);
+      assert.equal(first.headers["cache-control"], "no-store");
+      assert.equal(second.headers["cache-control"], "no-store");
+      assert.match(String(first.headers["content-type"]), /text\/html/);
+      const firstToken = controlTokenFromHtml(first.raw);
+      const secondToken = controlTokenFromHtml(second.raw);
+      assert.ok(firstToken === ctx.token, "first index response must inject the current process token");
+      assert.ok(secondToken === ctx.token, "second index response must inject the same process token");
+      assert.ok(!first.raw.includes(HUB_CONTROL_TOKEN_MARKER));
+      assert.ok(!second.raw.includes(HUB_CONTROL_TOKEN_MARKER));
+      return firstToken!;
+    }
+
+    const rootToken = await assertInjected("/");
+    const indexToken = await assertInjected("/index.html");
+    assert.ok(rootToken === indexToken, "GET / and GET /index.html must inject the same token");
+
+    const script = await doHttp(`${ctx.base}/app.js`);
+    assert.equal(script.status, 200);
+    assert.ok(!script.raw.includes(ctx.token), "static app.js must not contain the process token");
+
+    const localhost = await doHttp(`${ctx.base}/`, {
+      host: `localhost:${new URL(ctx.base).port}`,
+    });
+    assert.equal(localhost.status, 200);
+    assert.ok(
+      controlTokenFromHtml(localhost.raw) === ctx.token,
+      "localhost Host must still receive the injected process token",
+    );
+
+    const work = await doHttp(`${ctx.base}/api/ops/work-hierarchy`, { token: rootToken });
+    assert.equal(work.status, 200);
+    assert.deepEqual(work.body, payload);
+    assert.ok(ctx.calls.some((call) => call.method === "work_hierarchy"));
+
+    const callsBeforeMutation = ctx.calls.length;
+    const mutation = await doHttp(`${ctx.base}/api/ops/tasks/task-dep/main-review`, {
+      method: "POST",
+      token: rootToken,
+      body: { decision: "accept", reason: "looks good" },
+    });
+    assert.equal(mutation.status, 422, "missing confirm remains a confirmation error");
+    assert.match(String((mutation.body as { error?: string }).error), /confirm/);
+    assert.notEqual(mutation.status, 401);
+    assert.ok(!mutation.raw.includes(ctx.token));
+    assert.equal(ctx.calls.length, callsBeforeMutation, "confirm rejection must not reach the daemon");
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test("missing token, wrong token, and non-loopback Host fail before daemon calls", async () => {
+  const payload = hierarchyPayload([depHeldCard()]);
+  const ctx = await makeHub((method, _params) => {
+    if (method === "work_hierarchy") return payload;
+    throw new Error(`unexpected method ${method}`);
+  });
+  try {
+    const missing = await doHttp(`${ctx.base}/api/ops/work-hierarchy`);
+    assert.equal(missing.status, 401);
+    assert.equal(ctx.calls.length, 0);
+    assert.ok(!missing.raw.includes(ctx.token));
+
+    const wrong = await doHttp(`${ctx.base}/api/ops/work-hierarchy`, {
+      token: "a".repeat(ctx.token.length),
+    });
+    assert.equal(wrong.status, 401);
+    assert.equal(ctx.calls.length, 0);
+    assert.ok(!wrong.raw.includes(ctx.token));
+
+    const hostilePage = await doHttp(`${ctx.base}/`, { host: "example.com" });
+    assert.equal(hostilePage.status, 403);
+    assert.equal(ctx.calls.length, 0);
+    assert.ok(!hostilePage.raw.includes(ctx.token));
+
+    const rebound = await doHttp(`${ctx.base}/`, { host: "127.0.0.1.example.com" });
+    assert.equal(rebound.status, 403);
+    assert.equal(ctx.calls.length, 0);
+    assert.ok(!rebound.raw.includes(ctx.token));
+
+    const hostileApi = await doHttp(`${ctx.base}/api/liveness`, { host: "evil.example" });
+    assert.equal(hostileApi.status, 403);
+    assert.equal(ctx.calls.length, 0);
+    assert.ok(!hostileApi.raw.includes(ctx.token));
+
+    const liveDenied = await doHttp(`${ctx.base}/api/liveness`);
+    assert.equal(liveDenied.status, 401);
+    assert.equal(ctx.calls.length, 0);
+    assert.ok(!liveDenied.raw.includes(ctx.token));
+
+    const live = await doHttp(`${ctx.base}/api/liveness`, { token: ctx.token });
+    assert.equal(live.status, 200);
+    assert.deepEqual(live.body, { ok: true, nonce: ctx.nonce });
+    assert.ok(!live.raw.includes(ctx.token), "liveness must not reveal the process token");
+    assert.equal(ctx.calls.length, 0, "liveness must not call the daemon");
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test("index without the production marker does not disclose the process token", async () => {
+  const staticDir = await mkdtemp(path.join(tmpdir(), "fl-hub-ops-static-"));
+  await mkdir(staticDir, { recursive: true });
+  await writeFile(path.join(staticDir, "index.html"), "<!DOCTYPE html><title>Hub</title>\n", "utf8");
+  const ctx = await makeHub((method) => {
+    throw new Error(`unexpected method ${method}`);
+  }, staticDir);
+  try {
+    const page = await doHttp(`${ctx.base}/`);
+    assert.equal(page.status, 500);
+    assert.ok(!page.raw.includes(ctx.token));
+    assert.equal(ctx.calls.length, 0);
   } finally {
     await ctx.cleanup();
   }

@@ -842,17 +842,23 @@ test("Hub app.js security and decision-drawer invariants", async () => {
   const sessionStorageCalls = codeOnly.match(
     /sessionStorage\.(?:getItem|setItem|removeItem)\([^\n;]*/g,
   ) ?? [];
-  assert.ok(sessionStorageCalls.length >= 3, "tab session supports token get/set/remove");
+  assert.ok(sessionStorageCalls.length >= 3, "tab session still stores Work collapse and reading context");
   assert.ok(
     sessionStorageCalls.every((call) =>
-      call.includes("HUB_TOKEN_SESSION_KEY")
+      call.includes("HUB_CONTROL_RELOAD_KEY")
         || call.includes("fl-work-collapse")
         || call.includes("WORK_READING_CONTEXT_KEY")),
-    "sessionStorage is limited to Hub token, Work collapse, and bounded Work reading context",
+    "sessionStorage is limited to the one-reload latch, Work collapse, and bounded Work reading context",
   );
   assert.ok(src.includes("isValidHubToken"));
   assert.ok(src.includes("clearHubToken"));
+  assert.ok(src.includes("readInjectedHubToken"));
+  assert.ok(src.includes("recoverFromStaleHubControl"));
   assert.ok(!src.includes("?token="));
+  assert.ok(!src.includes("location.hash"));
+  assert.ok(!src.includes("fl-hub-session-token"));
+  assert.ok(!src.includes("stripHubTokenFragment"));
+  assert.ok(!src.includes("persistHubToken"));
 });
 
 function extractFunctionSource(src: string, name: string): string {
@@ -871,58 +877,149 @@ function extractFunctionSource(src: string, name: string): string {
   throw new Error(`function ${name} is not balanced`);
 }
 
-test("Hub token survives one-tab refresh and is cleared after rejection", async () => {
+test("Hub bootstrap reads injected meta and recovers from one 401 without a reload loop", async () => {
   const src = await readFile(path.join(hubPublic, "app.js"), "utf8");
-  const tokenFunctions = [
-    "isValidHubToken", "clearHubToken", "persistHubToken", "readStoredHubToken",
-    "stripHubTokenFragment", "readToken",
+  const html = await readFile(path.join(hubPublic, "index.html"), "utf8");
+  const i18n = await readFile(path.join(hubPublic, "i18n.js"), "utf8");
+  assert.ok(html.includes('name="forklight-hub-control"'));
+  assert.ok(html.includes("__FORKLIGHT_HUB_CONTROL__"));
+  assert.ok(!html.includes("location.hash"));
+  assert.doesNotMatch(src, /未认证会话/);
+  assert.doesNotMatch(src, /Unauthenticated session/);
+  assert.doesNotMatch(i18n, /未认证会话/);
+  assert.doesNotMatch(i18n, /Unauthenticated session/);
+  assert.ok(i18n.includes("localConnection"));
+  assert.ok(src.includes("X-ForkLight-Hub-Token"));
+  assert.ok(src.includes("recoverFromStaleHubControl()"));
+  assert.ok(!/JSON\.stringify\([^)]*S\.token/.test(src), "token is not sent in a body");
+
+  const bootstrap = [
+    "isValidHubToken",
+    "clearHubToken",
+    "readInjectedHubToken",
+    "readToken",
+    "hubControlReloadUsed",
+    "markHubControlReload",
+    "clearHubControlReload",
+    "showLocalConnectionRecovery",
+    "recoverFromStaleHubControl",
   ].map((name) => extractFunctionSource(src, name)).join("\n");
-  const stored = new Map<string, string>();
+  assert.ok(!bootstrap.includes("location.hash"), "bootstrap must not read a URL fragment");
+  assert.ok(!bootstrap.includes("fl-hub-session-token"), "bootstrap must not persist a Hub token");
+
+  const injected = "a".repeat(43);
+  const staleFragment = "b".repeat(43);
+  const storedToken = "c".repeat(43);
+  const stored = new Map<string, string>([["fl-hub-session-token", storedToken]]);
   const storage = {
     getItem(key: string) { return stored.get(key) ?? null; },
     setItem(key: string, value: string) { stored.set(key, value); },
     removeItem(key: string) { stored.delete(key); },
   };
-  const location = { hash: `#${"a".repeat(43)}`, pathname: "/", search: "?qa=1" };
-  let strippedTo = "";
-  const history = { replaceState(_a: unknown, _b: string, value: string) { strippedTo = value; } };
-  const harness = new Function("sessionStorage", "window", "history", `
-    var S = { token: null };
-    var HUB_TOKEN_SESSION_KEY = "fl-hub-session-token";
-    ${tokenFunctions}
-    return { readToken: readToken, clearHubToken: clearHubToken, state: S };
-  `)(storage, { location, history }, history) as {
+  let reloads = 0;
+  const documentStub = {
+    querySelector(sel: string) {
+      if (sel === 'meta[name="forklight-hub-control"]') {
+        return { getAttribute(name: string) { return name === "content" ? injected : null; } };
+      }
+      return null;
+    },
+  };
+  const harness = new Function("document", "sessionStorage", "window", `
+    var S = { token: null, timer: null };
+    var hubControlRecovering = false;
+    var HUB_CONTROL_META_NAME = "forklight-hub-control";
+    var HUB_CONTROL_RELOAD_KEY = "fl-hub-control-reload";
+    var recovered = "";
+    var viewEl = { replaceChildren: function(node) { recovered = node && node.textContent ? node.textContent : "recovered"; } };
+    var statusEl = { textContent: "" };
+    var topMetaEl = { textContent: "" };
+    function t(key){ return key; }
+    function h(tag, cls, text){ return { textContent: text, className: cls }; }
+    function stateMsg(kind, text){ return h("div", "state-msg " + kind, text); }
+    ${bootstrap}
+    return {
+      readToken: readToken,
+      recoverFromStaleHubControl: recoverFromStaleHubControl,
+      clearHubControlReload: clearHubControlReload,
+      state: S,
+      getRecovered: function(){ return recovered; },
+      getStatus: function(){ return statusEl.textContent; }
+    };
+  `)(documentStub, storage, {
+    location: { hash: `#${staleFragment}`, reload() { reloads += 1; } },
+  }) as {
     readToken(): string | null;
-    clearHubToken(): void;
+    recoverFromStaleHubControl(): void;
+    clearHubControlReload(): void;
     state: { token: string | null };
+    getRecovered(): string;
+    getStatus(): string;
   };
 
-  const token = harness.readToken();
-  assert.equal(token, "a".repeat(43));
-  assert.equal(stored.get("fl-hub-session-token"), token);
-  assert.equal(strippedTo, "/?qa=1", "fragment is removed without changing the query");
-  location.hash = "";
-  assert.equal(harness.readToken(), token, "same-tab refresh recovers the session token");
-  harness.state.token = token;
-  harness.clearHubToken();
+  assert.equal(harness.readToken(), injected, "bootstrap reads the injected meta token");
+  assert.equal(stored.get("fl-hub-session-token"), storedToken, "Hub token is not written to sessionStorage");
+  assert.equal(reloads, 0);
+
+  harness.state.token = injected;
+  harness.recoverFromStaleHubControl();
   assert.equal(harness.state.token, null);
-  assert.equal(stored.has("fl-hub-session-token"), false);
+  assert.equal(reloads, 1, "first 401 reloads once");
+  assert.equal(stored.get("fl-hub-control-reload"), "1");
+  assert.equal(harness.getRecovered(), "", "first 401 must not show recovery before reload");
 
-  const throwingStorage = {
-    getItem() { throw new Error("blocked"); },
-    setItem() { throw new Error("blocked"); },
-    removeItem() { throw new Error("blocked"); },
-  };
-  location.hash = `#${"b".repeat(43)}`;
-  const fallback = new Function("sessionStorage", "window", "history", `
+  const second = new Function("document", "sessionStorage", "window", `
+    var S = { token: "stale", timer: null };
+    var hubControlRecovering = false;
+    var HUB_CONTROL_META_NAME = "forklight-hub-control";
+    var HUB_CONTROL_RELOAD_KEY = "fl-hub-control-reload";
+    var recovered = "";
+    var viewEl = { replaceChildren: function(node) { recovered = node && node.textContent ? node.textContent : "recovered"; } };
+    var statusEl = { textContent: "" };
+    var topMetaEl = { textContent: "" };
+    function t(key){ return key; }
+    function h(tag, cls, text){ return { textContent: text, className: cls }; }
+    function stateMsg(kind, text){ return h("div", "state-msg " + kind, text); }
+    ${bootstrap}
+    recoverFromStaleHubControl();
+    return { recovered: recovered, status: statusEl.textContent, token: S.token, reloads: window.__reloads };
+  `)(documentStub, storage, {
+    location: {
+      hash: `#${staleFragment}`,
+      reload() { reloads += 1; },
+    },
+    __reloads: reloads,
+  }) as { recovered: string; status: string; token: string | null };
+
+  assert.equal(second.token, null);
+  assert.equal(reloads, 1, "repeated bootstrap failure must not reload again");
+  assert.equal(second.recovered, "localConnection");
+  assert.equal(second.status, "localConnectionBar");
+
+  const emptyMeta = new Function("document", "sessionStorage", "window", `
     var S = { token: null };
-    var HUB_TOKEN_SESSION_KEY = "fl-hub-session-token";
-    ${tokenFunctions}
+    var HUB_CONTROL_META_NAME = "forklight-hub-control";
+    var HUB_CONTROL_RELOAD_KEY = "fl-hub-control-reload";
+    ${extractFunctionSource(src, "isValidHubToken")}
+    ${extractFunctionSource(src, "readInjectedHubToken")}
+    ${extractFunctionSource(src, "readToken")}
     return readToken();
-  `)(throwingStorage, { location, history }, history) as string | null;
-  assert.equal(fallback, "b".repeat(43), "storage failure does not break this page load");
-  assert.ok(src.includes("if(r.status === 401) clearHubToken()"));
-  assert.ok(!/JSON\.stringify\([^)]*S\.token/.test(src), "token is not sent in a body");
+  `)({
+    querySelector() { return null; },
+  }, storage, { location: { hash: `#${staleFragment}` } }) as string | null;
+  assert.equal(emptyMeta, null, "missing meta does not fall back to fragment or sessionStorage");
+});
+
+test("operations and configuration docs describe invisible local control and bare URLs", async () => {
+  const ops = await readFile(path.join(root, "docs", "operations.md"), "utf8");
+  const cfg = await readFile(path.join(root, "docs", "configuration.md"), "utf8");
+  assert.doesNotMatch(ops, /token in (its |the )?fragment/i);
+  assert.doesNotMatch(ops, /sessionStorage/);
+  assert.doesNotMatch(cfg, /fragment/);
+  assert.doesNotMatch(cfg, /sessionStorage/);
+  assert.ok(ops.includes("bare loopback"));
+  assert.ok(cfg.includes("bare loopback URL"));
+  assert.ok(cfg.includes("injected invisibly"));
 });
 
 test("Hub Worker editor filters impossible Provider/runtime pairings before save", async () => {

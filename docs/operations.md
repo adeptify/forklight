@@ -119,19 +119,21 @@ forklight hub                      # starts daemon + Hub on 127.0.0.1
 #### Hub lifecycle
 
 **First start.** The daemon starts if it is not already running, the Hub listener
-binds to a loopback port, and—unless `--no-open` is used—the browser opens a local
-URL carrying a private access token in its fragment. That token remains valid
-for this Hub owner's lifetime. A private lifetime claim is written at startup;
-an authenticated descriptor is published once the listener is ready. The Hub
-runs until the owning process receives SIGINT or SIGTERM; a clean exit removes
-both records.
+binds to a loopback port, and—unless `--no-open` is used—the browser opens the
+bare loopback address `http://127.0.0.1:<port>/`. A private per-process control
+token stays in the Hub descriptor for CLI liveness proof and is injected
+invisibly into the in-memory index HTML; it is not part of the URL. A private
+lifetime claim is written at startup; an authenticated descriptor is published
+once the listener is ready. The Hub runs until the owning process receives
+SIGINT or SIGTERM; a clean exit removes both records.
 
 **Repeated command (another terminal).** A second `forklight hub` reads the
 existing claim, confirms the recorded owner PID is alive, probes the Hub server
 to prove it owns the stored token and nonce, compares the recorded build
-identity with the current CLI's build identity, and reuses the authenticated URL
-only when they match exactly. The command prints the existing address and exits.
-The original Hub owner is unaffected; closing the second terminal stops nothing.
+identity with the current CLI's build identity, and reuses the owner only when
+they match exactly. The command prints the existing bare loopback address and
+exits. The original Hub owner is unaffected; closing the second terminal stops
+nothing.
 
 **Stale version diagnosis (build identity mismatch).** When the recorded Hub
 descriptor carries a different build identity than the invoking CLI, ForkLight
@@ -164,7 +166,7 @@ proven, descriptor carries a different build), `legacy` (loopback proven, the
 descriptor has no build identity at all), or `unverified` (records are missing,
 malformed, inconsistent, dead, or failed authentication). Proven `pid` and `port`
 are only included when the full ownership and loopback proof succeeded; the
-output never contains the URL, fragment token, nonce, private home path, or
+output never contains the URL, control token, nonce, private home path, or
 raw record bytes. JSON output uses the same safe projection.
 
 **Restart timeout recovery.** When the old Hub owner does not exit within the
@@ -206,9 +208,10 @@ For any unknown Hub state, run `forklight hub`. The command handles stale
 records, proves live identity, diagnoses version mismatches, and refuses only
 when a live but unauthenticated owner exists. Do **not** manually delete files
 from `FORKLIGHT_HOME`, scan for processes with system utilities, or reuse a port
-you assume to be free. The URL printed by `forklight hub` carries a private
-local access token in the fragment; never copy the full URL into logs, tickets,
-or shared messages.
+you assume to be free. The address printed by `forklight hub` is the bare
+loopback URL. Refresh, bookmark, and extra tabs of that address reach Work
+without a fragment or login step. The local control token is never printed;
+do not copy Hub descriptor files into logs, tickets, or shared messages.
 
 > **Operator note (low-level diagnostics).** The lifetime claim and authenticated
 > descriptor are stored as `FORKLIGHT_HOME/.hub-owner.json` and

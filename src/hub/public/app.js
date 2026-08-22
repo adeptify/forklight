@@ -598,8 +598,10 @@ function mrWeightDefault(keyStr){
   if(keyStr === "correctionChurn") return 0.2;
   return 1;
 }
-/* Tab-scoped only: survives same-tab refresh, never localStorage/cookies. */
-var HUB_TOKEN_SESSION_KEY = "fl-hub-session-token";
+/* Invisible local control: token lives in memory after HTML injection. */
+var HUB_CONTROL_META_NAME = "forklight-hub-control";
+var HUB_CONTROL_RELOAD_KEY = "fl-hub-control-reload";
+var hubControlRecovering = false;
 
 /* Translate a budgetReliability unavailable reason into a plain-language key.
  *  Reasons not covered here fall back to the generic mrFactorUnavailable copy. */
@@ -623,49 +625,69 @@ function budgetEnvelopeText(envelope){
   return parts.length ? parts.join(" + ") : t("decUnavailable");
 }
 
-/* --- Hub session token lifecycle (fragment -> memory -> tab sessionStorage) --- */
+/* --- Invisible Hub control token: injected meta -> memory only --- */
 function isValidHubToken(token){
   return typeof token === "string" && token.length === 43 && /^[A-Za-z0-9_-]+$/.test(token);
 }
 function clearHubToken(){
   S.token = null;
-  try {
-    if(typeof sessionStorage !== "undefined") sessionStorage.removeItem(HUB_TOKEN_SESSION_KEY);
-  } catch(_){}
 }
-function persistHubToken(token){
-  if(!isValidHubToken(token)) return;
+function readInjectedHubToken(){
   try {
-    if(typeof sessionStorage !== "undefined") sessionStorage.setItem(HUB_TOKEN_SESSION_KEY, token);
-  } catch(_){}
-}
-function readStoredHubToken(){
-  try {
-    if(typeof sessionStorage === "undefined") return null;
-    var stored = sessionStorage.getItem(HUB_TOKEN_SESSION_KEY);
-    if(isValidHubToken(stored)) return stored;
-    if(stored != null) sessionStorage.removeItem(HUB_TOKEN_SESSION_KEY);
+    if(typeof document === "undefined") return null;
+    var meta = document.querySelector('meta[name="' + HUB_CONTROL_META_NAME + '"]');
+    if(!meta || typeof meta.getAttribute !== "function") return null;
+    var token = meta.getAttribute("content");
+    if(isValidHubToken(token)) return token;
   } catch(_){}
   return null;
 }
-function stripHubTokenFragment(){
+function readToken(){
+  return readInjectedHubToken();
+}
+function hubControlReloadUsed(){
   try {
-    if(window.history && history.replaceState){
-      history.replaceState(null, "", window.location.pathname + window.location.search);
-    }
+    if(typeof sessionStorage === "undefined") return true;
+    return sessionStorage.getItem(HUB_CONTROL_RELOAD_KEY) === "1";
+  } catch(_){
+    return true;
+  }
+}
+function markHubControlReload(){
+  try {
+    if(typeof sessionStorage === "undefined") return false;
+    sessionStorage.setItem(HUB_CONTROL_RELOAD_KEY, "1");
+    return sessionStorage.getItem(HUB_CONTROL_RELOAD_KEY) === "1";
+  } catch(_){
+    return false;
+  }
+}
+function clearHubControlReload(){
+  try {
+    if(typeof sessionStorage !== "undefined") sessionStorage.removeItem(HUB_CONTROL_RELOAD_KEY);
   } catch(_){}
 }
-function readToken(){
-  var raw = window.location.hash;
-  if(raw && raw.charAt(0) === "#"){
-    var fragment = raw.slice(1);
-    stripHubTokenFragment();
-    if(isValidHubToken(fragment)){
-      persistHubToken(fragment);
-      return fragment;
-    }
+function showLocalConnectionRecovery(){
+  viewEl.replaceChildren(stateMsg("disconnected", t("localConnection")));
+  statusEl.textContent = t("localConnectionBar");
+  if(topMetaEl) topMetaEl.textContent = "";
+}
+function recoverFromStaleHubControl(){
+  clearHubToken();
+  if(S.timer){ clearTimeout(S.timer); S.timer = null; }
+  if(hubControlRecovering) return;
+  hubControlRecovering = true;
+  if(hubControlReloadUsed() || !markHubControlReload()){
+    showLocalConnectionRecovery();
+    return;
   }
-  return readStoredHubToken();
+  try {
+    if(window.location && typeof window.location.reload === "function"){
+      window.location.reload();
+      return;
+    }
+  } catch(_){}
+  showLocalConnectionRecovery();
 }
 
 /* --- Model-routing policy projection / semantic equality --- */
@@ -977,7 +999,7 @@ function fetchSlice(key){
     S[slice.field] = data;
     S[slice.errorField] = null;
   }, function(e){
-    if(e && e.status === 401) clearHubToken();
+    if(e && e.status === 401) recoverFromStaleHubControl();
     S[slice.errorField] = (e && e.message) ? e.message : "unavailable";
   });
 }
@@ -1019,8 +1041,14 @@ function fetchJSON(path, opts){
   var init = { headers: { "X-ForkLight-Hub-Token": S.token } };
   if(opts && opts.signal){ init.signal = opts.signal; }
   return fetch(path, init).then(function(r){
-    if(r.status === 401) clearHubToken();
+    if(r.status === 401){
+      recoverFromStaleHubControl();
+      var denied = new Error("HTTP " + r.status);
+      denied.status = r.status;
+      throw denied;
+    }
     if(!r.ok){ var e = new Error("HTTP " + r.status); e.status = r.status; throw e; }
+    clearHubControlReload();
     return r.json();
   });
 }
@@ -1037,22 +1065,19 @@ function postJSON(path, body){
     return r.text().then(function(text){
       var data = null;
       if(text){ try { data = JSON.parse(text); } catch(_){ data = null; } }
-      if(r.status === 401) clearHubToken();
+      if(r.status === 401) recoverFromStaleHubControl();
       if(!r.ok){
         var msg = (data && (data.error || data.message)) || ("HTTP " + r.status);
         var e = new Error(String(msg));
         e.status = r.status;
         throw e;
       }
+      clearHubControlReload();
       return data;
     });
   });
 }
-function showUnauthenticated(){
-  viewEl.replaceChildren(stateMsg("disconnected", t("unauth")));
-  statusEl.textContent = t("unauthBar");
-  if(topMetaEl) topMetaEl.textContent = "";
-}
+
 function toast(msg){
   var el = document.getElementById("fl-toast");
   if(!el) return;
@@ -1158,10 +1183,13 @@ function refresh(){
 
   // Wait for everything (shared + page slices) to settle.
   Promise.all([hubP.catch(function(e){
-    if(e&&e.status===401) clearHubToken();
+    if(e&&e.status===401) recoverFromStaleHubControl();
     throw e;
   }), healthP].concat(slicePromises)).then(function(){
-    if(!S.token){ showUnauthenticated(); return; }
+    if(!S.token){
+      if(!hubControlRecovering) showLocalConnectionRecovery();
+      return;
+    }
     // Connected state follows the current health read, not retained data.
     if(!S.healthError) { S.lastOk = Date.now(); S.connected = true; S.hadOk = true; }
     else { S.connected = false; }
@@ -1182,7 +1210,10 @@ function refresh(){
       render();
     }
   }).catch(function(){
-    if(!S.token){ showUnauthenticated(); return; }
+    if(!S.token){
+      if(!hubControlRecovering) showLocalConnectionRecovery();
+      return;
+    }
     S.connected = false;
     if(S.tab === "worker" && S.workerFormActive){
       updStatus();
@@ -20446,7 +20477,7 @@ function init(){
   topMetaEl = document.getElementById("fl-top-meta");
   scrimEl = document.getElementById("fl-scrim");
   workReadingContextPending = workReadSessionContext();
-  if(!S.token){ showUnauthenticated(); return; }
+  if(!S.token){ showLocalConnectionRecovery(); return; }
   $$("#fl-tabs [data-tab]").forEach(function(btn){
     btn.addEventListener("click", function(){
       var tab = btn.getAttribute("data-tab");
