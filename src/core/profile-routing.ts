@@ -50,7 +50,7 @@ export interface ProfileRoutingSettings {
 
 /** Strict transport+semantic validation of the Profile list. Rejects unknown,
  *  duplicate, malformed, or out-of-range ids before any evidence read. */
-export function validateWorkerProfileIdList(
+function validateWorkerProfileIdList(
   workerProfileIds: unknown,
   label = "workerProfileIds",
 ): string[] {

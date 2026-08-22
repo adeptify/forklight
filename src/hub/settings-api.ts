@@ -11,7 +11,7 @@ import {
 import { isProviderName, type ProviderName } from "../core/providers.js";
 import type { ForkLightSettings } from "../core/settings.js";
 
-export interface HubSettingsView {
+interface HubSettingsView {
   defaultProvider: ProviderName;
   defaultRuntime: RuntimeName;
   defaultMaxBudgetUsd: number | null;

@@ -11,16 +11,9 @@
 // quality scores, or block Integration.
 
 import type { AttemptRecord, AttemptTokenUsage, ModelTokenUsage } from "./types.js";
+import { deepFreeze } from "./immutability.js";
 
 // --- Helpers ----------------------------------------------------------------
-
-function freezeDeep(v: unknown): void {
-  if (v !== null && typeof v === "object" && !Object.isFrozen(v)) {
-    if (Array.isArray(v)) { for (const e of v) freezeDeep(e); }
-    else { for (const e of Object.values(v)) freezeDeep(e); }
-    Object.freeze(v);
-  }
-}
 
 const isSafeNNInt = (n: unknown): n is number =>
   typeof n === "number" && Number.isSafeInteger(n) && n >= 0;
@@ -97,7 +90,7 @@ export interface AttemptReconciliationEvidence {
 }
 
 /** Per-Attempt status for missing evidence tracking. */
-export type ComparedGrossReconciliation =
+type ComparedGrossReconciliation =
   | {
       readonly available: true;
       readonly scope: "compared-attempts-only";
@@ -277,7 +270,7 @@ export function reconcileTokenUsage(
       },
       modelCount: usage.perModel.length,
     };
-    freezeDeep(evidence);
+    deepFreeze(evidence);
     evidenceList.push(evidence);
 
     compared++;
@@ -339,6 +332,6 @@ export function reconcileTokenUsage(
           },
     evidence: evidenceList,
   };
-  freezeDeep(result);
+  deepFreeze(result);
   return result;
 }

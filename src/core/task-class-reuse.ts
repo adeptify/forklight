@@ -28,7 +28,8 @@
  */
 
 import { constants } from "node:fs";
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
+import { sha256 } from "./digest.js";
 import { chmod, open, rename, unlink, writeFile, type FileHandle } from "node:fs/promises";
 import path from "node:path";
 import YAML from "yaml";
@@ -46,7 +47,7 @@ import type { TaskRecord } from "./types.js";
 export const CLASS_REUSE_STALE_REASON =
   "Task preview is out of date; preview again before applying.";
 
-export interface ReuseTaskClassInput {
+interface ReuseTaskClassInput {
   /** Absolute path to an unsubmitted Task Contract file. */
   taskFileInput: string;
   /** Exact previewRevisionDigest the caller confirmed. */
@@ -64,13 +65,9 @@ export interface ReuseTaskClassInput {
   beforeFinalIdentityCheck?: () => Promise<void>;
 }
 
-export interface ReuseTaskClassResult {
+interface ReuseTaskClassResult {
   /** Fresh canonical admission preview for the exact written content. */
   preview: SafeTaskAdmissionPreview;
-}
-
-function sha256Hex(text: string): string {
-  return createHash("sha256").update(text).digest("hex");
 }
 
 function isJsonFile(taskFile: string): boolean {
@@ -127,7 +124,7 @@ async function assertSameFileIdentity(
   if (current.dev !== expected.dev || current.ino !== expected.ino) {
     throw new Error(CLASS_REUSE_STALE_REASON);
   }
-  if (sha256Hex(current.text) !== expectedDigest) {
+  if (sha256(current.text) !== expectedDigest) {
     throw new Error(CLASS_REUSE_STALE_REASON);
   }
 }
@@ -248,7 +245,7 @@ export async function applyReusedTaskClass(input: ReuseTaskClassInput): Promise<
 
   // The prepared admission must come from exactly the bytes we read; the
   // caller-confirmed preview digest must match the canonical digest.
-  if (prepared.taskFileDigest !== sha256Hex(first.text)) {
+  if (prepared.taskFileDigest !== sha256(first.text)) {
     throw new Error(CLASS_REUSE_STALE_REASON);
   }
   if (prepared.previewRevisionDigest !== expectedPreviewRevisionDigest) {

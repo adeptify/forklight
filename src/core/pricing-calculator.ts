@@ -11,6 +11,7 @@ import type {
   PricingRateTier,
   PricingSourceEvidence,
 } from "./pricing.js";
+import { deepFreeze } from "./immutability.js";
 
 // Public types ----------------------------------------------------------------
 
@@ -41,7 +42,7 @@ export interface AppliedTierEntry {
   readonly totalPromptInput: number;
 }
 
-export interface AppliedTierEvidence {
+interface AppliedTierEvidence {
   readonly applied: readonly AppliedTierEntry[];
   readonly totalPromptInput: number;
 }
@@ -81,7 +82,7 @@ export interface UnavailableEvidence {
   readonly positiveNullRateComponents: readonly CostComponent[];
 }
 
-export type PricingQuoteUnavailableReason =
+type PricingQuoteUnavailableReason =
   | "invalid-usage"
   | "per-request-usage-required"
   | "usage-reconciliation-failed"
@@ -135,23 +136,6 @@ export interface UnavailableCost {
 export type PricingQuote = QuotedCost | UnavailableCost;
 
 // Immutability helpers --------------------------------------------------------
-
-function deepFreeze<T>(value: T): T {
-  if (value === null || typeof value !== "object") return value;
-  if (Object.isFrozen(value)) return value;
-  if (Array.isArray(value)) {
-    for (let i = 0; i < value.length; i++) {
-      const item = value[i];
-      if (item !== null && typeof item === "object") deepFreeze(item);
-    }
-  } else {
-    for (const v of Object.values(value)) {
-      if (v !== null && typeof v === "object") deepFreeze(v);
-    }
-  }
-  Object.freeze(value);
-  return value;
-}
 
 function cloneAndFreeze<T>(value: T): T { return deepFreeze(structuredClone(value)); }
 
@@ -235,7 +219,6 @@ function selectTier(rates: readonly PricingRateTier[], promptInput: number): Pri
   }
   return best;
 }
-
 
 // Component calculation -------------------------------------------------------
 

@@ -23,7 +23,7 @@ export type TaskStatus =
   | "interrupted";
 
 export type AttemptStatus = "running" | "succeeded" | "failed" | "interrupted";
-export type RuntimeBudgetEnforcement = "supported" | "partial" | "unsupported";
+type RuntimeBudgetEnforcement = "supported" | "partial" | "unsupported";
 
 /** Saved per-Worker execution preference.
  *  `auto` prefers a proven native Goal, then a proven persistent Session, then
@@ -113,7 +113,7 @@ export interface ProviderSpec {
   keychainAccount?: string;
 }
 
-export interface RuntimeSpec {
+interface RuntimeSpec {
   name: RuntimeName;
   executable: string;
   effort: "low" | "medium" | "high" | "xhigh" | "max";
@@ -663,7 +663,7 @@ export interface VerificationCommandResult {
   timedOut: boolean;
 }
 
-export interface SourceCompatibilityResult {
+interface SourceCompatibilityResult {
   /** True when every patch-affected path still matches the prepare-time source snapshot. */
   compatible: boolean;
   /** Relative paths touched by baseline→workspace diff. */
@@ -1400,7 +1400,7 @@ export interface CompetitionCandidateScore {
   totalScore: number;
 }
 
-export interface CompetitionRecommendation {
+interface CompetitionRecommendation {
   candidateId: string;
   confidence: number;
   reasoning: string;
@@ -1423,7 +1423,7 @@ export interface CompetitionEvaluationRecord {
 export type DeliveryStageExpectation = "required" | "not-configured";
 
 /** How delivery was resolved for this Task. Mirrors DeliveryResolution.source plus none. */
-export type DeliveryPlanResolutionSource = "inline" | "explicit" | "project" | "default" | "none";
+type DeliveryPlanResolutionSource = "inline" | "explicit" | "project" | "default" | "none";
 
 /** Safe immutable delivery plan projected from one Task delivery snapshot.
  *  No command text, no settings lookup, no execution. */
@@ -1491,7 +1491,7 @@ export interface IntegrationPathEvidenceEntry {
  *  limit rejected Preflight and at least one affected path is default business.
  *  Advisory only: it never alters rejectionReasons, the immutable Task,
  *  PathPolicy, Candidate, or retry state. */
-export type IntegrationRecoveryGuidanceCode =
+type IntegrationRecoveryGuidanceCode =
   | "review-generated-or-exclusion-policy-vs-source-scope";
 
 export interface IntegrationRecoveryGuidance {
@@ -1716,7 +1716,7 @@ export interface DualClockProjection {
 }
 
 /** Content-free same-Worker validation-repair allowance projection. */
-export interface ValidationRepairAllowance {
+interface ValidationRepairAllowance {
   max: number;
   consumed: number;
   remaining: number;
@@ -1724,7 +1724,7 @@ export interface ValidationRepairAllowance {
 }
 
 /** One durable validation-repair round (closed display facts only). */
-export interface ValidationRepairRoundView {
+interface ValidationRepairRoundView {
   round: number;
   state: "authorized" | "started" | "terminal";
   terminalOutcome?: "passed" | "failed" | "stopped";
@@ -1823,7 +1823,7 @@ export interface ActivationHandoff {
 
 // --- Provider probe ---
 
-export type ProbeResultStatus = "unverified" | "verified" | "failed";
+type ProbeResultStatus = "unverified" | "verified" | "failed";
 
 export type ProbeFailureCategory = "authentication" | "timeout" | "connectivity" | "unknown";
 
@@ -1887,7 +1887,7 @@ export type AdaptationProposedReasonCategory =
   | "other-flexible-policy";
 
 /** Status discriminator for the gate output. */
-export type AdaptationGateStatus = "eligible" | "stopped";
+type AdaptationGateStatus = "eligible" | "stopped";
 
 /** Per-field before/after view in an adaptation preview row.
  *  Always includes enforcementPhase and provenance from the parent snapshot. */
@@ -1936,7 +1936,7 @@ export interface AdaptationTransitionRecord {
 
 // --- Main remediation verification ---
 
-export type RemediationCheckStatus = "failed" | "passed";
+type RemediationCheckStatus = "failed" | "passed";
 
 /** Whether final delivery used the original acceptance suite or a Main-amended one. */
 export type RemediationAcceptanceBasis =
@@ -2314,7 +2314,7 @@ export interface ReviewGraphView {
 }
 
 /** Closed Integration-gate status for a frozen Task review requirement. */
-export type ReviewRequirementGateStatus =
+type ReviewRequirementGateStatus =
   | "not-declared"
   | "explicit-skip"
   | "satisfied"
@@ -2834,7 +2834,7 @@ export interface StorageProcessResult {
   signals: Array<"SIGTERM" | "SIGKILL">;
 }
 
-export interface StorageReclaimTargetResult {
+interface StorageReclaimTargetResult {
   name: string;
   category: StorageKnownRegenerableCategory;
   outcome: "removed" | "refused" | "missing";
@@ -2883,8 +2883,8 @@ export interface StorageRetainView {
 /** Readable marker for a self-contained local ForkLight Home backup. */
 export const BACKUP_SCHEMA = "forklight.backup.v1";
 
-export type BackupAction = "preview" | "create" | "inspect" | "restore";
-export type BackupStatus = "ready" | "completed" | "refused" | "failed";
+type BackupAction = "preview" | "create" | "inspect" | "restore";
+type BackupStatus = "ready" | "completed" | "refused" | "failed";
 export type BackupNextAction =
   | "create-with-confirm"
   | "inspect"
@@ -2893,18 +2893,7 @@ export type BackupNextAction =
   | "stop-hub"
   | "investigate"
   | "none";
-export type BackupExclusionReason = "transient" | "external-link";
-export type BackupRefusalReason =
-  | "existing-destination"
-  | "destination-inside-home"
-  | "store-unreadable"
-  | "store-integrity"
-  | "malformed-manifest"
-  | "escaping-path"
-  | "live-owner"
-  | "unverified-owner"
-  | "activation-failed"
-  | "home-missing";
+type BackupExclusionReason = "transient" | "external-link";
 
 /** Minimum readable backup directory facts. No per-file hashes or versions. */
 export interface BackupManifest {

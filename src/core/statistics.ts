@@ -34,7 +34,7 @@ export type FailureCategory =
   /** Main-authored acceptance contradiction after verified amended delivery. */
   | "contract-infeasible";
 
-export interface ClassifyFailureInput {
+interface ClassifyFailureInput {
   taskStatus: TaskStatus;
   attemptStatus?: AttemptStatus;
   attemptExitCode?: number;
@@ -825,7 +825,7 @@ function earliestVerificationEventFrom(events: EventRecord[]): EventRecord | und
 
 // --- Routing evidence -------------------------------------------------------
 
-export interface RoutingOfficialCostGroup {
+interface RoutingOfficialCostGroup {
   currency: string;
   quotedAttemptCount: number;
   totalQuotedCost: number;
@@ -851,7 +851,7 @@ export interface RoutingBudgetEnvelope {
  *  / no-progress / unclassified outcomes are excluded from both counts
  *  but kept visible). Uncapped and legacy Attempts are kept visible as
  *  excluded uncapped count, never as zero-valued evidence. */
-export interface RoutingBudgetEvidence {
+interface RoutingBudgetEvidence {
   boundedSampleCount: number;
   completedWithoutExhaustionCount: number;
   /** null means there is no single comparable cohort; it is never a
@@ -1012,7 +1012,7 @@ function earliestAttempt(attempts: AttemptRecord[]): AttemptRecord | undefined {
 /** First-pass outcome for the earliest Attempt only.
  *  success / failure enter the comparable denominator; unavailable stays visible
  *  but never becomes a synthetic zero or model failure. */
-export type FirstPassOutcome = "success" | "failure" | "unavailable";
+type FirstPassOutcome = "success" | "failure" | "unavailable";
 
 /**
  * Classify only the earliest Attempt using its own attempt-bound verification
@@ -1132,7 +1132,7 @@ function classifyAttemptFailure(
   });
 }
 
-export interface DeriveRoutingEvidenceInput {
+interface DeriveRoutingEvidenceInput {
   taskClass: string;
   /** When set, match tasks by taskFamily instead of taskClass.
    *  Family evidence is for complete-set fallback only — never mixed with exact. */

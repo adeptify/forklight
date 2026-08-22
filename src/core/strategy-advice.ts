@@ -31,7 +31,7 @@ import type {
   TaskRecord,
 } from "./types.js";
 
-export type StrategyDetermination = "recommendation" | "cannot-determine";
+type StrategyDetermination = "recommendation" | "cannot-determine";
 
 export type StrategyCannotDetermineReason =
   | "insufficient-relevant-samples"
@@ -57,7 +57,7 @@ export interface StrategyEvidenceRow {
   compared: boolean;
 }
 
-export interface StrategyRecommendation {
+interface StrategyRecommendation {
   provider: string;
   model: string;
   runtime: string;
@@ -76,12 +76,12 @@ export interface ExecutionStrategyAdvice {
   createsWork: false;
 }
 
-export type CompetitionPolicyDetermination =
+type CompetitionPolicyDetermination =
   | "not-advised"
   | "explained"
   | "cannot-determine";
 
-export type CompetitionPolicyReason =
+type CompetitionPolicyReason =
   | "intent-none"
   | "missing-valid-triggers"
   | "no-matching-competition-history"
@@ -110,7 +110,7 @@ export interface CompetitionPolicyExplanation {
   historyCanOverrideIntentNone: false;
 }
 
-export type JudgePolicyDetermination = "explained" | "cannot-determine";
+type JudgePolicyDetermination = "explained" | "cannot-determine";
 
 export type JudgePolicyReason =
   | "requirement-absent"
@@ -761,7 +761,7 @@ function assignmentFact(assignment: ReviewAssignmentRecord): ReviewAssignmentHis
   };
 }
 
-export function collectStrategyPolicyFacts(store: StrategyPolicyStore): {
+function collectStrategyPolicyFacts(store: StrategyPolicyStore): {
   competitions: CompetitionHistoryFact[];
   ordinaryTasks: OrdinaryTaskPolicyFact[];
   reviewGraphs: ReviewGraphHistoryFact[];

@@ -25,7 +25,7 @@ export interface DeliveryProfilesSettings {
   readonly projectBindings: Readonly<Record<string, string>>;
 }
 
-export interface DeliverySelection {
+interface DeliverySelection {
   readonly profile: DeliveryProfile;
   readonly provenance: "explicit" | "project" | "default";
 }

@@ -316,7 +316,7 @@ export async function prepareTaskWorkspace(store: StateStore, task: TaskRecord):
   return store.getTask(task.id);
 }
 
-export async function createTaskFromSpec(
+async function createTaskFromSpec(
   store: StateStore,
   spec: TaskRecord["spec"],
   taskFile: string,
@@ -1176,7 +1176,7 @@ export function reconcileTask(store: StateStore, taskId: string): TaskRecord {
  *  code units) of the trimmed feedback.  Bounded so the operator never
  *  accidentally forwards a full prompt, contract body, or other sensitive
  *  Task content through the correction channel. */
-export const REVISE_FEEDBACK_MAX_LENGTH = MAIN_REVIEW_REASON_MAX_LENGTH;
+const REVISE_FEEDBACK_MAX_LENGTH = MAIN_REVIEW_REASON_MAX_LENGTH;
 
 export type ReviseRejectionReason =
   | "not-succeeded"
@@ -1187,7 +1187,7 @@ export type ReviseRejectionReason =
   | "competition-candidate"
   | "integration-history";
 
-export interface ReviseCheckResult {
+interface ReviseCheckResult {
   readonly eligible: boolean;
   readonly reason?: ReviseRejectionReason;
   /** Canonical trimmed feedback; only present when eligible.  This is

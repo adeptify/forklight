@@ -265,7 +265,7 @@ async function handleMain(
   ]);
 }
 
-export async function readStdinSecret(input: NodeJS.ReadableStream): Promise<string> {
+async function readStdinSecret(input: NodeJS.ReadableStream): Promise<string> {
   if ("isTTY" in input && input.isTTY === true) {
     throw new Error(
       "API keys must be piped on stdin. Example: printf '%s' \"$KEY\" | forklight setup provider select --provider deepseek --variant default --confirm",
@@ -441,7 +441,7 @@ function present(json: boolean, payload: unknown, lines: string[]): SetupCliResu
   };
 }
 
-export function findSetupPackageRoot(): string | undefined {
+function findSetupPackageRoot(): string | undefined {
   let candidate = path.dirname(fileURLToPath(import.meta.url));
   for (let depth = 0; depth < 5; depth += 1) {
     if (existsSync(path.join(candidate, "package.json"))) return candidate;

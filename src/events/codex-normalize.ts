@@ -12,21 +12,13 @@ const MAX_RAW_ITEM_ID = 128;
 /** Public correlation token length (hex chars of a one-way digest). */
 const TOOL_CORRELATION_TOKEN_HEX = 16;
 
-/** Closed app-server item types that map to privacy-safe tool lifecycle events. */
-export const CODEX_APP_SERVER_TOOL_ITEM_TYPES = [
-  "commandExecution",
-  "fileChange",
-] as const;
-
-export type CodexAppServerToolItemType = (typeof CODEX_APP_SERVER_TOOL_ITEM_TYPES)[number];
-
-export type CodexAppServerItemProgressEvent = {
+type CodexAppServerItemProgressEvent = {
   type: "worker.tool.started" | "worker.tool.completed";
   summary: string;
   payload: Record<string, unknown>;
 };
 
-export type CodexAppServerWorkspaceChangeEvent = {
+type CodexAppServerWorkspaceChangeEvent = {
   type: "worker.message";
   summary: string;
   payload: Record<string, unknown>;

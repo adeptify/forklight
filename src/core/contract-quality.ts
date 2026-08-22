@@ -23,6 +23,7 @@ import type {
   TaskBackground,
   TaskSpec,
 } from "./types.js";
+import { deepFreeze } from "./immutability.js";
 
 const QUALITY_FIELDS: readonly (keyof ResolvedContractQualityValues)[] = [
   "maxFiles",
@@ -33,14 +34,6 @@ const QUALITY_FIELDS: readonly (keyof ResolvedContractQualityValues)[] = [
   "minOutcomeCharacters",
   "minModuleResponsibilityCharacters",
 ];
-
-function deepFreeze<T>(value: T): T {
-  if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
-    for (const nested of Object.values(value)) deepFreeze(nested);
-    Object.freeze(value);
-  }
-  return value;
-}
 
 function resolveValue<K extends keyof ResolvedContractQualityValues>(
   field: K,

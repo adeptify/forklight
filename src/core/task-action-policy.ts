@@ -106,7 +106,7 @@ export interface TaskActionPolicy {
   destinations: Record<WorkHierarchyColumnCode, TaskDestinationPolicy>;
 }
 
-export interface TaskActionPolicyInput {
+interface TaskActionPolicyInput {
   taskId: string;
   status: TaskStatus | undefined;
   decisionStage?: DecisionStage;

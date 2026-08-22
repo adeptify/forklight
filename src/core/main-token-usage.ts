@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 import { normalizeCodexTerminalUsage } from "./codex-terminal-usage.js";
 import { normalizeDirectCodexProfileId } from "./direct-codex-calibration.js";
 import { isoTimestamp } from "./time.js";
+import { deepFreeze } from "./immutability.js";
 
 /** Minimal Store port so this module stays free of a StateStore import cycle. */
 export interface MainUsageStore {
@@ -21,7 +22,6 @@ export interface MainUsageStore {
   listMainUsageSamples(taskId: unknown, comparisonId: unknown): MainUsageSample[];
   listMainUsageSamplesByComparison(comparisonId: unknown): MainUsageSample[];
 }
-
 
 export const MAIN_USAGE_ROLES = ["direct-main", "delegated-main"] as const;
 export type MainUsageRole = (typeof MAIN_USAGE_ROLES)[number];
@@ -82,7 +82,7 @@ export const INVALID_MAIN_USAGE_CAPTURE = "Invalid Main usage capture";
 export const INVALID_MAIN_USAGE_SAMPLE = "Invalid Main usage sample";
 export const INVALID_MAIN_USAGE_STATUS = "Invalid Main usage status query";
 export const TASK_NOT_FOUND_CAPTURE = "ForkLight Task not found for Main usage capture";
-export const TASK_NOT_FOUND_STATUS = "ForkLight Task not found for Main usage status";
+const TASK_NOT_FOUND_STATUS = "ForkLight Task not found for Main usage status";
 export const NOT_MAIN_USAGE_READY =
   "Task is not Main-usage-ready: taskClass, taskFamily and directCodexProfileId are required";
 export const CONTRADICTORY_IDENTITY = "Contradictory Main usage identity";
@@ -130,13 +130,6 @@ const TASK_LABEL = /^[^\s].{0,79}$/;
 
 const defaultSampleId: SampleIdFactory = () => `mus-${randomUUID()}`;
 const defaultTimestamp: TimestampFactory = () => isoTimestamp();
-
-function freezeDeep(v: unknown): void {
-  if (v === null || typeof v !== "object" || Object.isFrozen(v)) return;
-  if (Array.isArray(v)) { for (const e of v) freezeDeep(e); }
-  else { for (const e of Object.values(v)) freezeDeep(e); }
-  Object.freeze(v);
-}
 
 const isNNInt = (n: unknown): n is number =>
   typeof n === "number" && Number.isSafeInteger(n) && n >= 0;
@@ -238,7 +231,7 @@ function normalizeEpisodeSegment(input: unknown, expectedOrdinal: number): MainU
     cacheCreationInputTokens: o.cacheCreationInputTokens,
     grossTokens: gross,
   };
-  freezeDeep(segment);
+  deepFreeze(segment);
   return segment;
 }
 
@@ -261,7 +254,7 @@ function normalizeEpisodeSegments(
     seen.add(segment.runRef);
     segments.push(segment);
   }
-  freezeDeep(segments);
+  deepFreeze(segments);
   return segments;
 }
 
@@ -371,10 +364,10 @@ export function normalizeMainUsageSample(input: unknown): MainUsageSample {
       throw new TypeError(INVALID_MAIN_USAGE_SAMPLE);
     }
     const episodeSample: MainUsageSample = { ...sample, segments };
-    freezeDeep(episodeSample);
+    deepFreeze(episodeSample);
     return episodeSample;
   }
-  freezeDeep(sample);
+  deepFreeze(sample);
   return sample;
 }
 
@@ -420,7 +413,7 @@ function mapUniqueFailure(error: unknown): never {
 
 /** Build one detached count-only sample from a complete Codex terminal event
  *  plus Task-derived identity. Usage is validated by the canonical adapter. */
-export function buildMainUsageSample(
+function buildMainUsageSample(
   usage: unknown,
   metadata: {
     readonly sampleId: string;
@@ -581,7 +574,7 @@ function buildEpisodeSegments(input: unknown, episodeRunRef: string): MainUsageE
       runRef: raw.runRef,
       ...counters,
     };
-    freezeDeep(segment);
+    deepFreeze(segment);
     segments.push(segment);
   }
   return segments;
@@ -706,6 +699,6 @@ export function readMainUsageStatus(
     schemaVersion: MAIN_USAGE_SCHEMA_VERSION,
   };
   assertNoStatusClaimFields(status);
-  freezeDeep(status);
+  deepFreeze(status);
   return status;
 }

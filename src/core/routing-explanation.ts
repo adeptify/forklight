@@ -23,6 +23,7 @@ import type {
   FrozenWorkerIdentity,
   RoutingDecisionSnapshot,
 } from "./types.js";
+import { deepFreeze } from "./immutability.js";
 
 /** Closed selection-basis category — the only reason vocabulary users see. */
 export type RoutingSelectionBasis =
@@ -123,16 +124,6 @@ function aggregateSampleCounts(
 
 /** Freeze every object and array in the result graph so no caller can mutate a
  *  shared detached projection. The input routing decision is never mutated. */
-function deepFreeze<T>(value: T): T {
-  if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
-    Object.freeze(value);
-    for (const key of Object.keys(value)) {
-      deepFreeze((value as Record<string, unknown>)[key]);
-    }
-  }
-  return value;
-}
-
 /**
  * Project the immutable routing decision into bounded user-facing facts.
  * Consumes the parsed routingDecision (optional), the resolved Worker identity

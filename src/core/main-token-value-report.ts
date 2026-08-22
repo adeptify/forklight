@@ -19,11 +19,12 @@ import {
 import { normalizeMainUsageComparisonId } from "./main-token-usage.js";
 import type { StateStore } from "../state/store.js";
 import type { AttemptRecord, EventRecord, MainDirectDecisionRecord } from "./types.js";
+import { deepFreeze } from "./immutability.js";
 
 export const MAIN_VALUE_REPORT_SCHEMA_VERSION = 1 as const;
 export const MAIN_VALUE_REPORT_METHOD = MAIN_PAIR_METHOD;
-export const MAX_VALUE_REPORT_FAMILIES = 10 as const;
-export const MAX_VALUE_REPORT_COMPARISONS = 64 as const;
+const MAX_VALUE_REPORT_FAMILIES = 10 as const;
+const MAX_VALUE_REPORT_COMPARISONS = 64 as const;
 
 export const MAIN_VALUE_REPORT_REASONS = [
   "invalid-request",
@@ -195,16 +196,6 @@ const REPORT_FORBIDDEN_KEYS: ReadonlySet<string> = new Set([
 ]);
 const TASK_LABEL = /^[^\s].{0,79}$/;
 const REASON_RANK = new Map(MAIN_VALUE_REPORT_REASONS.map((reason, index) => [reason, index]));
-
-function freezeDeep(value: unknown): void {
-  if (value === null || typeof value !== "object" || Object.isFrozen(value)) return;
-  if (Array.isArray(value)) {
-    for (const entry of value) freezeDeep(entry);
-  } else {
-    for (const entry of Object.values(value)) freezeDeep(entry);
-  }
-  Object.freeze(value);
-}
 
 const hasOwn = (object: object, key: string): boolean =>
   Object.prototype.hasOwnProperty.call(object, key);
@@ -753,7 +744,7 @@ function emptyReport(
     })),
     createdWork: false,
   };
-  freezeDeep(report);
+  deepFreeze(report);
   return report;
 }
 
@@ -870,7 +861,7 @@ export function readMainTokenValueReport(store: StateStore, params: unknown): Ma
   for (const key of Object.keys(report)) {
     if (REPORT_FORBIDDEN_KEYS.has(key)) throw new TypeError("Invalid Main Token value report");
   }
-  freezeDeep(report);
+  deepFreeze(report);
   return report;
 }
 

@@ -1,4 +1,5 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
+import { sha256 } from "./digest.js";
 import { cp, lstat, mkdir, readFile, readdir, rm } from "node:fs/promises";
 import path from "node:path";
 import type { IntegrationSettings } from "./settings.js";
@@ -68,10 +69,6 @@ interface BackupRecord {
   existed: boolean;
   backupPath: string;
   digest: string;
-}
-
-function sha256(content: string | Buffer): string {
-  return createHash("sha256").update(content).digest("hex");
 }
 
 function recordStage(
@@ -1423,7 +1420,7 @@ export const SOURCE_ONLY_RECOVERY_REFUSALS = {
 export type SourceOnlyRecoveryRefusalReason =
   (typeof SOURCE_ONLY_RECOVERY_REFUSALS)[keyof typeof SOURCE_ONLY_RECOVERY_REFUSALS];
 
-export type SourceOnlyRecoveryEligibility =
+type SourceOnlyRecoveryEligibility =
   | {
       eligible: true;
       task: TaskRecord;
@@ -1432,7 +1429,7 @@ export type SourceOnlyRecoveryEligibility =
     }
   | { eligible: false; reason: SourceOnlyRecoveryRefusalReason };
 
-export type SourceOnlyRecoveryOutcome =
+type SourceOnlyRecoveryOutcome =
   | IntegrationResult
   | { status: "outcome-unknown"; reason: SourceOnlyRecoveryRefusalReason };
 

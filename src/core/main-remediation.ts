@@ -386,7 +386,7 @@ const activeVerifications = new Set<string>();
 
 // --- Core operation ---
 
-export interface RemediationVerifyInput {
+interface RemediationVerifyInput {
   taskId: string;
   reason: string;
   confirm: true;
@@ -412,7 +412,7 @@ export interface RemediationVerifyView {
 }
 
 /** Compact public disposition fields only — never command text or private reason. */
-export function compactRemediationDisposition(
+function compactRemediationDisposition(
   disposition: RemediationDisposition,
 ): RemediationDisposition {
   const acceptanceBasis: RemediationAcceptanceBasis =

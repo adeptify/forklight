@@ -391,7 +391,7 @@ function normalizeContinuationBudgetRemainder(rawRemainderUsd: number): number {
   return Math.max(0, Math.floor(scaled + 1e-9) / CONTINUATION_BUDGET_USD_SCALE);
 }
 
-export interface ConsumedAttemptCost {
+interface ConsumedAttemptCost {
   /** Sum of every prior invocation's best finite cost estimate/actual cost. */
   consumedUsd: number;
   /** True when every prior invocation supplied cost evidence. */

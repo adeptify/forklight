@@ -13,6 +13,7 @@ import {
   type DirectCodexRegistrationResult,
 } from "./direct-codex-publication-service.js";
 import type { DirectCodexPairedSample } from "./direct-codex-calibration.js";
+import { deepFreeze } from "./immutability.js";
 
 
 const DUP_MSG = "Duplicate sample identity rejected";
@@ -30,14 +31,6 @@ export interface DirectCodexInboxItem {
 
 
 // ---- Capture -----------------------------------------------------------
-
-function freezeDeep(v: unknown): void {
-  if (v !== null && typeof v === "object" && !Object.isFrozen(v)) {
-    if (Array.isArray(v)) { for (const e of v) freezeDeep(e); }
-    else { for (const e of Object.values(v)) freezeDeep(e); }
-    Object.freeze(v);
-  }
-}
 
 /** Compose one count-only Codex terminal usage event plus seven explicit
  *  sample metadata fields into a canonical DirectCodexPairedSample,
@@ -92,7 +85,7 @@ export function listDirectCodexInbox(
       reviewState,
       ...(review !== undefined ? { review } : {}),
     };
-    freezeDeep(item);
+    deepFreeze(item);
     items.push(item);
   }
   Object.freeze(items);

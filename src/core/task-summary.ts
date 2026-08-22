@@ -84,7 +84,7 @@ export function isLegalBoardPlacement(boardScope: unknown, boardReason: unknown)
   return reasons !== undefined && (reasons as readonly string[]).includes(boardReason);
 }
 
-export interface BoardPlacement {
+interface BoardPlacement {
   boardScope: BoardScope;
   boardReason: BoardReason;
 }

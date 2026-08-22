@@ -38,8 +38,8 @@ const NONCE_RE = /^[A-Za-z0-9_-]{16,128}$/;
 export const DEFAULT_HUB_STARTUP_TIMEOUT_MS = 30_000;
 export const MIN_HUB_STARTUP_TIMEOUT_MS = 1_000;
 export const MAX_HUB_STARTUP_TIMEOUT_MS = 60_000;
-export const DEFAULT_HUB_REPLACE_GRACE_MS = 7_000;
-export const HUB_STARTUP_POLL_INTERVAL_MS = 100;
+const DEFAULT_HUB_REPLACE_GRACE_MS = 7_000;
+const HUB_STARTUP_POLL_INTERVAL_MS = 100;
 
 /** Privacy-safe: no home, token, nonce, path, or raw child output. */
 export const HUB_STARTUP_CHILD_EXITED_MESSAGE =
@@ -492,7 +492,7 @@ export interface ReplaceHubResult {
 }
 
 /** Bounded, token-free result of a read-only Hub inspection. */
-export type HubInspectionState =
+type HubInspectionState =
   | "stopped"
   | "current"
   | "different-build"
@@ -500,7 +500,7 @@ export type HubInspectionState =
   | "unverified";
 
 /** Bounded, single next-action suggestion derived from the safe state. */
-export type HubInspectionNextAction =
+type HubInspectionNextAction =
   | "none"
   | "start"
   | "restart-with-confirm"
@@ -843,7 +843,7 @@ export interface HubChildHandle {
 
 /** Closed success/failure surface for detached restart. Incapable of carrying
  *  token, nonce, path, environment, URL fragment, or raw child output. */
-export type DetachedHubRestartState = "current" | "ready" | "failed";
+type DetachedHubRestartState = "current" | "ready" | "failed";
 
 export type DetachedHubRestartReplacement =
   | "none-needed"
@@ -851,7 +851,7 @@ export type DetachedHubRestartReplacement =
   | "started"
   | "not-started";
 
-export type DetachedHubRestartNextAction =
+type DetachedHubRestartNextAction =
   | "use-existing-hub"
   | "use-new-hub"
   | "investigate";
@@ -867,7 +867,7 @@ export interface DetachedHubRestartResult {
   readonly reason?: string;
 }
 
-export interface DetachedHubRestartOptions {
+interface DetachedHubRestartOptions {
   readonly runIdentity: BuildIdentity;
   /** Explicit CLI port. When omitted, a replaced owner keeps its prior port. */
   readonly port?: number;
@@ -946,7 +946,7 @@ export function hubCliLaunchArguments(moduleUrl: string = import.meta.url): {
  * Child always receives `--no-open` so only the parent decides browser open.
  * Stdio is ignored so the parent never captures the Hub token or raw output.
  */
-export function launchDetachedHubProcess(
+function launchDetachedHubProcess(
   home: string,
   port?: number,
 ): HubChildHandle {

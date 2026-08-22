@@ -28,7 +28,7 @@ export interface MainFailureAttribution {
   eventSequence: number;
 }
 
-export interface RecordMainFailureAttributionInput {
+interface RecordMainFailureAttributionInput {
   attemptId: string;
   verificationEventSequence: number;
   cause: FailureAttributionCause;

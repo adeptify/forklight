@@ -75,7 +75,7 @@ export type PreparationObserver = (
   observation: PreparationObservation,
 ) => void | Promise<void>;
 
-export interface PreparationOptions {
+interface PreparationOptions {
   /** Optional progress observer. Contract: delivery is awaited, and an
    *  observer error fails closed — prepareWorkspace re-throws so the
    *  caller can mark the Task failed and skip the final workspace.prepared

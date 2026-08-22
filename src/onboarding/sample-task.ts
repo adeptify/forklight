@@ -53,7 +53,7 @@ export interface PreparedOnboardingSample extends OnboardingSampleView {
   taskFile: string;
 }
 
-export interface OnboardingSampleSubmissionLease {
+interface OnboardingSampleSubmissionLease {
   sample: PreparedOnboardingSample;
   alreadySubmitted: boolean;
   commit(taskId: string): Promise<OnboardingSampleView>;

@@ -20,14 +20,7 @@ import {
   reconcileTokenUsage,
   type TokenUsageReconciliation,
 } from "./token-reconciliation.js";
-
-function freezeDeep(v: unknown): void {
-  if (v !== null && typeof v === "object" && !Object.isFrozen(v)) {
-    if (Array.isArray(v)) { for (const e of v) freezeDeep(e); }
-    else { for (const e of Object.values(v)) freezeDeep(e); }
-    Object.freeze(v);
-  }
-}
+import { deepFreeze } from "./immutability.js";
 
 // Minimal nested aggregate record shape projected into Token arithmetic.
 // Profile identity is verified upstream — arithmetic never sees raw
@@ -88,7 +81,7 @@ export interface ReportCalibrationOptions {
   readonly currentDirectCodexProfileId?: string;
 }
 
-export interface CalibrationSelectionResult {
+interface CalibrationSelectionResult {
   readonly resolvedCurrentTaskClass: string | undefined;
   readonly resolvedCurrentDirectCodexProfileId: string | undefined;
   readonly resolvedCalibration: NestedAggregateCalibration | undefined;
@@ -100,7 +93,7 @@ export interface CalibrationSelectionResult {
 // publication, provider, model, prompt, or name.  The Store is only
 // consulted when both current identities are present; legacy
 // class-only calibration data is never reached.
-export function selectCalibration(
+function selectCalibration(
   task: TaskRecord,
   options: ReportCalibrationOptions | undefined,
   lookup: CalibrationPublicationLookup,
@@ -251,6 +244,6 @@ export function getTaskTokenReport(
     calibrationSelection: sel.selection,
     usageReconciliation,
   };
-  freezeDeep(result);
+  deepFreeze(result);
   return result;
 }

@@ -19,7 +19,7 @@ import {
 } from "../core/exchange-capture.js";
 import type { TaskTokenReport } from "../core/token-report.js";
 
-export type TaskScopedCliOperation =
+type TaskScopedCliOperation =
   | "forklight_submit" | "forklight_status" | "forklight_wait"
   | "forklight_inspect" | "forklight_resume"
   | "forklight_integration_preflight" | "forklight_integration_apply"
@@ -40,7 +40,7 @@ export type TaskScopedCliOperation =
 
 export type { TaskIdSource };
 
-export interface WithCliExchangeReceiptParams<T> {
+interface WithCliExchangeReceiptParams<T> {
   readonly operation: TaskScopedCliOperation;
   readonly home: string;
   readonly args: unknown;

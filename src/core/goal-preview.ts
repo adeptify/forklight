@@ -38,7 +38,7 @@ export interface GoalValidationPhase {
   dependencyWaves: string[][];
 }
 
-export interface GoalValidationPolicy {
+interface GoalValidationPolicy {
   maxDurationMs: number | null;
   noProgressTimeoutMs: number | null;
   maxCorrectionRounds: number;

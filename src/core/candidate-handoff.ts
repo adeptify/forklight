@@ -21,7 +21,8 @@
  *   - Preparation is restart-safe and idempotent; failure launches no Worker.
  *   - Goal-Task origin never fabricates Competition ids.
  */
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
+import { sha256 } from "./digest.js";
 import { spawn } from "node:child_process";
 import {
   access,
@@ -29,7 +30,6 @@ import {
   mkdir,
   readFile,
   rm,
-  stat,
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
@@ -151,10 +151,6 @@ export interface GoalTaskHandoffAuthorizationContext extends SharedHandoffDelive
   milestone: GoalMilestoneRecord;
 }
 
-function sha256(content: string | Buffer): string {
-  return createHash("sha256").update(content).digest("hex");
-}
-
 function normalizeReason(reason: unknown): string {
   if (typeof reason !== "string") {
     throw new CandidateHandoffError(
@@ -267,11 +263,6 @@ export function projectCandidateHandoff(
     nextAction,
     ...(successorTaskStatus === undefined ? {} : { successorTaskStatus }),
   };
-}
-
-/** SQL index key for competition_id column; empty for Goal-Task origin. */
-export function handoffCompetitionIndexKey(record: CandidateHandoffRecord): string {
-  return record.origin.kind === "competition" ? record.origin.competitionId : "";
 }
 
 /** Build the destination Worker instruction from retained paths and gaps. */
@@ -476,7 +467,7 @@ export function buildHandoffSuccessorSpec(
 }
 
 /** True when the Competition request is an exact replay of an authorized handoff. */
-export function isExactHandoffReplay(
+function isExactHandoffReplay(
   existing: CandidateHandoffRecord,
   request: CandidateHandoffRequest,
   canonicalReason: string,
@@ -490,7 +481,7 @@ export function isExactHandoffReplay(
 }
 
 /** True when the Goal-Task request is an exact replay of an authorized handoff. */
-export function isExactGoalTaskHandoffReplay(
+function isExactGoalTaskHandoffReplay(
   existing: CandidateHandoffRecord,
   request: GoalTaskHandoffRequest,
   canonicalReason: string,
@@ -616,7 +607,7 @@ async function pathExists(filePath: string): Promise<boolean> {
  * clean current-project successor workspace. Proves each selected path matches
  * the Candidate workspace bytes (or mutual absence for deletions).
  */
-export async function materializeSelectedCandidatePaths(input: {
+async function materializeSelectedCandidatePaths(input: {
   successor: TaskRecord;
   sourceTask: TaskRecord;
   revision: CandidateRevision;
@@ -892,7 +883,7 @@ function rejectIfDuplicateRevision(
  * Fail closed on stale/missing evidence, same Profile, non-launchable
  * destination, final choice, duplicate, or multi-hop.
  */
-export function validateCandidateHandoffRequest(
+function validateCandidateHandoffRequest(
   store: StateStore,
   settings: ForkLightSettings,
   request: CandidateHandoffRequest,
@@ -1173,7 +1164,7 @@ export function isGoalTaskHandoffSourceEligible(
  * Validate one explicit direct Goal-Task handoff before any durable mutation.
  * Retention paths/gaps and destination Profile are confirmed together.
  */
-export function validateGoalTaskHandoffRequest(
+function validateGoalTaskHandoffRequest(
   store: StateStore,
   settings: ForkLightSettings,
   request: GoalTaskHandoffRequest,
@@ -1429,7 +1420,7 @@ function originAuthorizationPayload(
 }
 
 /** Atomically authorize one handoff: durable record + successor Task (queued, unprepared). */
-export function authorizeCandidateHandoff(
+function authorizeCandidateHandoff(
   store: StateStore,
   settings: ForkLightSettings,
   context: CandidateHandoffAuthorizationContext,
@@ -1468,7 +1459,7 @@ export function authorizeCandidateHandoff(
  * Atomically authorize one direct Goal-Task handoff: retained path/gap evidence,
  * typed handoff origin, frozen destination, and exactly one successor Task.
  */
-export function authorizeGoalTaskHandoff(
+function authorizeGoalTaskHandoff(
   store: StateStore,
   settings: ForkLightSettings,
   context: GoalTaskHandoffAuthorizationContext,
@@ -1997,20 +1988,3 @@ export function resolveHandoffViewForTask(
   };
 }
 
-/** Copy a private revision artifact for tests/helpers when only event payload is available. */
-export async function ensurePrivateRevisionArtifact(
-  task: TaskRecord,
-  revisionId: string,
-  patchBytes: Buffer | string,
-): Promise<string> {
-  const revisionsDir = path.join(task.paths.root, "revisions");
-  await mkdir(revisionsDir, { recursive: true, mode: 0o700 });
-  const artifactPath = path.join(revisionsDir, `${revisionId}.patch`);
-  try {
-    await stat(artifactPath);
-  } catch {
-    await writeFile(artifactPath, patchBytes, { mode: 0o600 });
-    await chmod(artifactPath, 0o600);
-  }
-  return artifactPath;
-}

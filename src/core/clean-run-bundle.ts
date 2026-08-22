@@ -13,7 +13,7 @@ import {
   type BuildIdentity,
 } from "./build-identity.js";
 
-export const BUNDLE_EVIDENCE_SCHEMA_VERSION = 1 as const;
+const BUNDLE_EVIDENCE_SCHEMA_VERSION = 1 as const;
 
 /** Closed relative artifact names published in a clean-run directory. */
 export const BUNDLE_ARTIFACT_NAMES = Object.freeze({
@@ -30,7 +30,7 @@ const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
  * Closed sensitive-filename policy. Basename only — never opens content and
  * never serializes matched names into public evidence.
  */
-export const SENSITIVE_FILENAME_BASENAME_RES: readonly RegExp[] = Object.freeze([
+const SENSITIVE_FILENAME_BASENAME_RES: readonly RegExp[] = Object.freeze([
   /^\.env$/i,
   /^\.env\..+$/i,
   /^\.npmrc$/i,
@@ -68,9 +68,6 @@ export const BUNDLE_EVIDENCE_LIMITS: readonly string[] = Object.freeze([
   "Main install, session restart, and comprehension still require a clean-user run.",
   "Fifteen-minute configuration and thirty-minute first-Task timing still require a clean-user run.",
 ]);
-
-/** @deprecated Use BUNDLE_EVIDENCE_LIMITS; kept as alias for call sites. */
-export const BUNDLE_EVIDENCE_LIMITATIONS = BUNDLE_EVIDENCE_LIMITS;
 
 export type BundleFailureCategory =
   | "invalid-output"
@@ -113,7 +110,7 @@ export interface NpmPackArtifact {
   readonly version?: string;
 }
 
-export interface TestSummary {
+interface TestSummary {
   readonly testsPassed: number;
   readonly testsTotal: number;
 }
@@ -123,7 +120,7 @@ export type TarEntryIssueCategory =
   | "path-traversal"
   | "sensitive-filename";
 
-export interface TarEntryScanResult {
+interface TarEntryScanResult {
   readonly ok: boolean;
   /** Bounded category only — never the offending path. */
   readonly issueCategory?: TarEntryIssueCategory;
@@ -134,12 +131,12 @@ export interface BundleCheckFact {
   readonly passed: boolean;
 }
 
-export interface BundlePrepackCheck extends BundleCheckFact {
+interface BundlePrepackCheck extends BundleCheckFact {
   readonly testsPassed: number;
   readonly testsTotal: number;
 }
 
-export interface BundleHubDaemonCheck extends BundleCheckFact {
+interface BundleHubDaemonCheck extends BundleCheckFact {
   readonly hubCurrent: boolean;
   readonly daemonIdentityMatch: boolean;
   readonly cleanShutdown: boolean;
@@ -157,7 +154,7 @@ export interface BundleVerification {
 }
 
 /** Exact public verification shape used by the frozen schemaVersion 1 bundle. */
-export interface BundleEvidenceVerification {
+interface BundleEvidenceVerification {
   readonly prepack: "passed";
   readonly testCount: number;
   readonly testPassed: number;
@@ -190,7 +187,7 @@ export interface BundleEvidence {
   readonly limits: readonly string[];
 }
 
-export interface BuildBundleEvidenceInput {
+interface BuildBundleEvidenceInput {
   readonly createdAt: string;
   readonly tarballFileName: string;
   readonly tarballSha256: string;
@@ -245,7 +242,7 @@ export function isSafeTarballFileName(value: unknown): value is string {
     && !value.includes("..");
 }
 
-export function isSafeRelativeArtifactName(value: unknown): value is string {
+function isSafeRelativeArtifactName(value: unknown): value is string {
   return typeof value === "string"
     && value.length > 0
     && value.length <= 180
@@ -603,7 +600,7 @@ export function buildBundleEvidence(input: BuildBundleEvidenceInput): BundleEvid
 }
 
 /** Fail closed if evidence embeds absolute paths or credential-like keys. */
-export function assertEvidencePrivacy(evidence: BundleEvidence): void {
+function assertEvidencePrivacy(evidence: BundleEvidence): void {
   const serialized = JSON.stringify(evidence);
   if (
     serialized.includes("/Users/")

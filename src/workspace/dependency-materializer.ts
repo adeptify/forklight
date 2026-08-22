@@ -43,8 +43,6 @@ import path from "node:path";
 /** Runtime dependency directory names that may be materialized for verifiers. */
 export const RUNTIME_DEPENDENCY_DIRECTORIES = ["node_modules"] as const;
 
-export type RuntimeDependencyDirectory = typeof RUNTIME_DEPENDENCY_DIRECTORIES[number];
-
 /** Root package.json fields consulted for runtime/build resolution. */
 const DEPENDENCY_MAP_FIELDS = [
   "dependencies",
@@ -364,7 +362,7 @@ export interface MaterializeDependenciesOptions {
  * real destination directories are left in place unless replaceExisting is set.
  * Legacy destination symlinks are always removed and replaced.
  */
-export async function materializeProjectDependencies(
+async function materializeProjectDependencies(
   sourceProject: string,
   destinationProject: string,
   dependencyNames: readonly string[] = RUNTIME_DEPENDENCY_DIRECTORIES,

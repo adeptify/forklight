@@ -16,7 +16,7 @@ type JsonObject = Record<string, unknown>;
  *  The first marker emits immediately; subsequent markers inside this window
  *  are dropped before Store writes. This is internal backpressure — it proves
  *  Runtime liveness only and never resets the no-effective-progress watchdog. */
-export const CLAUDE_PROCESSING_THROTTLE_MS = 15_000;
+const CLAUDE_PROCESSING_THROTTLE_MS = 15_000;
 
 function asObject(value: unknown): JsonObject | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)

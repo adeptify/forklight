@@ -5,25 +5,7 @@
 // Immutability helpers
 // ---------------------------------------------------------------------------
 
-function deepFreeze<T>(value: T): T {
-  if (value !== null && typeof value === "object") {
-    if (!Object.isFrozen(value)) {
-      if (Array.isArray(value)) {
-        for (let i = 0; i < value.length; i++) {
-          const item = value[i];
-          if (item !== null && typeof item === "object") deepFreeze(item);
-        }
-      } else {
-        for (const v of Object.values(value)) {
-          if (v !== null && typeof v === "object") deepFreeze(v);
-        }
-      }
-      Object.freeze(value);
-    }
-  }
-  return value;
-}
-
+import { deepFreeze } from "./immutability.js";
 function cloneAndFreeze<T>(value: T): T {
   return deepFreeze(structuredClone(value));
 }
@@ -81,17 +63,17 @@ export type PricingUnavailableReason =
   | "ambiguous-match"
   | "no-match";
 
-export interface MatchedPricing {
+interface MatchedPricing {
   readonly matched: true;
   readonly entry: PricingCatalogEntry;
 }
 
-export interface UnavailablePricing {
+interface UnavailablePricing {
   readonly matched: false;
   readonly reason: PricingUnavailableReason;
 }
 
-export type PricingMatchResult = MatchedPricing | UnavailablePricing;
+type PricingMatchResult = MatchedPricing | UnavailablePricing;
 export type PricingCatalog = readonly PricingCatalogEntry[];
 
 // ---------------------------------------------------------------------------

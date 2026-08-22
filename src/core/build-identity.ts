@@ -18,14 +18,14 @@ export interface BuildIdentity {
   sourceDigest?: string;
 }
 
-export type VersionJourneyState =
+type VersionJourneyState =
   | "ready"
   | "source-needs-build"
   | "artifact-needs-restart"
   | "protocol-mismatch"
   | "unavailable";
 
-export type VersionJourneyNextAction =
+type VersionJourneyNextAction =
   | "none"
   | "build"
   | "restart"

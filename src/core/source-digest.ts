@@ -7,7 +7,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 
-export interface SourceTreeIdentity {
+interface SourceTreeIdentity {
   digest: string;
   latestModifiedAt: string;
   fileCount: number;

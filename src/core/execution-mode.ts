@@ -17,7 +17,7 @@ import type {
   TaskSpec,
 } from "./types.js";
 
-export const EXECUTION_PREFERENCES: readonly ExecutionPreference[] = [
+const EXECUTION_PREFERENCES: readonly ExecutionPreference[] = [
   "auto",
   "single-run",
   "persistent-session",

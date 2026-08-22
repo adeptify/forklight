@@ -52,7 +52,7 @@ export type HealthEnvironmentLoader = (
 
 export type HealthEnvironmentClock = () => number;
 
-export interface HealthEnvironmentCacheOptions {
+interface HealthEnvironmentCacheOptions {
   ttlMs?: number;
   now?: HealthEnvironmentClock;
   load?: HealthEnvironmentLoader;

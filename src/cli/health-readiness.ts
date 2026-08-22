@@ -68,7 +68,7 @@ export function safeProviderVerificationSnapshot(
   return result;
 }
 
-export interface BuildHealthWorkerReadinessInput {
+interface BuildHealthWorkerReadinessInput {
   settings: ForkLightSettings;
   providers: Record<ProviderName, ProviderReadiness>;
   /** Adapter-name → ok flag.  Built-ins are synchronous; async adapters
@@ -106,7 +106,7 @@ export function buildHealthWorkerReadiness(
  *  Excludes credentials, endpoints, paths, raw diagnostics, commands,
  *  and any internal `checks` object so the projection never grows
  *  beyond the resolver's bounded contract. */
-export interface WorkerReadinessJsonEntry {
+interface WorkerReadinessJsonEntry {
   workerId: string;
   workerLabel: string;
   state: WorkerReadinessResult["state"];

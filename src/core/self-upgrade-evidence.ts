@@ -42,7 +42,7 @@ export const QUALIFYING_STAGES: readonly IntegrationStageName[] = Object.freeze(
 
 const QUALIFYING_STAGE_SET: ReadonlySet<string> = new Set(QUALIFYING_STAGES);
 
-export type SelfUpgradeStreakState = "empty" | "in-progress" | "ready";
+type SelfUpgradeStreakState = "empty" | "in-progress" | "ready";
 
 export type SelfUpgradeBreakCategory =
   | "none"
@@ -51,7 +51,7 @@ export type SelfUpgradeBreakCategory =
   | "rolled-back"
   | "insufficient-evidence";
 
-export type SelfUpgradeNextAction =
+type SelfUpgradeNextAction =
   | "run-first-upgrade"
   | "continue-consecutive-proofs"
   | "milestone-ready";

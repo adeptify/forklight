@@ -142,12 +142,12 @@ export interface WorkerValidationRepairAuthorization {
   feedback: string;
 }
 
-export interface WorkerValidationRepairExecution {
+interface WorkerValidationRepairExecution {
   authorization: WorkerValidationRepairAuthorization;
   started: boolean;
 }
 
-export interface WorkerValidationRepairTerminalInput {
+interface WorkerValidationRepairTerminalInput {
   authorization: WorkerValidationRepairAuthorization;
   attemptId: string;
   outcome: WorkerValidationRepairTerminalOutcome;
@@ -956,8 +956,3 @@ export function workerValidationRepairFeedback(
   ].join("\n").slice(0, MAX_FEEDBACK_LENGTH);
 }
 
-// Explicit aliases make the pure contract discoverable to coordinator and
-// focused tests without creating a second implementation or authority path.
-export const evaluateWorkerValidationRepair = decideWorkerValidationRepair;
-export const workerValidationRepairDecision = decideWorkerValidationRepair;
-export const recordWorkerValidationRepairAuthorization = authorizeWorkerValidationRepair;

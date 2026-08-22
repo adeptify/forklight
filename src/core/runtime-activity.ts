@@ -45,7 +45,7 @@ function payloadObject(payload: unknown): Record<string, unknown> | undefined {
 }
 
 /** Read the closed activityEvidence field from a durable event payload. */
-export function readActivityEvidence(
+function readActivityEvidence(
   payload: unknown,
 ): RuntimeActivityEvidence | undefined {
   const value = payloadObject(payload)?.[ACTIVITY_EVIDENCE_FIELD];
@@ -56,7 +56,7 @@ export function readActivityEvidence(
 }
 
 /** Read closed activityKind without treating prose as evidence. */
-export function readActivityKind(payload: unknown): string | undefined {
+function readActivityKind(payload: unknown): string | undefined {
   const value = payloadObject(payload)?.activityKind;
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }

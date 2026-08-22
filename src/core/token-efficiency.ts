@@ -5,18 +5,11 @@
 // Every estimate carries an explicit method and confidence level.
 
 import type { AttemptTokenUsage } from "./types.js";
+import { deepFreeze } from "./immutability.js";
 
 // --- Immutability helpers ---
 
-function freezeDeep(v: unknown): void {
-  if (v !== null && typeof v === "object" && !Object.isFrozen(v)) {
-    if (Array.isArray(v)) { for (const e of v) freezeDeep(e); }
-    else { for (const e of Object.values(v)) freezeDeep(e); }
-    Object.freeze(v);
-  }
-}
-
-const frozenCopy = <T>(value: T): T => { const c = structuredClone(value); freezeDeep(c); return c as T; };
+const frozenCopy = <T>(value: T): T => { const c = structuredClone(value); deepFreeze(c); return c as T; };
 
 // --- Private validation ---
 
@@ -189,7 +182,7 @@ export function createRedactedExchangeMeasurement(
   const nonAscii = [...text].length - ascii;
   const r: RedactedExchangeMeasurement = { direction, operation, taskId, timestamp,
     utf8Bytes: bytes, asciiCount: ascii, nonAsciiCount: nonAscii };
-  freezeDeep(r);
+  deepFreeze(r);
   return r;
 }
 
@@ -300,7 +293,7 @@ export function normalizeOrchestrationExchangeReceipt(
     ...(responseContent !== undefined ? { responseContent: frozenCopy(responseContent) } : {}),
     ...(responseStructured !== undefined ? { responseStructured: frozenCopy(responseStructured) } : {}),
   };
-  freezeDeep(receipt);
+  deepFreeze(receipt);
   return receipt;
 }
 
@@ -360,7 +353,7 @@ export function normalizeDirectCodexCalibrationRecord(
     createdAt: o.createdAt as string,
     schemaVersion: 1,
   };
-  freezeDeep(record);
+  deepFreeze(record);
   return record;
 }
 
@@ -660,6 +653,6 @@ export function buildTokenEfficiencyReport(params: {
   // Assemble; all children are already detached frozen copies
   const report: TokenEfficiencyReport = { workerVolume, exchangeEstimate,
     boundaryReduction, directCodexSavings };
-  freezeDeep(report);
+  deepFreeze(report);
   return report;
 }

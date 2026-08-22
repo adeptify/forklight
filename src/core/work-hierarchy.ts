@@ -307,7 +307,7 @@ export interface WorkHierarchyFilter {
   workerProfileId?: string;
 }
 
-export interface WorkHierarchyFilterMeta {
+interface WorkHierarchyFilterMeta {
   applied: WorkHierarchyFilter;
 }
 
@@ -325,7 +325,7 @@ export interface WorkHierarchyView {
 // Pure column mapper
 // ---------------------------------------------------------------------------
 
-export interface HierarchyColumnInput {
+interface HierarchyColumnInput {
   status: TaskStatus | undefined;
   decisionStage?: DecisionStage;
   boardScope?: BoardScope;

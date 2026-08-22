@@ -1,7 +1,15 @@
 import { execFileSync } from "node:child_process";
 import type { TaskSpec } from "./types.js";
 import { keychainAccount } from "./config.js";
-import type { SetupKeychainStore } from "../setup/types.js";
+
+/** Minimal keychain contract shared by setup flows and provider-secret reads.
+ * Defined here (not in setup/) so core never depends on the setup layer. */
+export interface SetupKeychainStore {
+  has(service: string, account: string): boolean;
+  read(service: string, account: string): string | undefined;
+  write(service: string, account: string, value: string): void;
+  delete(service: string, account: string): void;
+}
 
 const MACOS_SECURITY_PATH = "/usr/bin/security";
 

@@ -18,6 +18,7 @@ import type {
   IntegrationReceiptRecord,
   IntegrationResultRecord,
 } from "./types.js";
+import { deepFreeze } from "./immutability.js";
 
 export const MAIN_PAIR_SCHEMA_VERSION = 1 as const;
 export const MAIN_PAIR_METHOD = MAIN_USAGE_SOURCE;
@@ -33,7 +34,7 @@ export const MAIN_PAIR_REJECTION_REASONS = [
 ] as const;
 export type MainPairRejectionReason = (typeof MAIN_PAIR_REJECTION_REASONS)[number];
 
-export const MAIN_PAIR_REPORT_REASONS = [
+const MAIN_PAIR_REPORT_REASONS = [
   ...MAIN_PAIR_REJECTION_REASONS,
   "cannot-determine",
   "legacy-pair-contract-missing",
@@ -130,10 +131,10 @@ export type AssessmentIdFactory = () => string;
 
 export const INVALID_MAIN_PAIR_ASSESSMENT = "Invalid Main pair assessment";
 export const INVALID_MAIN_PAIR_REPORT = "Invalid Main pair report query";
-export const TASK_NOT_FOUND_ASSESS = "ForkLight Task not found for Main pair assessment";
-export const TASK_NOT_FOUND_REPORT = "ForkLight Task not found for Main pair report";
+const TASK_NOT_FOUND_ASSESS = "ForkLight Task not found for Main pair assessment";
+const TASK_NOT_FOUND_REPORT = "ForkLight Task not found for Main pair report";
 export const ASSESS_REQUIRES_CONFIRM = "Main pair assessment requires confirm: true";
-export const DUPLICATE_MAIN_PAIR = "Duplicate Main pair assessment rejected";
+const DUPLICATE_MAIN_PAIR = "Duplicate Main pair assessment rejected";
 export const UNKNOWN_MAIN_PAIR_ASSESSMENT = "Unknown Main pair assessment";
 export const CORRUPT_MAIN_PAIR_ASSESSMENT = "Corrupt Main pair assessment record in state database";
 export const ASSESSMENT_UNKNOWN_TASK = "Assessment references unknown Task";
@@ -222,16 +223,6 @@ const TASK_LABEL = /^[^\s].{0,79}$/;
 
 const defaultAssessmentId: AssessmentIdFactory = () => `mpa-${randomUUID()}`;
 
-function freezeDeep(v: unknown): void {
-  if (v === null || typeof v !== "object" || Object.isFrozen(v)) return;
-  if (Array.isArray(v)) {
-    for (const entry of v) freezeDeep(entry);
-  } else {
-    for (const entry of Object.values(v)) freezeDeep(entry);
-  }
-  Object.freeze(v);
-}
-
 const hasOwn = (o: object, key: string): boolean => Object.prototype.hasOwnProperty.call(o, key);
 
 const isValidTimestamp = (s: unknown): s is string => {
@@ -265,7 +256,7 @@ export function normalizeDirectVerificationRef(input: unknown): DirectVerificati
     throw new TypeError(INVALID_MAIN_PAIR_ASSESSMENT);
   }
   const ref: DirectVerificationRef = { referenceId: o.referenceId };
-  freezeDeep(ref);
+  deepFreeze(ref);
   return ref;
 }
 
@@ -333,7 +324,7 @@ function assessResult(
     ...(assessment === undefined ? {} : { assessment }),
     schemaVersion: MAIN_PAIR_SCHEMA_VERSION,
   };
-  freezeDeep(result);
+  deepFreeze(result);
   return result;
 }
 
@@ -440,7 +431,7 @@ export function normalizeMainPairAssessment(input: unknown): MainPairAssessment 
       assessedAt: o.assessedAt,
       schemaVersion: MAIN_PAIR_SCHEMA_VERSION,
     };
-    freezeDeep(assessment);
+    deepFreeze(assessment);
     return assessment;
   }
 
@@ -461,7 +452,7 @@ export function normalizeMainPairAssessment(input: unknown): MainPairAssessment 
     assessedAt: o.assessedAt,
     schemaVersion: MAIN_PAIR_SCHEMA_VERSION,
   };
-  freezeDeep(assessment);
+  deepFreeze(assessment);
   return assessment;
 }
 
@@ -775,7 +766,7 @@ function buildReport(input: {
   for (const key of Object.keys(report)) {
     if (REPORT_FORBIDDEN_KEYS.has(key)) throw new TypeError(INVALID_MAIN_PAIR_REPORT);
   }
-  freezeDeep(report);
+  deepFreeze(report);
   return report;
 }
 

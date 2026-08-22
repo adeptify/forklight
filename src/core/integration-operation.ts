@@ -5,7 +5,7 @@ import type {
   IntegrationStageEvidence,
 } from "./types.js";
 
-export interface CompactIntegrationStage {
+interface CompactIntegrationStage {
   stage: string;
   status: string;
   commandCount: number;
@@ -15,7 +15,7 @@ export interface CompactIntegrationStage {
   error?: string;
 }
 
-export interface CompactIntegrationResultSnapshot {
+interface CompactIntegrationResultSnapshot {
   status: string;
   error?: string;
   appliedAt?: string;

@@ -7,7 +7,7 @@
  * Legacy profiles without advancedPolicy get documented compatible defaults.
  */
 
-import type { PolicyMode, PolicyLimitEvidence } from "./types.js";
+import type { PolicyMode } from "./types.js";
 import type { RuntimeName } from "./runtime-names.js";
 import type { WorkerCapabilityMatrix } from "../workers/types.js";
 import type { ExecutionSettings, CompletionPolicySettings } from "./settings.js";
@@ -326,26 +326,6 @@ export function resolveEffectivePolicy(
   };
 }
 
-// --- Legacy normalization ---
-
-/** Normalize a legacy Worker Profile to include an explicit advanced policy
- *  without changing behavior. Reads existing top-level noProgressTimeoutMs
- *  and maxBudgetUsd (budget stays on the spec, not advanced policy).
- *  Never invents a strict new ceiling. */
-export function normalizeLegacyWorkerAdvancedPolicy(
-  profile: {
-    noProgressTimeoutMs?: number;
-    effort?: string;
-  },
-): Partial<AdvancedPolicyFields> {
-  const patch: Partial<AdvancedPolicyFields> = {};
-  if (profile.noProgressTimeoutMs !== undefined) {
-    patch.noProgressTimeoutMs = profile.noProgressTimeoutMs;
-  }
-  // effort does not map into advanced policy — it's a Worker adapter concern.
-  return patch;
-}
-
 /** Merge a Worker Profile's top-level noProgressTimeoutMs into its advancedPolicy.
  *  advancedPolicy.noProgressTimeoutMs always wins if set.
  *  Returns the effective partial for resolution. */
@@ -371,7 +351,7 @@ export function effectiveWorkerAdvancedPolicy(
 
 /** Context for resolving effective policy at Task creation time.
  *  workerProfile fields are explicitly optional for exactOptionalPropertyTypes. */
-export interface PolicyResolutionContext {
+interface PolicyResolutionContext {
   /** Selected Worker Profile (the resolved profile, not raw input). */
   workerProfile?:
     | {
@@ -521,15 +501,6 @@ export function attemptPolicyFromSnapshot(
   };
 }
 
-/** Derive maxMainCorrections from an effective policy snapshot. */
-export function maxMainCorrectionsFromSnapshot(
-  snapshot: EffectivePolicySnapshot | undefined,
-  legacyMax: number = 1,
-): number {
-  if (snapshot === undefined) return legacyMax;
-  return snapshot.values.maxMainCorrections;
-}
-
 /** Derive maxMainReverifications from an effective policy snapshot.
  *  Legacy Tasks without a snapshot fall back to the development default of 1. */
 export function maxMainReverificationsFromSnapshot(
@@ -669,20 +640,3 @@ export function enforcementCapabilityForRuntime(
 
 // --- Typed policy-limit evidence factory ---
 
-export function policyLimitEvidence(params: {
-  category: PolicyLimitEvidence["category"];
-  enforcementPhase: EnforcementPhase;
-  configured: number | null;
-  observed: number;
-  effect: PolicyLimitEvidence["effect"];
-  detail: string;
-}): PolicyLimitEvidence {
-  return {
-    category: params.category,
-    enforcementPhase: params.enforcementPhase,
-    configured: params.configured,
-    observed: params.observed,
-    effect: params.effect,
-    detail: params.detail,
-  };
-}

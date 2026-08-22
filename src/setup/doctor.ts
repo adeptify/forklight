@@ -198,7 +198,7 @@ export interface ExecutionRuntimeFactsResult {
   runtimes: Partial<Record<RuntimeName, { ok: boolean }>>;
 }
 
-export interface ExecutionRuntimeFactsInput {
+interface ExecutionRuntimeFactsInput {
   clientBuildIdentity: BuildIdentity;
   daemonEvidence?: DaemonHealthEvidence;
   localRuntimes: readonly LocalRuntimeFact[];
@@ -323,13 +323,13 @@ export function projectExecutionRuntimeDisplay(
 
 /** Bounded CLI health header: the single `ok` flag and the `claudeCode`
  *  string shown at the top of `forklight health`. */
-export interface ExecutionClaudeOk {
+interface ExecutionClaudeOk {
   ok: boolean;
   claudeCode: string;
 }
 
 /** Local caller facts used only for an explicitly labelled fallback. */
-export interface LocalClaudeOkInput {
+interface LocalClaudeOkInput {
   ok: boolean;
   claudeCode: string;
 }

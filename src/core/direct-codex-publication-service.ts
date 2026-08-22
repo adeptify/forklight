@@ -12,15 +12,8 @@ import {
   type DirectCodexProfilePublication,
 } from "./direct-codex-calibration.js";
 import type { ConfidenceLevel } from "./token-efficiency.js";
+import { deepFreeze } from "./immutability.js";
 
-
-function freezeDeep(v: unknown): void {
-  if (v !== null && typeof v === "object" && !Object.isFrozen(v)) {
-    if (Array.isArray(v)) { for (const e of v) freezeDeep(e); }
-    else { for (const e of Object.values(v)) freezeDeep(e); }
-    Object.freeze(v);
-  }
-}
 
 function isValidTimestamp(s: unknown): s is string {
   if (typeof s !== "string" || s.trim().length === 0) return false;
@@ -235,7 +228,7 @@ export function buildDirectCodexPublicationPreview(
     acceptedSampleIds: ev.acceptedSampleIds,
     hasNewAcceptedEvidence: ev.hasNewAcceptedEvidence, readiness: ev.readiness,
   };
-  freezeDeep(preview);
+  deepFreeze(preview);
   return preview;
 }
 
@@ -282,8 +275,8 @@ export function registerDirectCodexPublication(
     acceptedSampleCount: ev.acceptedSampleIds.length,
     acceptedSampleIds: ev.acceptedSampleIds, version: ev.nextVersion,
   };
-  freezeDeep(summary);
+  deepFreeze(summary);
   const result: DirectCodexRegistrationResult = { publication, summary };
-  freezeDeep(result);
+  deepFreeze(result);
   return result;
 }

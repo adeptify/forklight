@@ -23,10 +23,7 @@ export const CONTRACT_INFEASIBLE_REASON_CODES = [
   "scope-boundary-conflict",
 ] as const;
 
-export type ContractInfeasibleReasonCode =
-  (typeof CONTRACT_INFEASIBLE_REASON_CODES)[number];
-
-export interface ContractInfeasibilityAssessment {
+interface ContractInfeasibilityAssessment {
   /** True when the current contract cannot be satisfied under the same boundary. */
   infeasible: boolean;
   reason?: ContractInfeasibleReason;

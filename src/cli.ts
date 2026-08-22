@@ -919,8 +919,10 @@ interface DirectCodexCliOptions {
   readonly switches: ReadonlySet<string>;
 }
 
-function parseDirectCodexOptions(
-  arguments_: string[], valueFlags: readonly string[], switchFlags: readonly string[] = ["--json"],
+/** Shared flag parser behind the per-domain wrappers below; error text embeds the domain label. */
+function parseCliFlagOptions(
+  arguments_: string[], valueFlags: readonly string[], domainLabel: string,
+  switchFlags: readonly string[] = ["--json"],
 ): DirectCodexCliOptions {
   const values: Record<string, string> = {};
   const switches = new Set<string>();
@@ -930,7 +932,7 @@ function parseDirectCodexOptions(
   for (let index = 0; index < arguments_.length; index += 1) {
     const flag = arguments_[index]!;
     if ((!valueSet.has(flag) && !switchSet.has(flag)) || seen.has(flag)) {
-      throw new Error("Invalid direct-codex arguments");
+      throw new Error(`Invalid ${domainLabel} arguments`);
     }
     seen.add(flag);
     if (switchSet.has(flag)) {
@@ -939,7 +941,7 @@ function parseDirectCodexOptions(
     }
     const value = arguments_[index + 1];
     if (value === undefined || value.startsWith("--")) {
-      throw new Error("Invalid direct-codex arguments");
+      throw new Error(`Invalid ${domainLabel} arguments`);
     }
     values[flag] = value;
     index += 1;
@@ -947,10 +949,20 @@ function parseDirectCodexOptions(
   return { values, switches };
 }
 
-function requiredDirectCodexOption(options: DirectCodexCliOptions, flag: string): string {
+function requiredCliOption(options: DirectCodexCliOptions, flag: string, domainLabel: string): string {
   const value = options.values[flag];
-  if (value === undefined) throw new Error(`Missing direct-codex option: ${flag}`);
+  if (value === undefined) throw new Error(`Missing ${domainLabel} option: ${flag}`);
   return value;
+}
+
+function parseDirectCodexOptions(
+  arguments_: string[], valueFlags: readonly string[], switchFlags: readonly string[] = ["--json"],
+): DirectCodexCliOptions {
+  return parseCliFlagOptions(arguments_, valueFlags, "direct-codex", switchFlags);
+}
+
+function requiredDirectCodexOption(options: DirectCodexCliOptions, flag: string): string {
+  return requiredCliOption(options, flag, "direct-codex");
 }
 
 function parseDirectCodexJsonObject(raw: string, flag: "--usage" | "--metadata"): Record<string, unknown> {
@@ -1047,35 +1059,11 @@ function humanDirectCodexPublicationPreviewLines(preview: DirectCodexPublication
 function parseMainTokenOptions(
   arguments_: string[], valueFlags: readonly string[], switchFlags: readonly string[] = ["--json"],
 ): DirectCodexCliOptions {
-  const values: Record<string, string> = {};
-  const switches = new Set<string>();
-  const valueSet = new Set(valueFlags);
-  const switchSet = new Set(switchFlags);
-  const seen = new Set<string>();
-  for (let index = 0; index < arguments_.length; index += 1) {
-    const flag = arguments_[index]!;
-    if ((!valueSet.has(flag) && !switchSet.has(flag)) || seen.has(flag)) {
-      throw new Error("Invalid main-token arguments");
-    }
-    seen.add(flag);
-    if (switchSet.has(flag)) {
-      switches.add(flag);
-      continue;
-    }
-    const value = arguments_[index + 1];
-    if (value === undefined || value.startsWith("--")) {
-      throw new Error("Invalid main-token arguments");
-    }
-    values[flag] = value;
-    index += 1;
-  }
-  return { values, switches };
+  return parseCliFlagOptions(arguments_, valueFlags, "main-token", switchFlags);
 }
 
 function requiredMainTokenOption(options: DirectCodexCliOptions, flag: string): string {
-  const value = options.values[flag];
-  if (value === undefined) throw new Error(`Missing main-token option: ${flag}`);
-  return value;
+  return requiredCliOption(options, flag, "main-token");
 }
 
 function parseMainTokenBooleanFlag(options: DirectCodexCliOptions, flag: string): boolean {

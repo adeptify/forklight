@@ -15,13 +15,13 @@ import { createPathPolicy } from "../workspace/path-policy.js";
 import { writeWorkspacePatchReport } from "../workspace/patch.js";
 import { verifierProcessEnvironment } from "../workspace/verifier-git.js";
 
-export interface CheckpointLaunch {
+interface CheckpointLaunch {
   command: string;
   args: string[];
   env: Record<string, string>;
 }
 
-export type CheckpointGapReason =
+type CheckpointGapReason =
   | "runtime-unsupported"
   | "mcp-unavailable"
   | "missing-or-failed-non-authoritative";
@@ -61,7 +61,7 @@ export function checkpointMcpReadinessFromEvents(
   return "unknown";
 }
 
-export interface TerminalAfterVerification {
+interface TerminalAfterVerification {
   status: "succeeded" | "failed";
   /** Present only when status is failed. */
   failureReason?: string;
@@ -203,7 +203,7 @@ export function checkpointLaunch(
   };
 }
 
-export interface CheckpointSelection {
+interface CheckpointSelection {
   /** canonical `acceptance-N` → raw command text for the Task Contract. */
   catalog: Map<string, string>;
   /** Command ids in request order (defaults to the full catalog order). */

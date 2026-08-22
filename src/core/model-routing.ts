@@ -25,13 +25,7 @@ export function failureImpactFor(category: FailureCategory): FailureImpact {
   return failureImpactForCategory(category);
 }
 
-export const MODEL_QUALITY_CATEGORIES = new Set<FailureCategory>(["verification"]);
-export const NON_MODEL_CATEGORIES = new Set<FailureCategory>([
-  "credential", "interruption", "workspace", "budget", "provider",
-]);
-export const AMBIGUOUS_CATEGORIES = new Set<FailureCategory>(["noProgress", "unclassified"]);
-
-export interface RoutingWeightSettings {
+interface RoutingWeightSettings {
   acceptedDelivery: number;
   verifiedBehavior: number;
   modelQualityFailure: number;
@@ -47,18 +41,10 @@ export interface RoutingWeightSettings {
   budgetReliability: number;
 }
 
-export type MissingEvidenceMode = "strict" | "flexible";
+type MissingEvidenceMode = "strict" | "flexible";
 export type EvidenceScope = "exact-class" | "task-family" | "none";
 export type CompetitionTrigger = "critical" | "multiple-plausible-solutions" | "new-family" | "user-requested";
 export type CompetitionIntent = "none" | "consider" | "required";
-
-/** Reason code for Main's worker selection. */
-export type SelectionReasonCode =
-  | "relevant-delivery"
-  | "runtime-capability"
-  | "user-specified"
-  | "only-available"
-  | "main-judgment";
 
 export interface RoutingPolicySettings {
   minRelevantSamples: number;
@@ -78,8 +64,8 @@ export interface RoutingPolicySettings {
   weights: RoutingWeightSettings;
 }
 
-export const DEFAULT_TRIGGERS_ENABLED: CompetitionTrigger[] = [];
-export const DEFAULT_COMPETITION_CANDIDATES = 2;
+const DEFAULT_TRIGGERS_ENABLED: CompetitionTrigger[] = [];
+const DEFAULT_COMPETITION_CANDIDATES = 2;
 
 export const DEFAULT_ROUTING_POLICY: RoutingPolicySettings = {
   minRelevantSamples: 5,
@@ -132,7 +118,7 @@ export type RoutingFactorUnavailableReason =
 /** Whether a single candidate participated in the evidence-ready comparison
  *  cohort. Excluded candidates stay eligible and never receive synthetic
  *  quality scores. */
-export type CohortParticipation = "compared" | "insufficient-evidence";
+type CohortParticipation = "compared" | "insufficient-evidence";
 
 export interface RoutingFactorResult {
   factor: RoutingFactorName;
@@ -674,7 +660,7 @@ function candidateKeys(
   return candidates.map(routingIdentityKey);
 }
 
-export interface ProvideRoutingAdviceInput {
+interface ProvideRoutingAdviceInput {
   taskClass: string;
   /** Optional taskFamily for evidence fallback. */
   taskFamily?: string;

@@ -67,7 +67,7 @@ export interface MainSurfaceStatus {
   message: string;
 }
 
-export function resolveForklightMcpLaunch(home = process.env.FORKLIGHT_HOME): McpLaunch {
+function resolveForklightMcpLaunch(home = process.env.FORKLIGHT_HOME): McpLaunch {
   let command = "forklight-mcp";
   try {
     command = execFileSync("which", ["forklight-mcp"], { encoding: "utf8" }).trim() || command;
@@ -410,13 +410,6 @@ export async function uninstallMainMcp(
   }
 }
 
-export async function listMainInstallStatus(
-  home = homedir(),
-): Promise<InstallResult[]> {
-  const clients: MainClientId[] = ["codex", "claude-code", "grok-build"];
-  return Promise.all(clients.map((client) => statusMainInstall(client, { home })));
-}
-
 // --- Codex plugin channel (separate from MCP config and Skill file) ---
 
 /** Pure helper: detect forklight plugin lines in `codex plugin list` output. */
@@ -621,7 +614,7 @@ export function defaultSkillPaths(home = homedir()): Record<MainClientId, string
   };
 }
 
-export async function readPackagedSkillMarkdown(packageRoot?: string): Promise<string> {
+async function readPackagedSkillMarkdown(packageRoot?: string): Promise<string> {
   const candidates = [
     packageRoot
       ? path.join(packageRoot, "plugins", "forklight", "skills", SKILL_DIR_NAME, "SKILL.md")

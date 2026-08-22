@@ -542,7 +542,7 @@ export async function buildTaskAdmissionPreview(
 
 /** Human-readable classification reuse lines. States and counts only — no
  *  semantic guess, no ranking, and no private Task content. */
-export function formatClassificationAdviceHuman(advice: ClassificationAdvice): string {
+function formatClassificationAdviceHuman(advice: ClassificationAdvice): string {
   const lines: string[] = [];
   lines.push("Classification reuse advice:");
   lines.push(

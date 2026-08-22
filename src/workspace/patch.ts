@@ -256,7 +256,7 @@ function toEvidence(artifactPath: string, acc: SectionAccumulator): PatchEvidenc
   };
 }
 
-export interface WriteWorkspacePatchOptions {
+interface WriteWorkspacePatchOptions {
   /**
    * Optional hook invoked after excluded roots are stashed and before the raw
    * diff runs. Production callers omit this; tests use it to inject failures

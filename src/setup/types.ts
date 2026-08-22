@@ -63,7 +63,7 @@ export interface SetupWorkerSelection {
   model: string;
 }
 
-export type SetupNextActionCode =
+type SetupNextActionCode =
   | "fix-prerequisite"
   | "select-provider"
   | "select-worker"
@@ -121,9 +121,4 @@ export interface SetupSystemInspector {
   hasLocalGrokSignIn?(): boolean;
 }
 
-export interface SetupKeychainStore {
-  has(service: string, account: string): boolean;
-  read(service: string, account: string): string | undefined;
-  write(service: string, account: string, value: string): void;
-  delete(service: string, account: string): void;
-}
+export type { SetupKeychainStore } from "../core/secrets.js";

@@ -707,8 +707,6 @@ export function setDefaultWorkerProfile(
   return { ...current, defaultProfileId: id };
 }
 
-export const CATALOG_DEFAULT_PROFILE_ID = "default";
-
 /**
  * When the user sets a named profile as default, mirror into execution defaults
  * for legacy surfaces. Requires catalog when profile uses modelConfigId.

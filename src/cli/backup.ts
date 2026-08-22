@@ -18,12 +18,12 @@ export const BACKUP_USAGE = `  forklight backup preview --destination <dir> [--j
       # create/restore require --confirm; restore refuses a live or unverified owner
 `;
 
-export interface BackupCliDependencies {
+interface BackupCliDependencies {
   home?: string;
   options?: BackupServiceOptions;
 }
 
-export interface BackupCliResult {
+interface BackupCliResult {
   stdout: string;
   result: BackupResult;
 }

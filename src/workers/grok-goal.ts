@@ -136,15 +136,15 @@ export interface GrokNativeGoalEvaluation {
   readonly predecessorGoalId?: string;
 }
 
-export function grokNativeGoalCreatePrompt(workerPrompt: string): string {
+function grokNativeGoalCreatePrompt(workerPrompt: string): string {
   return `${GROK_NATIVE_GOAL_PROMPT_PREFIX}${workerPrompt}`;
 }
 
-export function grokNativeGoalResumePrompt(): typeof GROK_NATIVE_GOAL_RESUME_PROMPT {
+function grokNativeGoalResumePrompt(): typeof GROK_NATIVE_GOAL_RESUME_PROMPT {
   return GROK_NATIVE_GOAL_RESUME_PROMPT;
 }
 
-export function grokNativeGoalSuccessorPrompt(correctionObjective: string): string {
+function grokNativeGoalSuccessorPrompt(correctionObjective: string): string {
   return `${GROK_NATIVE_GOAL_PROMPT_PREFIX}${correctionObjective}`;
 }
 

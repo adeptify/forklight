@@ -199,7 +199,7 @@ export interface HubEvidenceEntry<T> {
   checkedAt: string;
 }
 
-export interface HubEvidenceCacheOptions {
+interface HubEvidenceCacheOptions {
   ttlMs?: number;
   now?: () => number;
 }
@@ -301,19 +301,19 @@ export class HubEvidenceCache {
   }
 }
 
-export type DaemonProbeResult = {
+type DaemonProbeResult = {
   running: boolean;
   health?: Record<string, unknown>;
   error?: string;
 };
 
-export type DaemonStopResult = {
+type DaemonStopResult = {
   stopped: boolean;
   result?: Record<string, unknown>;
   message: string;
 };
 
-export interface HubServerDeps {
+interface HubServerDeps {
   settings: SettingsService;
   setup: SetupService;
   keychain: SetupKeychainStore;
@@ -1298,7 +1298,7 @@ export interface SafeCalibrationSample {
   reviewState: "pending" | "accepted" | "rejected";
 }
 
-export interface SafeCalibrationPublicationPreview {
+interface SafeCalibrationPublicationPreview {
   ready: boolean;
   reason: "ready" | "no-accepted-samples" | "no-new-evidence" | "unsafe-version";
   pendingCount: number;
@@ -1308,7 +1308,7 @@ export interface SafeCalibrationPublicationPreview {
   acceptedSampleIds: string[];
 }
 
-export type SafeCalibrationState =
+type SafeCalibrationState =
   | { state: "identity-missing" }
   | {
       state: "ready";

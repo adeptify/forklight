@@ -135,7 +135,7 @@ export function daemonRequestTimeoutMs(
 export const DEFAULT_DAEMON_STARTUP_TIMEOUT_MS = 30_000;
 export const MIN_DAEMON_STARTUP_TIMEOUT_MS = 1_000;
 export const MAX_DAEMON_STARTUP_TIMEOUT_MS = 600_000;
-export const DAEMON_STARTUP_POLL_INTERVAL_MS = 100;
+const DAEMON_STARTUP_POLL_INTERVAL_MS = 100;
 
 /** Privacy-safe: no home, socket path, PID table, or raw transport detail. */
 export const DAEMON_STARTUP_CHILD_EXITED_MESSAGE =
@@ -317,7 +317,7 @@ export async function probeDaemon(home = forklightHome()): Promise<{
 }
 
 /** Options for graceful Daemon stop. Intent defaults to ordinary stop. */
-export interface StopDaemonOptions {
+interface StopDaemonOptions {
   /** Closed stop-versus-restart intent. Omitted means stop (no auto-resume). */
   intent?: DaemonShutdownIntent;
 }

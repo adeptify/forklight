@@ -19,7 +19,7 @@ import type {
 } from "./types.js";
 
 /** Open follow-up operation kind derived from unmatched durable start events. */
-export type PostTerminalFollowUp = "candidate-reverifying" | "remediation-checking";
+type PostTerminalFollowUp = "candidate-reverifying" | "remediation-checking";
 
 /** Default quiet window for last-event activity (30s). Shared by CLI status/wait and Decision View. */
 export const DEFAULT_QUIET_AFTER_MS = 30_000;
@@ -64,11 +64,11 @@ export interface LiveStageEventEvidence {
 }
 
 /** Structured model-activity marker written by runtime normalizers. */
-export const MODEL_ACTIVITY_KIND = "model-response" as const;
+const MODEL_ACTIVITY_KIND = "model-response" as const;
 
 /** Closed model-processing marker: the runtime reports active reasoning without
  *  visible output. Distinct from observable model response. */
-export const MODEL_PROCESSING_KIND = "model-processing" as const;
+const MODEL_PROCESSING_KIND = "model-processing" as const;
 
 function payloadObject(payload: unknown): Record<string, unknown> | undefined {
   if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
@@ -553,7 +553,7 @@ export function projectLiveStage(
  * Tool start/complete types are self-describing from the type alone; bare
  * worker.message without payload stays legacy-running (never invents model stage).
  */
-export function projectLiveStageFromLatest(
+function projectLiveStageFromLatest(
   task: TaskRecord,
   latestEvent: LatestEventMeta | undefined,
   nowMs: number,
@@ -734,7 +734,7 @@ export function projectDualClocks(
  * Coarse dual-clock projection when only the latest-event cursor is available.
  * Conservative: never invents effective progress from a bare message type.
  */
-export function projectDualClocksFromLatest(
+function projectDualClocksFromLatest(
   task: TaskRecord,
   latestEvent: LatestEventMeta | undefined,
   nowMs: number,

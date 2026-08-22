@@ -128,7 +128,7 @@ const activeReverifications = new Set<string>();
 
 // --- Inputs and results ---
 
-export interface CandidateReverificationAuthorization {
+interface CandidateReverificationAuthorization {
   taskId: string;
   /** Bounded non-empty Main reason (trimmed). */
   reason: string;

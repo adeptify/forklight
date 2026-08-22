@@ -5,7 +5,7 @@
  * See FL-D92: MCP must accept explicit null unlimited budget.
  */
 
-export type MaxBudgetSource =
+type MaxBudgetSource =
   | "explicit-null"
   | "explicit-finite"
   | "inherited-null"

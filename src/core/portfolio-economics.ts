@@ -26,22 +26,15 @@ import {
   type TaskEconomicsReport,
 } from "./task-economics-report.js";
 import type { PricingCurrency } from "./pricing.js";
+import { deepFreeze } from "./immutability.js";
 
 // --- Immutability helpers ---
-
-function freezeDeep(v: unknown): void {
-  if (v !== null && typeof v === "object" && !Object.isFrozen(v)) {
-    if (Array.isArray(v)) { for (const e of v) freezeDeep(e); }
-    else { for (const e of Object.values(v)) freezeDeep(e); }
-    Object.freeze(v);
-  }
-}
 
 // --- Public schema types ---
 
 /** Evidence coverage denominator — visible so consumers never divide
  *  by an unknown count. */
-export interface PortfolioScopeSection {
+interface PortfolioScopeSection {
   /** Terminal Tasks matching the filter. Running/waiting/blocked/preparing/
    *  verifying Tasks are excluded. */
   readonly terminalTaskCount: number;
@@ -54,7 +47,7 @@ export interface PortfolioScopeSection {
 /** Budget-cap aggregation across all terminal Tasks and their Attempts.
  *  Sums only finite configured caps; uncapped/legacy Attempts are counted
  *  but do not contribute to the sum. */
-export interface PortfolioBudgetSection {
+interface PortfolioBudgetSection {
   /** Sum of finite maxBudgetUsd caps across all per-Attempt snapshots
    *  where source is "attempt-snapshot" and label is "capped".
    *  Uncapped and inherited/unknown Attempts are excluded from this sum. */
@@ -70,7 +63,7 @@ export interface PortfolioBudgetSection {
 
 /** Runtime-estimate aggregation — runtimeCostEstimateUsd only.
  *  Legacy costUsd is never read. */
-export interface PortfolioRuntimeEstimateSection {
+interface PortfolioRuntimeEstimateSection {
   /** Sum of all runtimeCostEstimateUsd from all Attempts across all
    *  matching terminal Tasks. Missing Attempts contribute zero to this
    *  sum but increase the missing count. */
@@ -96,7 +89,7 @@ export interface PortfolioOfficialCostCurrencyTotal {
 }
 
 /** Summary of unavailable official-cost evidence across all terminal Tasks. */
-export interface PortfolioOfficialCostUnavailable {
+interface PortfolioOfficialCostUnavailable {
   readonly unavailableAttemptCount: number;
   /** Counts keyed by "stage:reason" for stable aggregation. */
   readonly breakdown: Readonly<Record<string, number>>;
@@ -128,7 +121,7 @@ export interface PortfolioOfficialCostSection {
 
 /** Worker Token volume aggregation — gross Worker Token count only.
  *  Never relabeled as Token savings. */
-export interface PortfolioWorkerVolumeSection {
+interface PortfolioWorkerVolumeSection {
   /** Sum of grossWorkerTokens across all complete/incomplete Task volumes. */
   readonly grossWorkerTokens: number;
   /** Count of Task Token reports where workerVolume.kind is "complete". */
@@ -147,7 +140,7 @@ export interface PortfolioWorkerVolumeSection {
  * per-model runtime breakdowns. This is telemetry-quality evidence only:
  * it never changes Task outcome, Integration eligibility, cost, Worker
  * volume, or savings arithmetic. */
-export interface PortfolioTokenReconciliationSection {
+interface PortfolioTokenReconciliationSection {
   readonly workerVolumeSource: "terminal-top-level";
   readonly perModelRole: "diagnostic-only";
   readonly totalTaskCount: number;
@@ -733,6 +726,6 @@ export function getPortfolioEconomicsSummary(
     directCodexSavings: buildCodexSection(state),
   };
 
-  freezeDeep(summary);
+  deepFreeze(summary);
   return summary;
 }

@@ -20,7 +20,7 @@ import {
  * owned container. Setup failures also remove the partial container before
  * rethrowing so no sibling mirror is leaked.
  */
-export interface VerificationEnvironment {
+interface VerificationEnvironment {
   /** Working directory for acceptance commands (isolated project root). */
   projectCwd: string;
   /** Owned container root that callers must delete in finally. */

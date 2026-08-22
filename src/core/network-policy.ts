@@ -13,7 +13,7 @@
  */
 
 /** Canonical modes. Legacy profiles and Tasks with no field resolve to inherit. */
-export type WorkerNetworkPolicyMode = "inherit" | "direct" | "custom-proxy";
+type WorkerNetworkPolicyMode = "inherit" | "direct" | "custom-proxy";
 
 /**
  * Canonical per-Worker network policy. `custom-proxy` requires one bounded

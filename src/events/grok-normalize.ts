@@ -22,7 +22,7 @@ export const GROK_ASSEMBLED_TEXT_MAX = 32_000;
 
 /** High-frequency thought telemetry is observation only. Persist at most one
  * processing marker per interval so runtime activity cannot flood Task history. */
-export const GROK_PROCESSING_THROTTLE_MS = 15_000;
+const GROK_PROCESSING_THROTTLE_MS = 15_000;
 
 /** Stop reasons that are transport/control signals, never useful result bodies. */
 const NON_CONTENT_STOP_REASONS = new Set([

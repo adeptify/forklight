@@ -8,15 +8,7 @@ import {
   type ConfidenceLevel,
   type DirectCodexCalibrationRecord,
 } from "./token-efficiency.js";
-
-
-function freezeDeep(v: unknown): void {
-  if (v !== null && typeof v === "object" && !Object.isFrozen(v)) {
-    if (Array.isArray(v)) { for (const e of v) freezeDeep(e); }
-    else { for (const e of Object.values(v)) freezeDeep(e); }
-    Object.freeze(v);
-  }
-}
+import { deepFreeze } from "./immutability.js";
 
 
 export interface DirectCodexPairedSample {
@@ -142,7 +134,7 @@ export function normalizeDirectCodexPairedSample(
     capturedAt: o.capturedAt as string,
     schemaVersion: 1,
   };
-  freezeDeep(sample);
+  deepFreeze(sample);
   return sample;
 }
 
@@ -184,7 +176,7 @@ export function normalizeDirectCodexProfilePublication(
     calibration: normalizeDirectCodexCalibrationRecord(o.calibration),
     envelopeSchemaVersion: 1,
   };
-  freezeDeep(envelope);
+  deepFreeze(envelope);
   return envelope;
 }
 

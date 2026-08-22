@@ -64,7 +64,7 @@ export interface CompletionPolicySettings {
   changeBudgetMode: PolicyMode;
 }
 
-export interface RankingWeightSettings {
+interface RankingWeightSettings {
   verification: number;
   diffFocus: number;
   retries: number;
@@ -73,7 +73,7 @@ export interface RankingWeightSettings {
   delivery: number;
 }
 
-export interface ModelRoutingSettings {
+interface ModelRoutingSettings {
   /** Minimum relevant samples per candidate before a recommendation is
    *  produced.  Must be ≥ 1.  Below this threshold the advisory reports
    *  insufficient evidence and optionally suggests competition. */
@@ -105,7 +105,7 @@ export interface ModelRoutingSettings {
   weights: ModelRoutingWeightSettings;
 }
 
-export interface ModelRoutingWeightSettings {
+interface ModelRoutingWeightSettings {
   acceptedDelivery: number;
   verifiedBehavior: number;
   modelQualityFailure: number;
@@ -140,7 +140,7 @@ export interface IntegrationSettings {
   autoRollback: boolean;
 }
 
-export interface ConsoleSettings {
+interface ConsoleSettings {
   loopbackPort: number;
   refreshIntervalMs: number;
   boardListLimit: number;

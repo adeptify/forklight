@@ -8,6 +8,7 @@ import {
   normalizeDirectCodexPairedSample,
   type DirectCodexPairedSample,
 } from "./direct-codex-calibration.js";
+import { deepFreeze } from "./immutability.js";
 
 
 const TOP_KEYS: ReadonlySet<string> = new Set(["type", "usage"]);
@@ -30,13 +31,6 @@ const SAMPLE_META_KEY_SET: ReadonlySet<string> = new Set([
 
 const FIXED = "Invalid Codex terminal usage event";
 const FIXED_META = "Invalid Codex paired sample metadata";
-
-function freezeDeep(v: unknown): void {
-  if (v === null || typeof v !== "object" || Object.isFrozen(v)) return;
-  if (Array.isArray(v)) { for (const e of v) freezeDeep(e); }
-  else { for (const e of Object.values(v)) freezeDeep(e); }
-  Object.freeze(v);
-}
 
 const isNNInt = (n: unknown): n is number =>
   typeof n === "number" && Number.isSafeInteger(n) && n >= 0;
@@ -107,7 +101,7 @@ export function normalizeCodexTerminalUsage(
     cacheReadInputTokens: cached,
     cacheCreationInputTokens: cacheWrite,
   };
-  freezeDeep(totals);
+  deepFreeze(totals);
   return totals;
 }
 

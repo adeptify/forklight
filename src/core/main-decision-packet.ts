@@ -38,9 +38,9 @@ import type {
   TaskRecord,
 } from "./types.js";
 
-export const MAIN_DECISION_PACKET_KIND = "main-decision-packet" as const;
+const MAIN_DECISION_PACKET_KIND = "main-decision-packet" as const;
 
-export interface MainDecisionPacketInput {
+interface MainDecisionPacketInput {
   task: TaskRecord;
   decision: TaskDecisionView;
   events?: readonly EventRecord[];

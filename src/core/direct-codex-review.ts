@@ -2,14 +2,7 @@
 // Pure privacy-safe core: one explicit bounded review decision per
 // sample with no content, mutable notes, or credential-bearing fields.
 
-function freezeDeep(v: unknown): void {
-  if (v !== null && typeof v === "object" && !Object.isFrozen(v)) {
-    if (Array.isArray(v)) { for (const e of v) freezeDeep(e); }
-    else { for (const e of Object.values(v)) freezeDeep(e); }
-    Object.freeze(v);
-  }
-}
-
+import { deepFreeze } from "./immutability.js";
 const hasOwn = (o: object, key: string): boolean => Object.prototype.hasOwnProperty.call(o, key);
 
 const STRICT_TOKEN_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
@@ -145,6 +138,6 @@ export function normalizeDirectCodexSampleReview(
     reviewedAt: o.reviewedAt as string,
     schemaVersion: 1,
   };
-  freezeDeep(review);
+  deepFreeze(review);
   return review;
 }

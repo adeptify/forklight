@@ -182,7 +182,7 @@ function linkStaysInside(linkPath: string, root: string, io: BackupFileIo): bool
   return real !== undefined && isContained(real, root, io);
 }
 
-export function createDefaultBackupFileIo(): BackupFileIo {
+function createDefaultBackupFileIo(): BackupFileIo {
   return {
     exists(absPath) {
       return existsSync(absPath);
@@ -244,7 +244,7 @@ function transportLooksUnavailable(message: string): boolean {
   return isDaemonTransportUnavailable(new Error(message));
 }
 
-export function createDefaultBackupOwnerIo(): BackupOwnerIo {
+function createDefaultBackupOwnerIo(): BackupOwnerIo {
   return {
     async observeDaemon(home) {
       let socketIsLiveCandidate = false;

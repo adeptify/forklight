@@ -21,7 +21,6 @@ import type {
   MainDirectDecisionReason,
   MainDirectDecisionRecentEntry,
   MainDirectDecisionRecord,
-  MainDirectDecisionStatus,
   MainDirectEvidenceSnapshotEntry,
   MainDirectVerification,
 } from "./types.js";
@@ -39,16 +38,10 @@ export const VALID_REASONS: ReadonlySet<MainDirectDecisionReason> = new Set([
   "main-judgment",
 ]);
 
-export const VALID_VERIFICATIONS: ReadonlySet<MainDirectVerification> = new Set([
+const VALID_VERIFICATIONS: ReadonlySet<MainDirectVerification> = new Set([
   "passed",
   "failed",
   "unavailable",
-]);
-
-export const VALID_STATUSES: ReadonlySet<MainDirectDecisionStatus> = new Set([
-  "open",
-  "completed",
-  "abandoned",
 ]);
 
 const MAX_CONSIDERED_PROFILES = 4;

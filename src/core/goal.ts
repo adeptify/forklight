@@ -10,7 +10,7 @@
  *   - Privacy-safe projections only: no raw patch, resultText, prompts,
  *     absolute paths, credentials, or private artifact paths.
  */
-import { createHash } from "node:crypto";
+import { sha256 } from "./digest.js";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import YAML from "yaml";
@@ -66,10 +66,8 @@ const GOAL_IN_FLIGHT_STATUSES = new Set<TaskStatus>([
 
 // --- Constants ---
 
-export const GOAL_VERSION = 1 as const;
 export const GOAL_MIN_ITEMS = 4;
 export const GOAL_MAX_ITEMS = 8;
-export const GOAL_REASON_MAX = 500;
 
 const GATES = new Set<GoalMilestoneGate>(["machine", "main-accept", "integration"]);
 
@@ -109,7 +107,7 @@ export interface LoadedGoal {
   policy: GoalPolicy;
 }
 
-export interface GoalLoadReport {
+interface GoalLoadReport {
   passed: boolean;
   issues: string[];
   goal?: LoadedGoal;
@@ -170,7 +168,7 @@ export interface GoalMilestoneView {
  * Original Plan Task identity is always preserved; once a direct Goal-Task
  * handoff is durable, the successor exclusively supplies gate evidence.
  */
-export interface EffectiveMilestoneLineage {
+interface EffectiveMilestoneLineage {
   originalTaskId?: string;
   effectiveTaskId?: string;
   handoff?: CandidateHandoffRecord;
@@ -251,10 +249,6 @@ export interface GoalAdvanceResult {
 }
 
 // --- Helpers ---
-
-function sha256(content: string): string {
-  return createHash("sha256").update(content).digest("hex");
-}
 
 function digestPrefix(digest: string | undefined): string | undefined {
   if (digest === undefined || digest.length === 0) return undefined;
@@ -569,7 +563,7 @@ export async function assertGoal(
 
 // --- Gate evaluation (read-only; references existing authorities) ---
 
-export interface MilestoneGateEvidence {
+interface MilestoneGateEvidence {
   satisfied: boolean;
   reasonCode: GoalReasonCode;
   reason: string;
@@ -1677,7 +1671,7 @@ export function projectGoal(store: StateStore, goalId: string): GoalView {
 
 // --- Reconciliation (mutates Goal records only; queues via caller) ---
 
-export interface GoalReconcileResult {
+interface GoalReconcileResult {
   goal: GoalRecord;
   milestones: GoalMilestoneRecord[];
   /** True when evidence digest changed from authoritative events. */

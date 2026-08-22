@@ -18,14 +18,12 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { isoTimestamp as timestamp } from "./time.js";
 
-export const OUTCOME_INTAKE_SCHEMA_VERSION = 1 as const;
-
 /** Bounded lengths for every user/Main-authored string. */
-export const OUTCOME_INTAKE_OUTCOME_MAX = 2000;
-export const OUTCOME_INTAKE_CONTEXT_MAX = 2000;
-export const OUTCOME_INTAKE_PROJECT_MAX = 500;
-export const OUTCOME_INTAKE_REASON_MAX = 1000;
-export const OUTCOME_INTAKE_ARTIFACT_PATH_MAX = 4096;
+const OUTCOME_INTAKE_OUTCOME_MAX = 2000;
+const OUTCOME_INTAKE_CONTEXT_MAX = 2000;
+const OUTCOME_INTAKE_PROJECT_MAX = 500;
+const OUTCOME_INTAKE_REASON_MAX = 1000;
+const OUTCOME_INTAKE_ARTIFACT_PATH_MAX = 4096;
 export const OUTCOME_INTAKE_ID_MAX = 128;
 
 /** Validated default and hard maximum for every outcome-intake list surface. */
@@ -81,7 +79,7 @@ export type ProposedShape = "task" | "plan" | "goal";
 export type OutcomeIntakeArtifactKind = "task-contract" | "work-plan" | "goal";
 
 /** Validated facts extracted from the bound artifact. Never raw contract text. */
-export interface OutcomeIntakeArtifactFacts {
+interface OutcomeIntakeArtifactFacts {
   shape: ProposedShape;
   displayName: string;
   objective: string;
@@ -156,7 +154,7 @@ export interface OutcomeIntakeProposeInput {
 
 /** Normalized confirmation input after bounded validation. The only accepted
  *  fields are intakeId, expectedRevision, and the literal confirm:true. */
-export interface OutcomeIntakeConfirmInput {
+interface OutcomeIntakeConfirmInput {
   intakeId: string;
   expectedRevision: number;
   confirm: true;
@@ -353,7 +351,7 @@ export function createOutcomeIntakeRecord(
   };
 }
 
-export function artifactKindForShape(shape: ProposedShape): OutcomeIntakeArtifactKind {
+function artifactKindForShape(shape: ProposedShape): OutcomeIntakeArtifactKind {
   if (shape === "task") return "task-contract";
   if (shape === "plan") return "work-plan";
   return "goal";
@@ -622,13 +620,6 @@ export function buildOutcomeIntakeConfirmationPreview(
     workCreated: 0,
     note: "Not confirmed; nothing has been created.",
   };
-}
-
-/** SHA-256 hex digest of the exact artifact file bytes. Used as the artifact
- *  identity so FL-109D3 can require revalidation before any creation. */
-export async function outcomeIntakeArtifactFileDigest(filePath: string): Promise<string> {
-  const raw = await readFile(filePath);
-  return createHash("sha256").update(raw).digest("hex");
 }
 
 /** Deterministic digest over a validated artifact graph: the root artifact

@@ -635,7 +635,7 @@ export function recordRestartContinuationsForTasks(
 }
 
 /** Reconstruct one pending Main correction, including the exact bounded feedback. */
-export interface PendingMainCorrection {
+interface PendingMainCorrection {
   executionOptions: AttemptExecutionOptions;
   feedback: string;
   priorAttemptId: string;

@@ -76,7 +76,7 @@ export interface TaskProgressSnapshot {
   liveStage?: LiveStageProjection;
 }
 
-export interface WaitDependencies {
+interface WaitDependencies {
   readProgress: () => TaskProgressSnapshot | Promise<TaskProgressSnapshot>;
   sleep: (milliseconds: number) => void | Promise<void>;
   now: () => number;
@@ -113,11 +113,11 @@ export interface WaitResult {
   progress: WaitProgressSummary;
 }
 
-export interface ParsedWaitOptions extends WaitPolicy {
+interface ParsedWaitOptions extends WaitPolicy {
   json: boolean;
 }
 
-export interface ParsedInspectSummaryOptions {
+interface ParsedInspectSummaryOptions {
   summary: true;
   eventLimit: number;
   json: boolean;
@@ -136,7 +136,7 @@ export interface CompactAttemptEvidence {
     | { present: true; stage: string; quoted: false; reason: string };
 }
 
-export interface CompactEventEvidence {
+interface CompactEventEvidence {
   sequence: number;
   timestamp: string;
   type: EventRecord["type"];
@@ -185,7 +185,7 @@ function takeValue(arguments_: string[], index: number, flag: string): string {
   return value;
 }
 
-export interface ParsedDeliveryPrepareOptions {
+interface ParsedDeliveryPrepareOptions {
   taskFile?: string;
   taskId?: string;
   reviewerProfileIds: string[];
@@ -196,7 +196,7 @@ export interface ParsedDeliveryPrepareOptions {
   json: boolean;
 }
 
-export interface ParsedDeliveryDecideOptions {
+interface ParsedDeliveryDecideOptions {
   taskId: string;
   decision: "accept" | "revise" | "reject";
   revisionId: string;
@@ -205,23 +205,6 @@ export interface ParsedDeliveryDecideOptions {
   timeoutMs: number;
   confirm: true;
   json: boolean;
-}
-
-function parseDeliveryInteger(raw: string, label: string, allowZero: boolean): number {
-  if (!(allowZero ? /^(?:0|[1-9]\d*)$/ : /^[1-9]\d*$/).test(raw)) {
-    throw new Error(`${label} must be a ${allowZero ? "nonnegative" : "positive"} integer`);
-  }
-  const value = Number(raw);
-  if (!Number.isSafeInteger(value) || (allowZero ? value < 0 : value <= 0)) {
-    throw new Error(`${label} must be a ${allowZero ? "nonnegative" : "positive"} integer`);
-  }
-  return value;
-}
-
-function takeDeliveryValue(arguments_: string[], index: number, flag: string): string {
-  const value = arguments_[index + 1];
-  if (value === undefined || value.startsWith("--")) throw new Error(`Missing value for ${flag}`);
-  return value;
 }
 
 function parseReviewerProfileList(raw: string): string[] {
@@ -254,7 +237,7 @@ export function parseDeliveryPrepareOptions(arguments_: string[]): ParsedDeliver
       continue;
     }
     if (flag === "--reviewer-profile") {
-      const value = takeDeliveryValue(arguments_, index, flag);
+      const value = takeValue(arguments_, index, flag);
       index += 1;
       reviewerProfileIds.push(value.trim());
       continue;
@@ -269,15 +252,15 @@ export function parseDeliveryPrepareOptions(arguments_: string[]): ParsedDeliver
       throw new Error(`Duplicate delivery prepare option: ${flag}`);
     }
     seen.add(flag);
-    const value = takeDeliveryValue(arguments_, index, flag);
+    const value = takeValue(arguments_, index, flag);
     index += 1;
     if (flag === "--task-file") taskFile = value;
     else if (flag === "--task") taskId = value;
     else if (flag === "--reviewer-profiles") {
       reviewerProfileIds.push(...parseReviewerProfileList(value));
     } else if (flag === "--reason") reason = value;
-    else if (flag === "--timeout-ms") timeoutMs = parseDeliveryInteger(value, "--timeout-ms", false);
-    else includeDiffMaxBytes = parseDeliveryInteger(value, "--include-diff-max-bytes", true);
+    else if (flag === "--timeout-ms") timeoutMs = parseInteger(value, "--timeout-ms", false);
+    else includeDiffMaxBytes = parseInteger(value, "--include-diff-max-bytes", true);
   }
   if (!confirm) throw new Error("delivery prepare requires --confirm");
   if ((taskFile === undefined) === (taskId === undefined)) {
@@ -330,7 +313,7 @@ export function parseDeliveryDecideOptions(
     }
     if (seen.has(flag)) throw new Error(`Duplicate delivery decide option: ${flag}`);
     seen.add(flag);
-    const value = takeDeliveryValue(arguments_, index, flag);
+    const value = takeValue(arguments_, index, flag);
     index += 1;
     if (flag === "--decision") {
       if (value !== "accept" && value !== "revise" && value !== "reject") {
@@ -340,7 +323,7 @@ export function parseDeliveryDecideOptions(
     } else if (flag === "--revision") revisionId = value;
     else if (flag === "--digest") digest = value;
     else if (flag === "--reason") reason = value;
-    else timeoutMs = parseDeliveryInteger(value, "--timeout-ms", false);
+    else timeoutMs = parseInteger(value, "--timeout-ms", false);
   }
   if (!confirm) throw new Error("delivery decide requires --confirm");
   if (taskId.trim().length === 0) throw new Error("delivery decide requires a task id");

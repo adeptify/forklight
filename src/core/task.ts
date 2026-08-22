@@ -77,7 +77,7 @@ import type {
 
 const DELIVERY_COMMAND_MAX_COUNT = 16;
 export const TASK_PRESENTATION_SUMMARY_MAX = 300;
-export const TASK_PRESENTATION_LANGUAGE_MAX = 35;
+const TASK_PRESENTATION_LANGUAGE_MAX = 35;
 export const REVIEW_REQUIREMENT_REASON_MAX = 300;
 
 const REVIEW_REQUIREMENT_CREDENTIAL_PATTERN =
@@ -467,7 +467,7 @@ function validateRoutingAdvisory(
 
 /** Validate and freeze an explicit Main review requirement.
  *  Absence is legacy and is not rewritten as skip or a default depth. */
-export function parseReviewRequirement(raw: unknown): TaskReviewRequirement {
+function parseReviewRequirement(raw: unknown): TaskReviewRequirement {
   const obj = object(raw, "task.reviewRequirement");
   const keys = Object.keys(obj);
   if (keys.some((key) => key !== "requiredJudges" && key !== "reason")) {
@@ -777,18 +777,6 @@ export function assessTaskQuality(spec: TaskSpec, quality?: ContractQualitySetti
     spec,
     effectiveQualityPolicyFromGlobal(quality ?? cloneDefaults().contractQuality),
   );
-}
-
-export function assertTaskQuality(spec: TaskSpec, quality?: ContractQualitySettings): QualityReport {
-  const report = assessTaskQuality(spec, quality);
-  if (report.admitted !== true) {
-    throw new Error(
-      `Task Contract quality gate failed (${report.score}/100):\n${report.issues
-        .map((issue) => `- ${issue}`)
-        .join("\n")}`,
-    );
-  }
-  return report;
 }
 
 export function parseTaskSpec(

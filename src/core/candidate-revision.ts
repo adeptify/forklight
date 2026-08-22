@@ -10,7 +10,8 @@
  *   - Legacy Tasks without revision evidence remain readable; authority-bearing
  *     paths fail closed.
  */
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
+import { sha256 } from "./digest.js";
 import { constants, readFileSync } from "node:fs";
 import { chmod, copyFile, mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
@@ -52,10 +53,6 @@ function detectUnsafePath(file: string): string | undefined {
     return `Traversal path: "${file}"`;
   }
   return undefined;
-}
-
-function sha256(content: string | Buffer): string {
-  return createHash("sha256").update(content).digest("hex");
 }
 
 /** Read-only freshness check used at correction authorization and again before
@@ -810,7 +807,7 @@ export function buildCorrectionInstruction(
 
 // --- Correction authorization helpers ---
 
-export interface StructuredCorrectionInput {
+interface StructuredCorrectionInput {
   feedback: string;
   maxBudgetUsd: number | null;
   candidateRevisionId: string;

@@ -45,10 +45,6 @@ const ADAPTATION_FIELDS = [
   "changeBudgetMode",
 ] as const satisfies ReadonlyArray<keyof AdvancedPolicyFields>;
 
-/** Advanced-policy fields that adaptation may change.
- *  Excludes maxAdaptationRounds (forbidden). */
-export type AdaptationPatchField = (typeof ADAPTATION_FIELDS)[number];
-
 const ADAPTATION_FIELD_SET: ReadonlySet<string> = new Set<string>(ADAPTATION_FIELDS);
 
 const TERMINAL_TASK_STATUSES = new Set<TaskStatusKind>([
@@ -84,7 +80,7 @@ export interface AdaptationLineageEdgeProjection {
 }
 
 /** Input to the gate. The gate is pure and has no I/O. */
-export interface AdaptationGateInput {
+interface AdaptationGateInput {
   parent: AdaptationParentProjection;
   /** Effective policy of the immutable adaptive root. The cap
    *  (maxAdaptationRounds) read here is the authoritative bound; later

@@ -45,12 +45,11 @@ import type {
   TaskRecord,
 } from "./types.js";
 
-export const MAIN_DELIVERY_CHECKPOINT_KIND = "main-delivery-checkpoint" as const;
+const MAIN_DELIVERY_CHECKPOINT_KIND = "main-delivery-checkpoint" as const;
 export const MAIN_DELIVERY_REASON_MAX_LENGTH = MAIN_REVIEW_REASON_MAX_LENGTH;
 export const MAIN_DELIVERY_TIMEOUT_MIN_MS = 1;
 export const MAIN_DELIVERY_TIMEOUT_MAX_MS = 3_600_000;
 export const MAIN_DELIVERY_DIFF_MAX_BYTES = 1_000_000;
-export const MAIN_DELIVERY_DEFAULT_POLL_MS = 50;
 
 const CREDENTIAL_PATTERN =
   /\b(sk-[A-Za-z0-9_-]{8,}|API[_-]?KEY|Bearer\s+[A-Za-z0-9_\-.]{8,}|password\s*[:=])/i;
@@ -164,7 +163,7 @@ function normalizeProfileIds(raw: unknown): string[] {
   return ids;
 }
 
-export function validatePrepareInput(input: PrepareMainDeliveryInput): {
+function validatePrepareInput(input: PrepareMainDeliveryInput): {
   taskFile?: string;
   taskId?: string;
   reviewerProfileIds: string[];
@@ -196,7 +195,7 @@ export function validatePrepareInput(input: PrepareMainDeliveryInput): {
   };
 }
 
-export function validateDecideInput(input: DecideMainDeliveryInput): {
+function validateDecideInput(input: DecideMainDeliveryInput): {
   taskId: string;
   decision: MainReviewDecisionKind;
   revisionId: string;
@@ -452,7 +451,7 @@ interface ProjectOptions {
   integration?: MainDeliveryCheckpoint["integration"];
 }
 
-export function buildMainDeliveryCheckpoint(
+function buildMainDeliveryCheckpoint(
   store: StateStore,
   taskId: string,
   options: ProjectOptions,

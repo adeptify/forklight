@@ -19,6 +19,7 @@
 
 import { runCaptured, type CapturedProcess } from "../core/process.js";
 import type { PathPolicy } from "./path-policy.js";
+import { deepFreeze } from "../core/immutability.js";
 
 /** Closed check state shared by CLI, daemon/MCP and Hub. */
 export type WorkspaceBoundaryStatus = "clear" | "review" | "unavailable";
@@ -34,7 +35,7 @@ export type WorkspaceBoundaryReason =
   | "unsafe-count";
 
 /** Closed next-action code derived from the current state. */
-export type WorkspaceBoundaryNextAction =
+type WorkspaceBoundaryNextAction =
   | "continue"
   | "review-workspace-boundaries"
   | "manual-review";
@@ -57,7 +58,7 @@ export interface WorkspaceBoundaryAdvice {
 }
 
 /** Fixed bounded Git ignored-roots query timeout. */
-export const GIT_IGNORED_QUERY_TIMEOUT_MS = 3_000;
+const GIT_IGNORED_QUERY_TIMEOUT_MS = 3_000;
 
 /** Bounded cap for parsed ignored directory roots. Higher counts fail closed
  *  so an unbounded ignored tree can never be summarized as a complete scan. */
@@ -65,7 +66,7 @@ export const MAX_IGNORED_DIRECTORY_ROOTS = 200;
 
 /** Bounded cap for total Git output entries before the scan is treated as
  *  unbounded and fails closed. */
-export const MAX_IGNORED_ENTRIES = 2_000;
+const MAX_IGNORED_ENTRIES = 2_000;
 
 /** Injectable process runner seam for deterministic failure tests. */
 export type GitIgnoredQueryRunner = (
@@ -82,7 +83,7 @@ export type GitIgnoredQueryRunner = (
  * parents, so an ignored directory root hidden inside a collapsed `?? dir/`
  * status entry is still reported. Never reads file content.
  */
-export function runDefaultGitIgnoredQuery(
+function runDefaultGitIgnoredQuery(
   projectDir: string,
   options: { timeoutMs: number },
 ): Promise<CapturedProcess> {
@@ -93,7 +94,7 @@ export function runDefaultGitIgnoredQuery(
   );
 }
 
-export type IgnoredDirectoryRootParseResult =
+type IgnoredDirectoryRootParseResult =
   | { kind: "ok"; roots: string[] }
   | { kind: "truncated" }
   | { kind: "unsafe-count" }
@@ -150,16 +151,6 @@ export function parseIgnoredDirectoryRoots(stdout: string): IgnoredDirectoryRoot
 
 /** Freeze every object and array in the result graph so no caller can mutate a
  *  shared detached projection. */
-function deepFreeze<T>(value: T): T {
-  if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
-    Object.freeze(value);
-    for (const key of Object.keys(value)) {
-      deepFreeze((value as Record<string, unknown>)[key]);
-    }
-  }
-  return value;
-}
-
 function unavailable(reason: WorkspaceBoundaryReason): WorkspaceBoundaryAdvice {
   return deepFreeze({
     status: "unavailable",

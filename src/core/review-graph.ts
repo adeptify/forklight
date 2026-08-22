@@ -9,7 +9,8 @@
  *   - Private packet path, raw patch, raw resultText, credentials, and absolute
  *     paths are never projected to Hub/MCP/CLI.
  */
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
+import { sha256 } from "./digest.js";
 import { readFileSync } from "node:fs";
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -65,7 +66,7 @@ import type {
 // --- Constants ---
 
 export const REVIEW_REASON_MAX_LENGTH = 1000;
-export const REVIEW_RESULT_SCHEMA_VERSION = 1 as const;
+const REVIEW_RESULT_SCHEMA_VERSION = 1 as const;
 export const REVIEW_MAX_FINDINGS = 8;
 export const REVIEW_SUMMARY_MAX = 500;
 export const REVIEW_FINDING_TEXT_MAX = 500;
@@ -146,7 +147,7 @@ export interface CreateReviewGraphInput {
   confirm: true;
 }
 
-export interface CreateReviewGraphResult {
+interface CreateReviewGraphResult {
   graph: ReviewGraphView;
   /** First reviewer Task id (stable compatibility field). */
   reviewerTaskId: string;
@@ -213,10 +214,6 @@ function detectUnsafePath(file: string): string | undefined {
     return `Traversal path: "${file}"`;
   }
   return undefined;
-}
-
-function sha256(content: string | Buffer): string {
-  return createHash("sha256").update(content).digest("hex");
 }
 
 function privateArtifactPath(task: TaskRecord, revisionId: string): string {
@@ -786,7 +783,7 @@ export function hasActiveReviewResultRepair(assignment: ReviewAssignmentRecord):
 }
 
 /** Stable reason when a same-Judge schema-only repair is still running. */
-export const PENDING_RESULT_REPAIR_BLOCKS_INTEGRATION =
+const PENDING_RESULT_REPAIR_BLOCKS_INTEGRATION =
   "A same-Judge schema-only result repair is still running; Integration waits until that repair is terminal and Main records a fresh decision";
 
 /** Canonical multi-judge aggregation. Describes evidence only — never a vote. */

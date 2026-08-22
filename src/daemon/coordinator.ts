@@ -89,7 +89,7 @@ import {
   realKeychainReader,
   type ProbePolicy,
 } from "../core/provider-probe.js";
-import { assertWorkPlan, type WorkPlan } from "../core/plan.js";
+import { assertWorkPlan, type WorkPlan, type WorkPlanItem } from "../core/plan.js";
 import {
   computeSelfUpgradeEvidence,
   parseRequiredStreakCount,
@@ -1330,27 +1330,25 @@ export class DaemonCoordinator {
     return { planId: planRecord.id, taskIdsByItemId };
   }
 
-  /** Build the exact existing Plan registration graph from one validated load.
-   *  Shared by ordinary Plan submission and confirmed outcome-intake creation so
-   *  both paths produce identical Task records, events, items, and dependency
-   *  rows. Never mutates or queues by itself. */
-  private preparePlanRegistration(
-    plan: WorkPlan,
+  /** Stage one Task registration + Plan item per work item. Shared by Plan and
+   *  Goal registration so both paths produce byte-identical records and events;
+   *  `creationPayloadExtra` appends origin fields (e.g. goalFile) to the event payload. */
+  private stagePlanItems(
+    workItems: WorkPlanItem[],
+    planId: string,
+    home: string,
     createdAt: string,
+    creationPayloadExtra?: Record<string, string>,
   ): {
     registrations: StagedTaskRegistration[];
     items: PlanItemRecord[];
-    dependencies: DependencyRecord[];
-    planRecord: PlanRecord;
     taskIdsByItemId: Record<string, string>;
   } {
-    const planId = plan.planFile;
-    const home = path.dirname(this.store.databasePath);
     const taskIdsByItemId: Record<string, string> = {};
     const registrations: StagedTaskRegistration[] = [];
     const items: PlanItemRecord[] = [];
 
-    plan.items.forEach((item, itemIndex) => {
+    workItems.forEach((item, itemIndex) => {
       const taskId = randomUUID();
       const effectivePolicy = this.resolveEffectivePolicy(item.task);
       taskIdsByItemId[item.id] = taskId;
@@ -1371,6 +1369,7 @@ export class DaemonCoordinator {
             model: item.task.provider.model,
             runtime: item.task.runtime.name,
             sourcePath: item.task.project,
+            ...creationPayloadExtra,
           },
         },
       });
@@ -1382,14 +1381,39 @@ export class DaemonCoordinator {
         taskFile: item.taskFile,
       });
     });
+    return { registrations, items, taskIdsByItemId };
+  }
 
-    const dependencies: DependencyRecord[] = plan.items.flatMap((item) =>
+  /** FlatMap a plan's items into its dependency rows. */
+  private planDependencyRecords(workItems: WorkPlanItem[], planId: string): DependencyRecord[] {
+    return workItems.flatMap((item) =>
       item.dependsOn.map((dependsOnItemId) => ({
         planId,
         itemId: item.id,
         dependsOnItemId,
       })),
     );
+  }
+
+  /** Build the exact existing Plan registration graph from one validated load.
+   *  Shared by ordinary Plan submission and confirmed outcome-intake creation so
+   *  both paths produce identical Task records, events, items, and dependency
+   *  rows. Never mutates or queues by itself. */
+  private preparePlanRegistration(
+    plan: WorkPlan,
+    createdAt: string,
+  ): {
+    registrations: StagedTaskRegistration[];
+    items: PlanItemRecord[];
+    dependencies: DependencyRecord[];
+    planRecord: PlanRecord;
+    taskIdsByItemId: Record<string, string>;
+  } {
+    const planId = plan.planFile;
+    const home = path.dirname(this.store.databasePath);
+    const { registrations, items, taskIdsByItemId } =
+      this.stagePlanItems(plan.items, planId, home, createdAt);
+    const dependencies: DependencyRecord[] = this.planDependencyRecords(plan.items, planId);
     const planRecord: PlanRecord = {
       id: planId,
       name: plan.name,
@@ -1478,51 +1502,16 @@ export class DaemonCoordinator {
 
     for (const phase of loaded.phases) {
       const planId = phase.plan.planFile;
-      const taskIdsByItemId: Record<string, string> = {};
-      const registrations: StagedTaskRegistration[] = [];
-      const items: PlanItemRecord[] = [];
-
-      phase.plan.items.forEach((item, itemIndex) => {
-        const taskId = randomUUID();
-        const effectivePolicy = this.resolveEffectivePolicy(item.task);
-        taskIdsByItemId[item.id] = taskId;
-        registrations.push({
-          task: buildTaskRecord({
-            spec: item.task,
-            taskFile: item.taskFile,
-            home,
-            id: taskId,
-            sessionId: randomUUID(),
-            createdAt,
-            ...(effectivePolicy === undefined ? {} : { effectivePolicy }),
-          }),
-          creationEvent: {
-            summary: `Task created: ${item.task.name}`,
-            payload: {
-              provider: item.task.provider.name,
-              model: item.task.provider.model,
-              runtime: item.task.runtime.name,
-              sourcePath: item.task.project,
-              goalFile: loaded.goalFile,
-            },
-          },
-        });
-        items.push({
-          id: item.id,
-          planId,
-          taskId,
-          itemIndex,
-          taskFile: item.taskFile,
-        });
-      });
-
-      const dependencies: DependencyRecord[] = phase.plan.items.flatMap((item) =>
-        item.dependsOn.map((dependsOnItemId) => ({
-          planId,
-          itemId: item.id,
-          dependsOnItemId,
-        })),
+      const { registrations, items, taskIdsByItemId } = this.stagePlanItems(
+        phase.plan.items,
+        planId,
+        home,
+        createdAt,
+        { goalFile: loaded.goalFile },
       );
+
+      const dependencies: DependencyRecord[] =
+        this.planDependencyRecords(phase.plan.items, planId);
       const planRecord: PlanRecord = {
         id: planId,
         name: phase.plan.name,

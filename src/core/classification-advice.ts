@@ -25,6 +25,7 @@
 import { isTerminalTaskStatus } from "./task-progress.js";
 import { isReviewGraphReviewerTaskFile } from "./task.js";
 import type { TaskRecord } from "./types.js";
+import { deepFreeze } from "./immutability.js";
 
 /** Closed state of one parsed classification label against eligible history. */
 export type ClassificationLabelState = "missing" | "new" | "existing";
@@ -140,16 +141,6 @@ function compareStableNames(left: string, right: string): number {
 
 /** Freeze every object and array in the result graph so no caller can mutate a
  *  shared detached projection. The input history is never mutated. */
-function deepFreeze<T>(value: T): T {
-  if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
-    Object.freeze(value);
-    for (const key of Object.keys(value)) {
-      deepFreeze((value as Record<string, unknown>)[key]);
-    }
-  }
-  return value;
-}
-
 /**
  * Canonical pure projection. Read-only and side-effect free: fresh detached,
  * deeply frozen objects on every call, deterministic ordering, and no reference

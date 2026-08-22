@@ -12,7 +12,7 @@ import {
 
 export type ProviderName = "deepseek" | "qwen" | "minimax" | "glm" | "volcengine" | "xai" | "openai";
 
-export interface ProviderDefinition {
+interface ProviderDefinition {
   name: ProviderName;
   defaultModel: string;
   defaultEndpoint: string;
@@ -258,7 +258,7 @@ export interface ProviderAuthInspector {
   hasLocalCodexSignIn?(): boolean;
 }
 
-export interface ProviderLaunchAuthentication {
+interface ProviderLaunchAuthentication {
   ready: boolean;
   authMode: "api-key" | "local-sign-in" | "none";
   failureCategory?: "authentication";

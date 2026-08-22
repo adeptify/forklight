@@ -16,17 +16,9 @@ import type { StateStore } from "../state/store.js";
 import type { PricingCurrency } from "./pricing.js";
 import type { OrchestrationExchangeReceipt } from "./token-efficiency.js";
 import type { DirectCodexProfilePublication } from "./direct-codex-calibration.js";
-import type { BoundedEstimate } from "./pricing-calculator.js";
+import { deepFreeze } from "./immutability.js";
 
 // --- Immutability helpers ---
-
-function freezeDeep(v: unknown): void {
-  if (v !== null && typeof v === "object" && !Object.isFrozen(v)) {
-    if (Array.isArray(v)) { for (const e of v) freezeDeep(e); }
-    else { for (const e of Object.values(v)) freezeDeep(e); }
-    Object.freeze(v);
-  }
-}
 
 // --- Public types ---
 
@@ -85,7 +77,7 @@ export interface UnavailableOfficialEntry {
   readonly reason: string;
 }
 
-export interface UnavailableOfficialSection {
+interface UnavailableOfficialSection {
   readonly unavailableCount: number;
   /** Every Attempt without a quoted official cost, in ordinal order. */
   readonly entries: readonly UnavailableOfficialEntry[];
@@ -93,14 +85,7 @@ export interface UnavailableOfficialSection {
   readonly breakdown: Readonly<Record<string, number>>;
 }
 
-export interface OfficialCostRangeEntry {
-  readonly attemptId: string;
-  readonly ordinal: number;
-  /** Bounded estimate from the per-request-usage-required unavailable result. */
-  readonly boundedEstimate: BoundedEstimate;
-}
-
-export interface OfficialCostRangeCurrencyTotal {
+interface OfficialCostRangeCurrencyTotal {
   readonly currency: PricingCurrency;
   /** Additive lower bound across all ranged Attempts in this currency. */
   readonly min: number;
@@ -112,7 +97,7 @@ export interface OfficialCostRangeCurrencyTotal {
   readonly sources: readonly string[];
 }
 
-export interface OfficialCostSection {
+interface OfficialCostSection {
   /** Native-currency totals — one entry per currency sorted by currency
    *  code.  Never contains a cross-currency grand total. */
   readonly totals: readonly OfficialCostCurrencyTotals[];
@@ -335,6 +320,6 @@ export function getTaskEconomicsReport(
     tokenReport,
   };
 
-  freezeDeep(report);
+  deepFreeze(report);
   return report;
 }
